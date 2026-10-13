@@ -112,6 +112,8 @@ public final class ApiServer {
     private final RateLimiter tileLimiter = new RateLimiter();
     /** Extra health figures from the plugin, such as failing tasks and disk writes. */
     private volatile java.util.function.Consumer<JsonObject> healthExtras = o -> { };
+    /** The timeline routes, or null before the plugin hands them over. */
+    private volatile dev.ryvrook.atlas.timeline.TimelineRoutes timeline;
     /** Bind retry state, see startWithRetry. Guarded by this. */
     private java.util.concurrent.ScheduledFuture<?> retryTask;
     private int retryAttempts;
@@ -124,6 +126,11 @@ public final class ApiServer {
         this.atlas = atlas;
         this.logger = logger;
         atlas.sse().setWorldGate((v, w) -> !worldHidden(v, w));
+    }
+
+    /** Hands over the timeline routes under api/timeline. */
+    public void setTimeline(dev.ryvrook.atlas.timeline.TimelineRoutes routes) {
+        timeline = routes;
     }
 
     /** Lets the plugin add its own figures, such as failing tasks and disk writes, to the admin health answer. */
@@ -635,7 +642,8 @@ public final class ApiServer {
         if (!path.startsWith("/api/") || "OPTIONS".equals(ex.getRequestMethod())) {
             return 0;
         }
-        boolean tile = path.startsWith("/api/tiles/") || path.startsWith("/api/marker-icons/");
+        boolean tile = path.startsWith("/api/tiles/") || path.startsWith("/api/marker-icons/")
+                || (path.startsWith("/api/timeline/") && path.contains("/tiles/"));
         AtlasConfig cfg = atlas.config();
         int limit = tile ? cfg.tileRequestsPerMinute() : cfg.apiRequestsPerMinute();
         if (limit <= 0) {
@@ -769,6 +777,25 @@ public final class ApiServer {
                 json(ex, routed.status(), body);
                 return;
             }
+            Atlas.ApiResult marker = atlas.markerRoutes().handle(method, String.join("/", parts), viewer, query);
+            if (marker != null) {
+                json(ex, marker.status(), marker.body());
+                return;
+            }
+            dev.ryvrook.atlas.timeline.TimelineRoutes tl = timeline;
+            if ("timeline".equals(head) && tl != null) {
+                if (dev.ryvrook.atlas.timeline.TimelineRoutes.isTile(parts)) {
+                    handleTimelineTile(ex, tl, viewer, parts);
+                } else {
+                    Atlas.ApiResult r = tl.handle(viewer, parts, query);
+                    if (r == null) {
+                        error(ex, 404, "Not found.");
+                    } else {
+                        json(ex, r.status(), r.body());
+                    }
+                }
+                return;
+            }
             switch (head) {
                 case "health" -> {
                     ex.getResponseHeaders().set("X-Atlas-Instance", instanceId);
@@ -866,25 +893,23 @@ public final class ApiServer {
     }
 
     /** Endpoints whose second path part names a world. */
-    private static final java.util.Set<String> WORLD_IN_PATH = java.util.Set.of("tiles", "markers", "territories", "points", "changes", "heat");
+    private static final java.util.Set<String> WORLD_IN_PATH = java.util.Set.of("tiles", "markers", "territories", "points", "changes", "heat",
+            "timeline");
     /** Endpoints that take a world query parameter. */
     private static final java.util.Set<String> WORLD_IN_QUERY = java.util.Set.of("players", "worldevents", "events");
 
     /**
-     * True when the world is a portal or instance world that this viewer may not see, which is any
-     * non admin while showPortalWorlds is false. The world picker hides the same worlds.
+     * True when the world is one this viewer may not see, by the one rule in Atlas.hiddenWorld (a world
+     * disabled in atlas.json, a hidden world, or a portal or instance world while showPortalWorlds is
+     * off). The world picker hides the same worlds.
      */
     private boolean worldHidden(Viewer v, String world) {
-        if (world == null || v.admin() || atlas.config().showPortalWorlds) {
-            return false;
-        }
-        LiveState.WorldInfo info = atlas.live().worlds().get(world);
-        return info != null && info.kind() != null && info.kind().transientWorld();
+        return atlas.hiddenWorld(v, world);
     }
 
     /** Removes rows of hidden worlds from a list in the payload. The viewer's own row stays. */
     private void dropHiddenWorldRows(Viewer v, JsonObject payload, String key) {
-        if (v.admin() || atlas.config().showPortalWorlds || payload == null || !payload.has(key) || !payload.get(key).isJsonArray()) {
+        if (payload == null || !payload.has(key) || !payload.get(key).isJsonArray()) {
             return;
         }
         com.google.gson.JsonArray kept = new com.google.gson.JsonArray();
@@ -1053,6 +1078,38 @@ public final class ApiServer {
         }
         h.set("Content-Type", "image/png");
         send(ex, 200, r.png(), isHead(ex));
+    }
+
+    /**
+     * GET api/timeline/{world}/{date}/tiles/{zoom}/{x}/{z}.png, a tile as it was on that day. Past
+     * days never change and are cached for a year, today's may be taken again and are cached for
+     * five minutes. A tile that did not exist that day answers 404 without a body, like live tiles.
+     */
+    private void handleTimelineTile(HttpExchange ex, dev.ryvrook.atlas.timeline.TimelineRoutes tl, Viewer viewer,
+                                    List<String> parts) throws IOException {
+        Object answer = tl.tile(viewer, parts);
+        if (answer instanceof Atlas.ApiResult r) {
+            json(ex, r.status(), r.body());
+            return;
+        }
+        dev.ryvrook.atlas.timeline.TimelineRoutes.Tile t = (dev.ryvrook.atlas.timeline.TimelineRoutes.Tile) answer;
+        Headers h = ex.getResponseHeaders();
+        cors(h);
+        h.set("X-Content-Type-Options", "nosniff");
+        if (t.status() != 200 || t.png() == null) {
+            h.set("Cache-Control", t.past() ? "public, max-age=86400" : "public, max-age=60");
+            ex.sendResponseHeaders(404, -1);
+            return;
+        }
+        h.set("Cache-Control", t.past() ? "public, max-age=31536000, immutable" : "public, max-age=300");
+        h.set("ETag", t.etag());
+        String match = ex.getRequestHeaders().getFirst("If-None-Match");
+        if (match != null && etagMatches(match, t.etag())) {
+            ex.sendResponseHeaders(304, -1);
+            return;
+        }
+        h.set("Content-Type", "image/png");
+        send(ex, 200, t.png(), isHead(ex));
     }
 
     /** The strong ETag of a tile, as the tile service made it from the PNG bytes, or one made here. */

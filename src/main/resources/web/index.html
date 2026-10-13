@@ -71,6 +71,11 @@
   <symbol id="i-logout" viewBox="0 0 24 24"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></symbol>
   <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
   <symbol id="i-cross" viewBox="0 0 24 24"><path d="M12 4v5M12 15v5M4 12h5M15 12h5"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6"/><path d="M3 4v4h4M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+  <symbol id="i-next" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+  <symbol id="i-layer" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></symbol>
 </svg>
 
 <header id="bar">
@@ -117,18 +122,37 @@
       <button class="icon-btn" id="findme-btn" aria-label="Find me" title="Find me (f)"><svg class="ic"><use href="#i-locate"/></svg></button>
       <button class="icon-btn" id="measure-btn" aria-label="Measure distance" title="Measure distance" aria-pressed="false"><svg class="ic"><use href="#i-ruler"/></svg></button>
       <button class="icon-btn" id="share-btn" aria-label="Copy a link to this view" title="Copy a link to this view"><svg class="ic"><use href="#i-share"/></svg></button>
+      <button class="icon-btn" id="timeline-btn" aria-label="Timeline" title="Timeline" aria-pressed="false" aria-controls="tl-bar" hidden><svg class="ic"><use href="#i-history"/></svg></button>
     </div>
     <div id="layers-pop" class="popover layers-pop" hidden></div>
   </div>
   <div id="hud">
     <div id="toasts" role="status" aria-live="polite"></div>
     <div id="hint" class="hint-card" role="note" hidden></div>
+    <div id="tl-chip" class="hud-chip tl-chip" role="status" hidden></div>
     <div id="follow-chip" class="hud-chip" hidden></div>
     <div id="measure-chip" class="hud-chip" hidden></div>
     <div id="coords" class="hud-chip mono" aria-live="off"></div>
   </div>
   <div id="ctxmenu" class="popover ctx" role="dialog" aria-label="Location" hidden></div>
 </main>
+
+<div id="tl-bar" class="tl-bar" role="region" aria-label="Timeline" hidden>
+  <button class="icon-btn" id="tl-play" aria-label="Play the timeline" title="Play (space)"><svg class="ic"><use href="#i-play"/></svg></button>
+  <div class="tl-track">
+    <canvas id="tl-strip" aria-hidden="true"></canvas>
+    <input type="range" id="tl-range" min="0" max="0" step="1" value="0" aria-label="Day on the timeline">
+    <div class="tl-ends" aria-hidden="true"><span id="tl-first"></span><span>Live</span></div>
+  </div>
+  <div class="tl-side">
+    <span id="tl-label" class="tl-label">Live</span>
+    <select id="tl-speed" aria-label="Playback speed" title="Playback speed">
+      <option value="500">0.5 s a day</option><option value="1000">1 s a day</option><option value="2000">2 s a day</option>
+    </select>
+    <button class="icon-btn" id="tl-changed" aria-label="Tint the tiles that changed that day" title="Tint the tiles that changed that day" aria-pressed="false"><svg class="ic"><use href="#i-diamond"/></svg></button>
+    <button class="icon-btn" id="tl-close" aria-label="Close the timeline" title="Close the timeline"><svg class="ic"><use href="#i-close"/></svg></button>
+  </div>
+</div>
 
 <aside id="panel" aria-label="Side panel">
   <div class="sheet-handle" id="sheet-handle">
@@ -157,6 +181,7 @@
 <script src="core.js"></script>
 <script src="map.js"></script>
 <script src="panel.js"></script>
+<script src="timeline.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

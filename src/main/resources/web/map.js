@@ -39,6 +39,50 @@
   terrain.on("tileload", (e) => { e.tile.style.visibility = ""; });
   const blank = L.layerGroup();
 
+  // The tiles of one day on the timeline, with the same geometry as the live tiles. state.tlTiles names the
+  // snapshot whose tiles are shown. A past day never changes, so the browser keeps its tiles for a year.
+  const dayUrl = (date, c) => "api/timeline/" + encodeURIComponent(state.world || "") + "/" + encodeURIComponent(date || "") + "/tiles/" + geo.lToZ(c.z) + "/" + c.x + "/" + c.y + ".png";
+  const DayTiles = L.TileLayer.extend({ getTileUrl: function (c) { return dayUrl(state.tlTiles, c); } });
+  const dayTerrain = A.dayTerrain = new DayTiles("", {
+    tileSize: 256, minZoom: -5, maxZoom: 2, minNativeZoom: -5, maxNativeZoom: -1, noWrap: true, keepBuffer: 3,
+    updateWhenZooming: false, className: "atlas-tiles day-tiles"
+  });
+  // A tile that did not exist that day answers 404 and stays empty.
+  dayTerrain.on("tileerror", (e) => { e.tile.style.visibility = "hidden"; });
+  dayTerrain.on("tileload", (e) => { e.tile.style.visibility = ""; });
+  // Moving to another day swaps each tile on screen once its new image has loaded, so the map never flashes
+  // empty while the timeline plays. A late answer for a day that is no longer shown is ignored.
+  let swapSeq = 0;
+  A.swapDayTiles = () => {
+    const had = map.hasLayer(dayTerrain);
+    A.applyOverlays();
+    if (!had || !map.hasLayer(dayTerrain)) return;
+    const seq = ++swapSeq;
+    for (const key in dayTerrain._tiles) {
+      const t = dayTerrain._tiles[key];
+      const url = dayTerrain.getTileUrl(t.coords);
+      if (t.el._day === url) continue;
+      t.el._day = url;
+      const im = new Image();
+      im.onload = () => { if (seq === swapSeq) { t.el.src = url; t.el.style.visibility = ""; } };
+      im.onerror = () => { if (seq === swapSeq) t.el.style.visibility = "hidden"; };
+      im.src = url;
+    }
+  };
+  dayTerrain.on("tileloadstart", (e) => { e.tile._day = dayTerrain.getTileUrl(e.coords); });
+  // Warms the browser cache with the tiles on screen for the day that plays next.
+  A.preloadDay = (date) => {
+    if (!date || !map.hasLayer(dayTerrain)) return;
+    for (const key in dayTerrain._tiles) { const im = new Image(); im.src = dayUrl(date, dayTerrain._tiles[key].coords); }
+  };
+
+  // Panes of their own. The tint of changed tiles sits right above the tiles, the edge of a render limit covers
+  // the tiles and the tint, and the markers of a past day stay at full strength while the live overlays dim.
+  map.createPane("tlChanged").style.zIndex = 250;
+  map.createPane("limitMask").style.zIndex = 300;
+  map.createPane("tlMarks").style.zIndex = 640;
+  A.renderers = { tlChanged: L.svg({ pane: "tlChanged" }), limitMask: L.svg({ pane: "limitMask", padding: 0.5 }) };
+
   // Applies the tile geometry from api/worlds. The Leaflet zoom of each level comes from its pixels per block,
   // which matches -1 - z for every level the server lists.
   A.initGeometry = (tile) => {
@@ -61,10 +105,14 @@
     geo.maxNative = geo.zToL(minZ);
     geo.minNative = geo.zToL(maxZ);
     geo.maxZoom = geo.maxNative + 3;
-    terrain.options.minNativeZoom = geo.minNative;
-    terrain.options.maxNativeZoom = geo.maxNative;
-    terrain.options.minZoom = geo.minNative;
-    terrain.options.maxZoom = geo.maxZoom;
+    geo.minLevel = minZ;
+    geo.maxLevel = maxZ;
+    for (const t of [terrain, dayTerrain]) {
+      t.options.minNativeZoom = geo.minNative;
+      t.options.maxNativeZoom = geo.maxNative;
+      t.options.minZoom = geo.minNative;
+      t.options.maxZoom = geo.maxZoom;
+    }
     map.setMinZoom(geo.minNative);
     map.setMaxZoom(geo.maxZoom);
     updateOverzoom();
@@ -74,6 +122,8 @@
 
   // A comfortable default zoom, one step out from the sharpest native level.
   A.defaultZoom = () => Math.max(geo.minNative, Math.min(geo.maxNative - 1, -1));
+  // The Atlas zoom level of the tiles on screen. Zoomed in past the sharpest level it stays at that level.
+  A.atlasZoom = () => geo.lToZ(Math.max(geo.minNative, Math.min(geo.maxNative, map.getZoom())));
 
   // ---- overlay groups -----------------------------------------------------
   const groups = A.groups = {
@@ -113,10 +163,12 @@
       }
     }
     const canTerrain = state.layers.terrain !== false;
-    const base = canTerrain && A.store.get("base", "terrain") === "terrain" ? terrain : blank;
-    const other = base === terrain ? blank : terrain;
-    if (map.hasLayer(other)) map.removeLayer(other);
+    // While a past day is shown its tiles take the place of the live ones. A day with no snapshot before it is blank.
+    const wantTerrain = canTerrain && A.store.get("base", "terrain") === "terrain";
+    const base = !wantTerrain ? blank : state.tlDate ? (state.tlTiles ? dayTerrain : blank) : terrain;
+    for (const l of [terrain, dayTerrain, blank]) if (l !== base && map.hasLayer(l)) map.removeLayer(l);
     if (!map.hasLayer(base)) base.addTo(map);
+    A.applyMarkerLayers();
     A.setNight();
     if (!$("layers-pop").hidden) renderLayersPop();
   };
@@ -127,7 +179,7 @@
     const w = A.currentWorld();
     let night = 0;
     // Off unless the viewer turns it on. Full colour from hour 7 to 18, easing to the darkest point at midnight.
-    if (A.store.get("tint", false) && w && w.time && w.time.hour != null && map.hasLayer(terrain)) {
+    if (A.store.get("tint", false) && w && w.time && w.time.hour != null && map.hasLayer(terrain) && !state.tlDate) {
       const h = (Number(w.time.hour) + (w.time.minute ? w.time.minute / 60 : 0)) % 24;
       const fromDay = h >= 18 ? h - 18 : h < 7 ? h + 6 : 0;
       const span = 6, back = 7;
@@ -179,6 +231,8 @@
   const alpha = (hex, a) => /^#[0-9a-fA-F]{6}$/.test(hex) ? hex + a : hex;
   const tip = (m, html, o) => m.bindTooltip(html, Object.assign({ className: "card", direction: "top", offset: [0, -14] }, o || {}));
   const kindHidden = (k) => state.hiddenKinds.has(k);
+  A.symIcon = symIcon;
+  A.tip = tip;
 
   // Every marker carries an accessible name, its label and kind, on the element Leaflet creates for it. Leaflet
   // makes a new element on setIcon, so the label is set again each time. A marker that is not a tab stop is an image.
@@ -248,7 +302,7 @@
     });
   }
   function playerCard(p) {
-    const title = esc(p.name) + (p.faction ? " " + A.facChip(p.faction, p.color, true) : "") + (p.self ? " <span class='badge accent'>you</span>" : "") + (p.hidden ? " <span class='badge bad'>hidden</span>" : "");
+    const title = esc(p.name) + (p.faction ? " " + A.facChip(p.faction, p.color, true) : "") + (p.self ? " <span class='badge accent'>you</span>" : "") + (p.hidden || p.hiddenReason ? " <span class='badge bad'>" + esc(A.hiddenText(p)) + "</span>" : "");
     const sub = p.health != null ? "Health " + num(p.health) + (p.maxHealth != null ? " of " + num(p.maxHealth) : "") : "Player";
     const extra = p.faction && A.layerOn("factions") ? "<div class='tc-hint'>Click to open the faction</div>" : "";
     return card(title, sub, { x: p.x, y: p.y, z: p.z }, extra);
@@ -258,10 +312,16 @@
   const playerLabel = (p) => (p.name || "Player") + ", player" + (p.faction ? " of " + p.faction : "") + (p.self ? ", you" : "");
 
   const placed = (p) => p.x != null && p.z != null && !Number.isNaN(Number(p.x)) && !Number.isNaN(Number(p.z));
+  // Why an admin sees a player as hidden. Anything other than the known reasons is a plugin's own word.
+  A.hiddenText = (p) => {
+    const r = p && p.hiddenReason != null ? String(p.hiddenReason) : "";
+    const why = r === "list" ? "hide list" : r === "dominion" ? "factions flag" : A.pretty(r).toLowerCase();
+    return "hidden" + (why ? ", " + why : "");
+  };
   function ensureMarker(s, now) {
     const p = s.data;
     // Players below hideBelowY come without a position and are listed without a marker.
-    if (p.world !== state.world || !placed(p)) {
+    if (p.world !== state.world || !placed(p) || !A.inLimit(p.x, p.z)) {
       if (s.marker) { groups.players.removeLayer(s.marker); s.marker = null; }
       return;
     }
@@ -288,7 +348,7 @@
       ensureMarker(s, now);
     } else {
       const moved = s.data.x !== p.x || s.data.z !== p.z;
-      const worldChanged = s.data.world !== p.world || placed(s.data) !== placed(p);
+      const worldChanged = s.data.world !== p.world || placed(s.data) !== placed(p) || (placed(p) && A.inLimit(s.data.x, s.data.z) !== A.inLimit(p.x, p.z));
       if (s.marker && !worldChanged) {
         if (moved) { s.from = currentPos(s, now); s.to = { x: p.x, z: p.z }; s.t0 = now; }
       } else {
@@ -599,13 +659,50 @@
   // dashed line keeps it readable on any terrain. Only the line itself answers the pointer, never the inside.
   A.worldBorder = () => {
     const w = A.currentWorld();
-    const b = w && w.border && typeof w.border === "object" ? w.border : null;
-    if (!b || String(b.shape || "circle").toLowerCase() !== "circle") return null;
+    return circleOf(w && w.border);
+  };
+  // ---- render limit -------------------------------------------------------
+  // A world may be drawn only inside a circle from atlas.json. Tiles outside it answer 404, the outside is
+  // covered in the map background, the edge is a faint circle, and nothing Atlas draws is placed beyond it.
+  const circleOf = (b) => {
+    if (!b || typeof b !== "object" || String(b.shape || "circle").toLowerCase() !== "circle") return null;
     const x = Number(b.x), z = Number(b.z), r = Number(b.radius);
     return isFinite(x) && isFinite(z) && isFinite(r) && r > 0 ? { x, z, r } : null;
   };
+  let limitNow = null, limitSig = "";
+  const limitGroup = L.layerGroup().addTo(map);
+  A.renderLimit = () => limitNow;
+  A.inLimit = (x, z) => {
+    if (!limitNow) return true;
+    const dx = Number(x) - limitNow.x, dz = Number(z) - limitNow.z;
+    return dx * dx + dz * dz <= limitNow.r * limitNow.r;
+  };
+  function drawLimit() {
+    const w = A.currentWorld();
+    const l = circleOf(w && w.renderLimit);
+    const sig = l ? [state.world, l.x, l.z, l.r].join("|") : "";
+    if (sig === limitSig) return false;
+    limitSig = sig;
+    limitNow = l;
+    limitGroup.clearLayers();
+    map.setMaxBounds(null);
+    if (!l) return true;
+    const ring = [];
+    for (let i = 0; i < 160; i++) { const a = i / 160 * Math.PI * 2; ring.push(toLatLng(l.x + Math.cos(a) * l.r, l.z + Math.sin(a) * l.r)); }
+    const far = 1e7;
+    const outer = [toLatLng(-far, -far), toLatLng(far, -far), toLatLng(far, far), toLatLng(-far, far)];
+    limitGroup.addLayer(L.polygon([outer, ring], { renderer: A.renderers.limitMask, stroke: false, fillOpacity: 1, interactive: false, className: "render-limit-mask" }));
+    const edge = L.circle(toLatLng(l.x, l.z), { radius: l.r, weight: 1.5, opacity: 1, fill: false, dashArray: "3 6", className: "render-limit" });
+    edge.bindTooltip(card("Edge of the map", "This world is drawn up to " + A.int(l.r) + " blocks from its centre"), { sticky: true, className: "card" });
+    limitGroup.addLayer(edge);
+    // The view may wander a little past the edge, never far into the empty outside.
+    map.setMaxBounds(L.latLngBounds(toLatLng(l.x - l.r * 1.6, l.z - l.r * 1.6), toLatLng(l.x + l.r * 1.6, l.z + l.r * 1.6)));
+    return true;
+  }
+
   let borderSig = "";
   A.drawBorder = () => {
+    if (drawLimit()) { drawMarkers(); drawPoints(); A.syncPlayerMarkers(); A.drawMarkerLayers(); }
     const b = A.worldBorder();
     const sig = b ? [state.world, b.x, b.z, b.r].join("|") : "";
     if (sig === borderSig) return;
@@ -657,7 +754,7 @@
     groups.zones.clearLayers();
     for (const p of d.points || []) {
       const kind = String(p.kind || "").toLowerCase();
-      if (kindHidden("point:" + kind)) continue;
+      if (kindHidden("point:" + kind) || !A.inLimit(p.x, p.z)) continue;
       const ek = EVENT_KIND[kind];
       if (ek) { groups.points.addLayer(eventPoint(p, ek)); continue; }
       const k = POINT_KIND[kind] || ["pin", "#6d7680", A.pretty(p.kind || "Point")];
@@ -762,7 +859,7 @@
     markerRefs.clear();
     for (const mk of state.markers) {
       const lk = A.markerLook(mk);
-      if (kindHidden("marker:" + lk.kind)) continue;
+      if (kindHidden("marker:" + lk.kind) || !A.inLimit(mk.x, mk.z)) continue;
       const pulseColor = lk.alert ? alpha(col(lk.alert.tint, "#dc4632"), "99") : null;
       const label = lk.title + ", " + (lk.kind === "shared" && lk.by ? "shared marker by " + lk.by : MARKER_KIND[lk.kind].sub.toLowerCase());
       const m = marker(toLatLng(mk.x, mk.z), { icon: symIcon(lk.sym, lk.color, { size: lk.size, img: lk.img, own: lk.own, ring: lk.ring, pulse: !!lk.alert, pulseColor }), zIndexOffset: lk.z, title: "", label });
@@ -793,6 +890,159 @@
     }, 380);
   };
 
+  // ---- marker layers --------------------------------------------------------
+  // Layers from other plugins, the markers folder and /atlas marker, read from api/layers. Each layer is one
+  // group with its own switch in the layers popover, remembered per layer id. Higher priority draws on top.
+  const mlayers = A.mlayers = new Map();
+  const layerVis = A.store.get("layerVis", {});
+  A.mlayerWanted = (def) => layerVis[def.id] != null ? !!layerVis[def.id] : !def.defaultHidden;
+  A.mlayerZoomOk = (def) => {
+    const z = A.atlasZoom();
+    return (def.minZoom == null || z >= Number(def.minZoom)) && (def.maxZoom == null || z <= Number(def.maxZoom));
+  };
+  A.markerLayers = () => Array.from(mlayers.values()).map((r) => r.def).sort((a, b) => (Number(b.priority) || 0) - (Number(a.priority) || 0) || String(a.id).localeCompare(String(b.id)));
+  const fin = (n) => n != null && n !== "" && isFinite(Number(n));
+  // An inline icon is only ever a small base64 image. It is used as the src of an img element and never put
+  // into the page as markup, so an SVG inside it cannot run anything.
+  const DATA_IMG = /^data:image\/(?:png|gif|jpeg|webp|svg\+xml);base64,[A-Za-z0-9+/]+=*$/;
+  const inlineIcon = (s) => typeof s === "string" && s.length <= 12000 && DATA_IMG.test(s) ? s : null;
+  // A fill colour with its own alpha is used as written, a plain one is laid on lightly.
+  const fillOf = (m, tint) => {
+    const f = /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?([0-9a-fA-F]{2})?$/.test(String(m.fill || "")) ? String(m.fill) : "";
+    return f ? { c: f, o: f.length === 9 ? 1 : 0.3 } : { c: tint, o: 0.18 };
+  };
+  // Where a layer marker sits, for the Markers tab and for Show. A circle by its centre, a shape by its first point.
+  A.layerMarkerAt = (m) => {
+    if (m.kind === "point" || m.kind === "circle") return fin(m.x) && fin(m.z) ? { x: Number(m.x), z: Number(m.z) } : null;
+    const p = Array.isArray(m.points) ? m.points.find((q) => Array.isArray(q) && fin(q[0]) && fin(q[1])) : null;
+    return p ? { x: Number(p[0]), z: Number(p[1]) } : null;
+  };
+  const MKIND = { point: "Place", polyline: "Line", polygon: "Area", circle: "Circle" };
+  function layerItem(def, m) {
+    const tint = col(m.tint, "#4a8ea4");
+    const name = m.label ? String(m.label) : MKIND[m.kind] || "Marker";
+    const sub = esc(def.label || def.id) + (m.kind !== "point" ? ", " + esc((MKIND[m.kind] || "shape").toLowerCase()) : "");
+    const hint = m.popup ? "<div class='tc-hint'>Click for details</div>" : "";
+    const weight = fin(m.weight) ? Math.max(0.5, Math.min(12, Number(m.weight))) : null;
+    let it = null;
+    if (m.kind === "point") {
+      if (!fin(m.x) || !fin(m.z) || !A.inLimit(m.x, m.z)) return null;
+      const img = inlineIcon(m.iconData) || (m.icon ? A.gameIcon(m.icon) : null);
+      it = marker(toLatLng(Number(m.x), Number(m.z)), {
+        icon: symIcon(m.icon ? A.engineIcon(m.icon) : "pin", tint, { img }), zIndexOffset: 100 + (Number(def.priority) || 0), title: "",
+        label: name + ", " + (def.label || "map layer")
+      });
+      tip(it, card(esc(name), sub, { x: m.x, y: m.y, z: m.z }, hint));
+    } else if (m.kind === "circle") {
+      if (!fin(m.x) || !fin(m.z) || !fin(m.radius) || Number(m.radius) <= 0) return null;
+      const f = fillOf(m, tint);
+      it = L.circle(toLatLng(Number(m.x), Number(m.z)), { radius: Number(m.radius), color: tint, weight: weight || 2, fillColor: f.c, fillOpacity: f.o });
+      it.bindTooltip(card(esc(name), sub + ", radius " + A.int(m.radius) + " blocks", { x: m.x, z: m.z }, hint), { sticky: true, className: "card" });
+    } else if (m.kind === "polyline" || m.kind === "polygon") {
+      const pts = (Array.isArray(m.points) ? m.points : []).filter((q) => Array.isArray(q) && fin(q[0]) && fin(q[1])).map((q) => toLatLng(Number(q[0]), Number(q[1])));
+      if (pts.length < (m.kind === "polygon" ? 3 : 2)) return null;
+      if (m.kind === "polyline") it = L.polyline(pts, { color: tint, weight: weight || 3, opacity: 0.95, lineJoin: "round", lineCap: "round" });
+      else { const f = fillOf(m, tint); it = L.polygon(pts, { color: tint, weight: weight || 2, fillColor: f.c, fillOpacity: f.o }); }
+      it.bindTooltip(card(esc(name), sub, null, hint), { sticky: true, className: "card" });
+    }
+    // The popup is html the server prepared, with text from untrusted sources already escaped.
+    if (it && m.popup) it.bindPopup(String(m.popup), { className: "atlas-popup", maxWidth: 300, autoPanPadding: [24, 24] });
+    return it;
+  }
+  function buildLayer(def) {
+    const rec = { def, group: L.layerGroup(), points: [], items: new Map() };
+    for (const m of Array.isArray(def.markers) ? def.markers : []) {
+      if (!m || !m.kind) continue;
+      const it = layerItem(def, m);
+      if (!it) continue;
+      rec.items.set(String(m.id), it);
+      if (m.kind === "point") rec.points.push(it); else rec.group.addLayer(it);
+    }
+    return rec;
+  }
+  // A layer with more points than this keeps only the points near the view, like the engine markers.
+  function cullLayer(rec) {
+    const many = rec.points.length > CULL_OVER;
+    const b = many ? map.getBounds().pad(0.5) : null;
+    for (const m of rec.points) {
+      const inside = !many || b.contains(m.getLatLng());
+      const on = rec.group.hasLayer(m);
+      if (inside && !on) rec.group.addLayer(m);
+      else if (!inside && on && !(m.isTooltipOpen && m.isTooltipOpen()) && !(m.isPopupOpen && m.isPopupOpen())) rec.group.removeLayer(m);
+    }
+  }
+  // Groups are added lowest priority first, so a higher layer's shapes are drawn over a lower one's.
+  A.applyMarkerLayers = () => {
+    const ok = A.layerOn("layers");
+    const defs = A.markerLayers().reverse();
+    for (const def of defs) { const rec = mlayers.get(def.id); if (map.hasLayer(rec.group)) map.removeLayer(rec.group); }
+    for (const def of defs) {
+      const rec = mlayers.get(def.id);
+      if (ok && A.mlayerWanted(def) && A.mlayerZoomOk(def)) { cullLayer(rec); rec.group.addTo(map); }
+    }
+  };
+  A.drawMarkerLayers = () => {
+    for (const [id, rec] of Array.from(mlayers)) mlayers.set(id, buildLayer(rec.def));
+    A.applyMarkerLayers();
+  };
+  A.setMarkerLayer = (id, on) => {
+    layerVis[id] = !!on;
+    A.store.set("layerVis", layerVis);
+    A.applyMarkerLayers();
+  };
+  map.on("zoomend", () => { if (mlayers.size) { A.applyMarkerLayers(); if (!$("layers-pop").hidden) renderLayersPop(); } });
+  map.on("moveend", () => { for (const rec of mlayers.values()) if (rec.points.length > CULL_OVER && map.hasLayer(rec.group)) cullLayer(rec); });
+  A.on("markerIcons", () => { if (mlayers.size) A.drawMarkerLayers(); });
+  function clearMarkerLayers() {
+    for (const rec of mlayers.values()) map.removeLayer(rec.group);
+    mlayers.clear();
+  }
+  // A layers event names the layers that changed, and only those are replaced. Names that arrive while a request
+  // is running are kept for the next answer, so no change is lost. A full load replaces every layer.
+  let layersSeq = 0;
+  let layersWant = new Set();
+  let layersAll = false;
+  A.loadLayers = (only) => {
+    const world = state.world;
+    if (!world || !A.layerOn("layers")) { clearMarkerLayers(); A.emit("mlayers"); return Promise.resolve(); }
+    if (Array.isArray(only)) for (const id of only) layersWant.add(String(id)); else layersAll = true;
+    const seq = ++layersSeq;
+    return A.api("api/layers/" + A.W()).then((d) => {
+      if (seq !== layersSeq || world !== state.world) return;
+      const got = new Map((d && Array.isArray(d.layers) ? d.layers : []).filter((l) => l && l.id != null).map((l) => [String(l.id), Object.assign({}, l, { id: String(l.id) })]));
+      const ids = layersAll ? new Set([...mlayers.keys(), ...got.keys()]) : layersWant;
+      layersWant = new Set();
+      layersAll = false;
+      for (const id of ids) {
+        const old = mlayers.get(id);
+        if (old) { map.removeLayer(old.group); mlayers.delete(id); }
+        if (got.has(id)) mlayers.set(id, buildLayer(got.get(id)));
+      }
+      A.applyMarkerLayers();
+      A.emit("mlayers");
+      if (!$("layers-pop").hidden) renderLayersPop();
+    }).catch((e) => {
+      if (seq !== layersSeq) return;
+      // 403 means no layer is visible to this viewer and 404 that the world is gone. Both leave nothing drawn.
+      if (e.status === 403 || e.status === 404) { clearMarkerLayers(); layersWant = new Set(); layersAll = false; A.emit("mlayers"); }
+    });
+  };
+  // Pans to a layer marker and opens its popup, or its card when it has none. A switched off layer still shows the card.
+  A.showLayerMarker = (layerId, markerId) => {
+    const rec = mlayers.get(layerId);
+    const m = rec && (rec.def.markers || []).find((x) => String(x.id) === String(markerId));
+    const at = m && A.layerMarkerAt(m);
+    if (!at) { A.toast("That marker is no longer on the map"); return; }
+    map.setView(toLatLng(at.x, at.z), Math.max(map.getZoom(), geo.maxNative - 1));
+    setTimeout(() => {
+      const it = rec.items.get(String(m.id));
+      if (it && map.hasLayer(it)) { if (m.popup) it.openPopup(); else it.openTooltip(toLatLng(at.x, at.z)); return; }
+      const t = L.tooltip({ className: "card", direction: "top", offset: [0, -4] }).setLatLng(toLatLng(at.x, at.z))
+        .setContent(card(esc(m.label || MKIND[m.kind] || "Marker"), esc(rec.def.label || rec.def.id), at) + "<div class='tc-hint'>This layer is switched off or not shown at this zoom</div>").addTo(map);
+      setTimeout(() => map.once("click movestart", () => t.remove()), 0);
+    }, 380);
+  };
+
   // ---- world events -------------------------------------------------------
   A.loadWorldEvents = () => {
     if (!A.layerOn("worldevents")) { state.worldEvents = []; drawWorldEvents(); return Promise.resolve(); }
@@ -814,7 +1064,7 @@
   function drawWorldEvents() {
     groups.worldevents.clearLayers();
     for (const e of state.worldEvents) {
-      if (e.world !== state.world || !located(e)) continue;
+      if (e.world !== state.world || !located(e) || !A.inLimit(e.x, e.z)) continue;
       const m = marker(toLatLng(e.x, e.z), { icon: symIcon(A.engineIcon(e.name) === "pin" ? "bolt" : A.engineIcon(e.name), "#b4532a", { size: "big", pulse: true, pulseColor: "rgba(233,150,70,.6)" }), zIndexOffset: 800, label: (e.displayName || A.pretty(e.name)) + ", world event" });
       tip(m, card(esc(e.displayName || A.pretty(e.name)), "World event" + (e.startedAt ? ", open since " + esc(A.clock(e.startedAt)) : ""), { x: e.x, z: e.z }), { offset: [0, -18] });
       groups.worldevents.addLayer(m);
@@ -911,14 +1161,17 @@
 
   // ---- view and URL -------------------------------------------------------
   A.viewTo = (x, z, zoom, animate) => map.setView(toLatLng(x, z), zoom == null ? map.getZoom() : zoom, { animate: animate !== false });
+  // A link made while a past day is shown opens that day, with t set to its date.
   A.urlFor = (x, z, zoom) => {
     const q = new URLSearchParams({ world: state.world || "", x: String(Math.round(x)), z: String(Math.round(z)), zoom: String(zoom) });
+    if (state.tlDate) q.set("t", state.tlDate);
     return location.origin + location.pathname + "?" + q.toString();
   };
   A.saveUrl = () => {
     if (!state.world) return;
     const c = fromLatLng(map.getCenter());
     const q = new URLSearchParams({ world: state.world, x: String(c.x), z: String(c.z), zoom: String(map.getZoom()) });
+    if (state.tlDate) q.set("t", state.tlDate);
     try { history.replaceState(null, "", "?" + q.toString() + location.hash); } catch (e) { /* some embedded views block it */ }
   };
   map.on("moveend", A.throttle(() => A.saveUrl(), 400));
@@ -1072,7 +1325,7 @@
 
   function renderLayersPop() {
     const canTerrain = state.layers.terrain !== false;
-    const baseIsTerrain = map.hasLayer(terrain);
+    const baseIsTerrain = canTerrain && A.store.get("base", "terrain") === "terrain";
     let h = "<h4>Base map</h4>";
     if (canTerrain) h += "<label class='check'><input type='radio' name='base' value='terrain'" + (baseIsTerrain ? " checked" : "") + "><span class='grow'>Terrain</span></label>";
     h += "<label class='check'><input type='radio' name='base' value='blank'" + (!baseIsTerrain ? " checked" : "") + "><span class='grow'>Blank</span></label>";
@@ -1089,6 +1342,16 @@
       }
     }
     h += "<label class='check'><input type='checkbox' id='tint-toggle'" + (A.store.get("tint", false) ? " checked" : "") + "><span class='grow'>Day and night tint</span></label>";
+    // Marker layers from plugins and files, highest priority first. A layer outside its zoom range says so.
+    const mls = A.layerOn("layers") ? A.markerLayers() : [];
+    if (mls.length) {
+      h += "<h4>Marker layers</h4>";
+      for (const def of mls) {
+        const n = Array.isArray(def.markers) ? def.markers.length : 0;
+        h += "<label class='check'><input type='checkbox' data-ml='" + esc(def.id) + "'" + (A.mlayerWanted(def) ? " checked" : "") + "><span class='grow'>" + esc(def.label || def.id) +
+          (A.mlayerZoomOk(def) ? "" : "<small class='ml-zoom'>Shown at " + (def.minZoom != null && A.atlasZoom() < Number(def.minZoom) ? "a wider" : "a closer") + " zoom</small>") + "</span><span class='badge'>" + num(n, 0) + "</span></label>";
+      }
+    }
     const kinds = kindsPresent();
     if (kinds.length) {
       h += "<h4>Show on the map</h4><div class='chips'>" + kinds.map((k) => "<button class='fchip' data-kind='" + esc(k[0]) + "' aria-pressed='" + (!state.hiddenKinds.has(k[0])) + "'><span class='sw' style='background:" + k[2] + "'></span>" + esc(k[1]) + "</button>").join("") + "</div>";
@@ -1096,6 +1359,7 @@
     pop.innerHTML = h;
     pop.querySelectorAll("input[name='base']").forEach((r) => r.addEventListener("change", () => { A.store.set("base", r.value); A.applyOverlays(); }));
     pop.querySelectorAll("input[data-ov]").forEach((c) => c.addEventListener("change", () => { userOverlays[c.dataset.ov] = c.checked; A.store.set("overlays", userOverlays); A.applyOverlays(); }));
+    pop.querySelectorAll("input[data-ml]").forEach((c) => c.addEventListener("change", () => A.setMarkerLayer(c.dataset.ml, c.checked)));
     const hw = $("heat-window");
     if (hw) {
       hw.addEventListener("change", () => { A.heatWindow = Number(hw.value); A.store.set("heatWindow", A.heatWindow); A.loadHeat(); });

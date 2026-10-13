@@ -473,6 +473,12 @@ public final class TileService {
         deleteTree(dir.resolve(TileKeys.safe(world)));
     }
 
+    /** Drops the tiles of a world in memory and its queued renders, for a world switched off in atlas.json. */
+    public void forgetMemory(String world) {
+        queue.purge(world);
+        clearWorld(world);
+    }
+
     /** Deletes the tile folder of a world that is not loaded, by world name. */
     public void deleteDiskWorld(String world) {
         if (!worlds.containsKey(world)) {
@@ -733,9 +739,42 @@ public final class TileService {
 
     // ---- requests ----------------------------------------------------------
 
+    /**
+     * False for tiles of a world disabled in atlas.json and for tiles that lie wholly outside the
+     * world's renderLimit circle. Such tiles are neither rendered nor served.
+     */
+    public boolean allowed(String world, int zoom, int tx, int tz) {
+        AtlasConfig c = cfg();
+        if (c == null) {
+            return true;
+        }
+        if (!c.worldEnabled(world)) {
+            return false;
+        }
+        AtlasConfig.RenderLimit limit = c.world(world).renderLimit;
+        if (limit == null) {
+            return true;
+        }
+        long span = (long) TileKeys.chunksPerTile(zoom) * 32;
+        double minX = tx * span;
+        double minZ = tz * span;
+        return limit.touches(minX, minZ, minX + span - 1, minZ + span - 1);
+    }
+
+    /** True when the world is not disabled in atlas.json. */
+    private boolean worldOn(String world) {
+        AtlasConfig c = cfg();
+        return c == null || c.worldEnabled(world);
+    }
+
+    /** The folder that holds the world's tiles on disk, whether or not it exists. */
+    public Path diskDir(String world) {
+        return dir.resolve(TileKeys.safe(world));
+    }
+
     public Result get(String worldName, int zoom, int tx, int tz) {
         if (zoom < MIN_ZOOM || zoom > MAX_ZOOM || worldName == null || worldName.isEmpty()
-                || worldName.length() > MAX_WORLD_NAME) {
+                || worldName.length() > MAX_WORLD_NAME || !allowed(worldName, zoom, tx, tz)) {
             return Result.NOT_FOUND;
         }
         lastTileRequest = System.currentTimeMillis();
@@ -845,6 +884,9 @@ public final class TileService {
     }
 
     private Rendered render(World world, WorldTiles wt, int zoom, int tx, int tz, Budget budget) {
+        if (!allowed(wt.name, zoom, tx, tz)) {
+            return null;
+        }
         String key = key(wt.name, zoom, tx, tz);
         ByteLru.Entry cached = memory.get(key);
         long now = System.currentTimeMillis();
@@ -1402,6 +1444,7 @@ public final class TileService {
             return;
         }
         List<World> list = new ArrayList<>(u.getWorlds().values());
+        list.removeIf(w -> !worldOn(w.getName()));
         if (list.isEmpty()) {
             return;
         }
@@ -1455,7 +1498,8 @@ public final class TileService {
                 scanned++;
                 ByteLru.Entry e = memory.get(key(wt.name, t[0], t[1], t[2]));
                 wt.idleCursor++;
-                if ((e == null || e.partial()) && !Files.isRegularFile(file(wt.name, t[0], t[1], t[2]))) {
+                if ((e == null || e.partial()) && allowed(wt.name, t[0], t[1], t[2])
+                        && !Files.isRegularFile(file(wt.name, t[0], t[1], t[2]))) {
                     // Each tile is tried once per scan. A partial result is finished by the
                     // completion queue, and the scan starts over when the index changes.
                     return t;
@@ -1478,6 +1522,9 @@ public final class TileService {
         }
         long now = System.currentTimeMillis();
         for (World world : u.getWorlds().values()) {
+            if (!worldOn(world.getName())) {
+                continue;
+            }
             WorldTiles wt = worldTiles(world);
             runControl("dirty", () -> refreshWorld(world, wt, force, now));
         }

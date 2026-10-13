@@ -9,9 +9,7 @@ import com.hypixel.hytale.server.core.command.system.arguments.system.RequiredAr
 import com.hypixel.hytale.server.core.command.system.arguments.types.ArgTypes;
 import com.hypixel.hytale.server.core.command.system.basecommands.AbstractPlayerCommand;
 import com.hypixel.hytale.server.core.command.system.basecommands.CommandBase;
-import com.hypixel.hytale.server.core.NameMatching;
 import com.hypixel.hytale.server.core.universe.PlayerRef;
-import com.hypixel.hytale.server.core.universe.Universe;
 import com.hypixel.hytale.server.core.universe.world.World;
 import com.hypixel.hytale.server.core.universe.world.storage.EntityStore;
 import dev.ryvrook.atlas.Atlas;
@@ -22,7 +20,7 @@ import dev.ryvrook.atlas.tiles.TileService;
 import java.util.Map;
 import java.util.UUID;
 
-/** /atlas with link, hide, admin, reload, unlink, tiles and render. */
+/** /atlas with link, hide, show, admin, reload, unlink, tiles, render, marker, snapshot and timeline. */
 public final class AtlasCommand extends CommandBase {
     private static final String ACCENT = "#5fb3ff";
     private static final String TEXT = "#c9d4df";
@@ -37,11 +35,15 @@ public final class AtlasCommand extends CommandBase {
         addAliases("webmap");
         addSubCommand(new Link(plugin));
         addSubCommand(new Hide(plugin));
+        addSubCommand(new StaffCommands.ShowSelf(plugin));
         addSubCommand(new Admin(plugin));
         addSubCommand(new Reload(plugin));
         addSubCommand(new Unlink(plugin));
         addSubCommand(new Tiles(plugin));
         addSubCommand(new Render(plugin));
+        addSubCommand(new StaffCommands.Marker(plugin));
+        addSubCommand(new StaffCommands.Snapshot(plugin));
+        addSubCommand(new StaffCommands.Timeline(plugin));
     }
 
     @Override
@@ -57,7 +59,7 @@ public final class AtlasCommand extends CommandBase {
                     Message.raw("Atlas ").color(ACCENT).bold(true),
                     Message.raw("is the live web map. " + noAddress(plugin)).color(TEXT)));
         }
-        context.sendMessage(Message.raw("Use /atlas link to link your browser, /atlas hide to hide from the map, /atlas admin for the address and your access.").color(TEXT));
+        context.sendMessage(Message.raw("Use /atlas link to link your browser, /atlas hide and /atlas show to hide from the map or come back, /atlas admin for the address and your access.").color(TEXT));
     }
 
     /** Said when publicUrl is empty. Never prints the bind address, since 0.0.0.0 is no use to a player. */
@@ -100,9 +102,10 @@ public final class AtlasCommand extends CommandBase {
         private final AtlasPlugin plugin;
 
         Hide(AtlasPlugin plugin) {
-            super("hide", "Hide or show yourself on the web map.");
+            super("hide", "Hide or show yourself on the web map, or hide a player when you are staff.");
             this.plugin = plugin;
             requireNoPermission();
+            addUsageVariant(new StaffCommands.SetHidden(plugin, true));
         }
 
         @Override
@@ -207,24 +210,10 @@ public final class AtlasCommand extends CommandBase {
         @Override
         protected void executeSync(CommandContext context) {
             String input = context.get(player).trim();
-            UUID uuid = null;
-            String name = input;
-            try {
-                uuid = UUID.fromString(input);
-            } catch (IllegalArgumentException ignored) {
-                Universe u = Universe.get();
-                PlayerRef ref = u == null ? null : u.getPlayerByUsername(input, NameMatching.EXACT_IGNORE_CASE);
-                if (ref != null) {
-                    uuid = ref.getUuid();
-                    name = ref.getUsername();
-                } else {
-                    // Offline players are found by the name their browser was linked under, then by the last seen list.
-                    uuid = plugin.atlas().links().playerByName(input);
-                    if (uuid == null) {
-                        uuid = plugin.atlas().lastSeen().byName(input);
-                    }
-                }
-            }
+            // Offline players are found by the name their browser was linked under, then by the last seen list.
+            StaffCommands.Target target = StaffCommands.resolve(plugin, input);
+            UUID uuid = target == null ? null : target.uuid();
+            String name = target == null ? input : target.name();
             if (uuid == null) {
                 bad(context, "Atlas knows no player called " + input + ". Use the player UUID instead.");
                 return;

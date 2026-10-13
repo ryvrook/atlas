@@ -13,6 +13,7 @@
     factions: { label: "Factions", icon: "shield" },
     nations: { label: "Nations", icon: "globe" },
     activity: { label: "Activity", icon: "activity" },
+    timeline: { label: "Timeline", icon: "history" },
     chat: { label: "Chat", icon: "chat" },
     leaderboard: { label: "Leaderboard", icon: "trophy" },
     stats: { label: "Stats", icon: "stats" },
@@ -28,10 +29,11 @@
     players: () => A.layerOn("players"),
     // Shown while the viewer may see markers and there is something to list or the viewer could have their own.
     // While it is the open tab it stays, so a list that empties shows its empty state instead of vanishing.
-    markers: () => A.layerOn("markers") && (A.hasOwnKinds() || state.markers.some(listable) || state.tab === "markers"),
+    markers: () => (A.layerOn("markers") && (A.hasOwnKinds() || state.markers.some(listable) || state.tab === "markers")) || (A.layerOn("layers") && !!A.mlayers && A.mlayers.size > 0),
     factions: () => A.layerOn("factions") && !state.standalone,
     nations: () => A.layerOn("nations") && !state.standalone && !!(state.nations && state.nations.length),
     activity: () => SOURCES.some((s) => s.ok()),
+    timeline: () => A.layerOn("timeline") && !!A.renderTimeline,
     chat: () => A.layerOn("chat"),
     leaderboard: () => A.layerOn("leaderboard"),
     stats: () => A.layerOn("stats"),
@@ -158,6 +160,7 @@
       case "factions": return renderFactions(live);
       case "nations": return renderNations(live);
       case "activity": return renderActivity();
+      case "timeline": return A.renderTimeline(body, live);
       case "chat": return renderChat();
       case "leaderboard": return renderLeaderboard(live);
       case "stats": return renderStats(live);
@@ -168,9 +171,9 @@
   // Live data re-renders only the tab that shows it.
   A.renderIf = (...tabs) => { if (!state.detail && tabs.includes(state.tab)) A.render(); };
 
-  const emptyState = (icon, lead, text) => "<div class='empty'>" + A.icon(icon) + "<p class='lead'>" + esc(lead) + "</p>" + (text ? "<p>" + esc(text) + "</p>" : "") + "</div>";
-  const loading = () => "<div class='skeleton' style='width:60%'></div><div class='skeleton'></div><div class='skeleton' style='width:80%'></div>";
-  const head = (title, extra) => "<div class='sec-head'><h2>" + esc(title) + "</h2>" + (extra || "") + "</div>";
+  const emptyState = A.emptyState = (icon, lead, text) => "<div class='empty'>" + A.icon(icon) + "<p class='lead'>" + esc(lead) + "</p>" + (text ? "<p>" + esc(text) + "</p>" : "") + "</div>";
+  const loading = A.loading = () => "<div class='skeleton' style='width:60%'></div><div class='skeleton'></div><div class='skeleton' style='width:80%'></div>";
+  const head = A.head = (title, extra) => "<div class='sec-head'><h2>" + esc(title) + "</h2>" + (extra || "") + "</div>";
   // The empty state for a request that failed. 403 means the layer is private for this viewer, 404 that the thing
   // is not there, 429 that the server asked for a pause, after which the view is drawn again while it is on screen.
   // what is the subject of the lead sentence, such as Factions or The leaderboard, and are its verb.
@@ -244,7 +247,7 @@
       const ring = col(p.color, "var(--border-strong)");
       if (av._ring !== ring) { av.style.borderColor = ring; av._ring = ring; }
       if (av._n !== p.name) { av.innerHTML = initial(p.name); av._n = p.name; }
-      const title = "<b>" + esc(p.name) + "</b> " + (p.faction ? A.facChip(p.faction, p.color, true) : "") + (p.self ? " <span class='badge accent'>you</span>" : "") + (p.hidden ? " <span class='badge bad'>hidden</span>" : "");
+      const title = "<b>" + esc(p.name) + "</b> " + (p.faction ? A.facChip(p.faction, p.color, true) : "") + (p.self ? " <span class='badge accent'>you</span>" : "") + (p.hidden || p.hiddenReason ? " <span class='badge bad'>" + esc(A.hiddenText(p)) + "</span>" : "");
       const t = el.querySelector(".title");
       if (t._h !== title) { t.innerHTML = title; t._h = title; }
       const sub = A.worldLabel(p.world) + (p.x == null || p.z == null ? (p.located === false ? ", position not shared" : ", underground") : " at X " + num(p.x, 0) + " Z " + num(p.z, 0));
@@ -400,7 +403,7 @@
     if (body.dataset.view !== "markers") {
       body.dataset.view = "markers";
       body.innerHTML = head("Markers", "<span class='badge' id='mk-count'></span>") +
-        "<div class='chips' id='mk-chips' style='padding:0 0 10px'></div><div id='mk-msg'></div><div id='mk-list' class='list'></div>";
+        "<div class='chips' id='mk-chips' style='padding:0 0 10px'></div><div id='mk-msg'></div><div id='mk-list' class='list'></div><div id='mk-layers'></div>";
       $("mk-chips").addEventListener("click", (e) => {
         const b = e.target.closest("[data-mk]");
         if (!b) return;
@@ -417,13 +420,47 @@
         A.showMarker(row.dataset.key);
         if (narrow()) A.setPanel(false);
       });
+      $("mk-layers").addEventListener("click", (e) => {
+        const b = e.target.closest("[data-lm]");
+        if (!b) return;
+        const [layer, id] = JSON.parse(b.dataset.lm);
+        A.showLayerMarker(layer, id);
+        if (narrow()) A.setPanel(false);
+      });
     }
     drawMarkerList();
+  }
+  // Layer markers grouped by layer, highest priority first. A long layer lists its first rows and says how many more it holds.
+  const LAYER_ROWS = 60;
+  const LM_KIND = { point: "Place", polyline: "Line", polygon: "Area", circle: "Circle" };
+  function drawLayerLists() {
+    const box = $("mk-layers");
+    if (!box) return;
+    const defs = A.layerOn("layers") && A.markerLayers ? A.markerLayers().filter((d) => Array.isArray(d.markers) && d.markers.length) : [];
+    let h = "";
+    for (const def of defs) {
+      const rows = def.markers.filter((m) => m && A.layerMarkerAt(m));
+      if (!rows.length) continue;
+      const off = !A.mlayerWanted(def);
+      h += "<h3 class='sub'>" + A.icon("layer", "xs") + esc(def.label || def.id) + " <span class='badge'>" + num(rows.length, 0) + "</span>" + (off ? "<span class='badge'>switched off</span>" : "") + "</h3>";
+      h += rows.slice(0, LAYER_ROWS).map((m) => {
+        const at = A.layerMarkerAt(m);
+        const label = m.label ? String(m.label) : LM_KIND[m.kind] || "Marker";
+        const c = A.col(m.tint, "#4a8ea4");
+        return "<div class='row mk-row'><span class='sym mini' aria-hidden='true' style='background:" + c + ";color:" + A.inkOn(c) + "'>" + A.icon(m.kind === "point" ? (m.icon ? A.engineIcon(m.icon) : "pin") : m.kind === "circle" ? "target" : m.kind === "polyline" ? "ruler" : "diamond") + "</span>" +
+          "<div class='grow'><div class='title'>" + esc(label) + "</div><div class='sub'><span>" + esc(LM_KIND[m.kind] || "Marker") + "</span><span class='mk-xyz'>" + esc(A.xyzText(at.x, null, at.z)) + "</span></div></div>" +
+          "<button class='btn small' data-lm='" + esc(JSON.stringify([def.id, String(m.id)])) + "' aria-label='" + esc("Show " + label + " on the map") + "'>" + A.icon("locate", "sm") + "Show</button></div>";
+      }).join("");
+      if (rows.length > LAYER_ROWS) h += "<p class='muted' style='font-size:13px'>" + esc("And " + A.plural(rows.length - LAYER_ROWS, "more marker") + " on the map.") + "</p>";
+    }
+    if (box._h !== h) { box.innerHTML = h; box._h = h; }
   }
   function drawMarkerList() {
     const box = $("mk-list");
     if (!box || body.dataset.view !== "markers" || state.detail) return;
-    const all = state.markers.filter(listable);
+    drawLayerLists();
+    const all = A.layerOn("markers") ? state.markers.filter(listable) : [];
+    const layered = !!$("mk-layers").innerHTML;
     const kindOf = (m) => A.markerKind(m);
     const mine = A.hasOwnKinds();
     const present = MK_FILTERS.filter(([k]) => (mine || !A.OWN_KINDS.has(k)) && all.some((m) => kindOf(m) === k));
@@ -438,7 +475,8 @@
     $("mk-count").textContent = all.length ? String(all.length) : "";
 
     let m = "";
-    if (!all.length) m = emptyState("pin", "No player markers yet", "Markers that players place on the shared map in game show up here." + (mine ? " Your own markers, homes and deaths show up here too, for you alone." : ""));
+    if (!all.length && (layered || !A.layerOn("markers"))) m = "";
+    else if (!all.length) m = emptyState("pin", "No player markers yet", "Markers that players place on the shared map in game show up here." + (mine ? " Your own markers, homes and deaths show up here too, for you alone." : ""));
     else if (!list.length) m = "<p class='muted'>Every kind is switched off above.</p>";
     else if (mine && all.some((x) => A.OWN_KINDS.has(kindOf(x)))) m = "<p class='muted mk-note'>" + A.icon("eye", "xs") + "Your own markers, homes and deaths are shown to you alone.</p>";
     const msg = $("mk-msg");
@@ -446,6 +484,7 @@
     A.keyed(box, list, markerRowSpec, drawMarkerList);
   }
   A.on("markers", () => { A.buildTabs(); if (state.tab === "markers") drawMarkerList(); });
+  A.on("mlayers", () => { A.buildTabs(); if (state.tab === "markers") drawMarkerList(); });
   A.on("markerIcons", () => { if (state.tab === "markers") drawMarkerList(); });
 
   // ---- factions -----------------------------------------------------------
@@ -854,7 +893,8 @@
   const LAYER_NAMES = {
     terrain: "Terrain", territories: "Territories", players: "Players", points: "Points", zones: "Zone names", heat: "Activity heat",
     paths: "Player paths", chat: "Chat", factions: "Factions", stats: "Stats", feed: "Faction feed", events: "Server events",
-    nations: "Nations", markers: "Map markers", worldevents: "World events", kills: "Kills and deaths", leaderboard: "Leaderboard", lastSeen: "Last seen"
+    nations: "Nations", markers: "Map markers", worldevents: "World events", kills: "Kills and deaths", leaderboard: "Leaderboard", lastSeen: "Last seen",
+    layers: "Marker layers", timeline: "Timeline"
   };
   // Layers that only mean something with faction data are left out of the readout on a standalone server.
   const FACTION_LAYERS = new Set(["territories", "factions", "nations"]);

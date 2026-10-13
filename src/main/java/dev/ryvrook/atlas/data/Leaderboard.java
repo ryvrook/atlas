@@ -9,6 +9,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * Reads the leaderboard file Feats exports. Atlas never links against Feats, it watches the file's
@@ -23,6 +30,19 @@ public final class Leaderboard {
     private volatile String lastError;
     /** True while a read failure has been logged and no good read has followed. */
     private boolean errorLogged;
+    /** Told about each unlock, milestone and first that is new since the previous read, for the timeline. */
+    private volatile Consumer<FeatEvent> events = e -> { };
+
+    /**
+     * One new Feats event. kind is feats.unlock, feats.milestone or feats.first. uuid and name are the real
+     * player, or null when the record names nobody. featName falls back to the feat id.
+     */
+    public record FeatEvent(String kind, long at, UUID uuid, String name, String feat, String featName, String tier) {
+    }
+
+    public void onEvent(Consumer<FeatEvent> listener) {
+        events = listener == null ? e -> { } : listener;
+    }
 
     public Leaderboard(Path path) {
         this.path = path;
@@ -83,7 +103,18 @@ public final class Leaderboard {
             lastModified = mod;
             lastSize = size;
             JsonObject o = parsed.getAsJsonObject();
+            JsonObject before = root;
             root = o;
+            if (before != null) {
+                // The first read only sets the baseline, so a restart does not replay old unlocks.
+                for (FeatEvent e : diff(before, o)) {
+                    try {
+                        events.accept(e);
+                    } catch (RuntimeException ignored) {
+                        // The timeline must never break the leaderboard.
+                    }
+                }
+            }
             updatedAt = (long) Json.num(o, "updatedAt", mod.toMillis());
             lastError = null;
             errorLogged = false;
@@ -93,6 +124,74 @@ public final class Leaderboard {
             fail(p, e.getClass().getSimpleName() + " " + e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * The unlocks, milestones and firsts in next that were not in before. Unlocks count as new when they
+     * are newer than every unlock before held, or as new as the newest and not listed before. Milestones
+     * and firsts count as new when their feat is new or its time changed.
+     */
+    public static List<FeatEvent> diff(JsonObject before, JsonObject next) {
+        List<FeatEvent> out = new ArrayList<>();
+        long newest = Long.MIN_VALUE;
+        Set<String> seen = new HashSet<>();
+        for (JsonElement e : Json.arr(before, "recent")) {
+            if (e.isJsonObject()) {
+                Long at = Payloads.time(e.getAsJsonObject(), "at");
+                if (at != null) {
+                    newest = Math.max(newest, at);
+                    seen.add(unlockKey(e.getAsJsonObject(), at));
+                }
+            }
+        }
+        for (JsonElement e : Json.arr(next, "recent")) {
+            if (!e.isJsonObject()) {
+                continue;
+            }
+            JsonObject r = e.getAsJsonObject();
+            Long at = Payloads.time(r, "at");
+            String feat = Payloads.text(r, "feat");
+            if (at == null || feat == null || at < newest || seen.contains(unlockKey(r, at))) {
+                continue;
+            }
+            out.add(new FeatEvent("feats.unlock", at, Payloads.uuid(Payloads.text(r, "uuid")), Payloads.text(r, "name"),
+                    feat, nameOr(Payloads.text(r, "featName"), feat), Payloads.text(r, "tier")));
+        }
+        records(out, "feats.milestone", Json.obj(before, "milestones"), Json.obj(next, "milestones"));
+        records(out, "feats.first", Json.obj(before, "firsts"), Json.obj(next, "firsts"));
+        out.sort((a, b) -> Long.compare(a.at(), b.at()));
+        return out;
+    }
+
+    private static void records(List<FeatEvent> out, String kind, JsonObject before, JsonObject next) {
+        if (next == null) {
+            return;
+        }
+        for (Map.Entry<String, JsonElement> e : next.entrySet()) {
+            if (!e.getValue().isJsonObject()) {
+                continue;
+            }
+            JsonObject r = e.getValue().getAsJsonObject();
+            Long at = Payloads.time(r, "at");
+            if (at == null) {
+                continue;
+            }
+            JsonObject prev = before == null ? null : Json.obj(before, e.getKey());
+            Long prevAt = prev == null ? null : Payloads.time(prev, "at");
+            if (prevAt != null && prevAt.equals(at)) {
+                continue;
+            }
+            out.add(new FeatEvent(kind, at, Payloads.uuid(Payloads.text(r, "by")), Payloads.text(r, "byName"), e.getKey(),
+                    nameOr(Payloads.text(r, "featName"), e.getKey()), Payloads.text(r, "tier")));
+        }
+    }
+
+    private static String unlockKey(JsonObject r, long at) {
+        return at + "|" + Payloads.text(r, "uuid") + "|" + Payloads.text(r, "feat");
+    }
+
+    private static String nameOr(String a, String b) {
+        return a == null ? b : a;
     }
 
     /** Records a read failure and logs it once until a good read follows. */

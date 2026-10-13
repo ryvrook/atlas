@@ -62,6 +62,10 @@ public final class AtlasConfig {
     public boolean preRenderIdle = true;
     /** Show who placed a player made marker. When false the creator is left out everywhere. */
     public boolean showMarkerAuthors = true;
+    /** Hide a player from non admins while they crouch. */
+    public boolean hidePlayersCrouching = false;
+    /** Hide a player from non admins while they are invisible. */
+    public boolean hidePlayersInvisible = true;
     public int tileCacheMb = 64;
     public String adminToken = "";
     public String dominionSnapshot = "mods/Ryvrook_Dominion/export/snapshot.json";
@@ -75,6 +79,12 @@ public final class AtlasConfig {
      */
     public List<String> trustedProxies = new ArrayList<>();
     public Map<String, String> visibility = defaultVisibility();
+    /** World opened first in the browser. Empty means the server's default world. */
+    public String defaultWorld = "";
+    /** Settings per world, keyed by world name. A world not listed uses the defaults of {@link WorldSettings}. */
+    public Map<String, WorldSettings> worlds = new LinkedHashMap<>();
+    /** Daily snapshots of tiles, stats and events. */
+    public Timeline timeline = new Timeline();
     /** True when load replaced a hand set adminToken that was too short. Never written to the file. */
     public transient boolean adminTokenReplaced;
     /** Keys load added to the file, empty when the file already listed every option. Never written. */
@@ -85,6 +95,99 @@ public final class AtlasConfig {
     public transient List<String> unknownKeys = new ArrayList<>();
     /** Top level keys Atlas does not know, with their values as the owner wrote them. Written back unchanged. */
     transient JsonObject unknownValues = new JsonObject();
+
+    /** The timeline object of atlas.json. */
+    public static final class Timeline {
+        /** Take daily snapshots and keep the event log. */
+        public boolean enabled = true;
+        /** Server local hour of the daily snapshot, 0 to 23. */
+        public int hour = 4;
+        /** Days of snapshots kept. 0 keeps only the newest day. */
+        public int retainDays = 90;
+        /** Disk the timeline may use in MB. 0 means no cap. */
+        public int maxDiskMb = 2048;
+        /** Write the daily event log. */
+        public boolean events = true;
+
+        static final List<String> KEYS = List.of("enabled", "hour", "retainDays", "maxDiskMb", "events");
+    }
+
+    /** One entry of the worlds object of atlas.json. */
+    public static final class WorldSettings {
+        /** False hides the world everywhere. It answers 404 and renders nothing. */
+        public boolean enabled = true;
+        /** Name shown in the browser, null for the name Atlas derives. */
+        public String displayName = null;
+        /** Hide the world from non admins. Null follows showPortalWorlds for portal and instance worlds. */
+        public Boolean hidden = null;
+        /** Only this circle is rendered and served, null for no limit. */
+        public RenderLimit renderLimit = null;
+
+        static final List<String> KEYS = List.of("enabled", "displayName", "hidden", "renderLimit");
+
+        /** True when the block lies inside the render limit or there is none. */
+        public boolean inside(double x, double z) {
+            return renderLimit == null || renderLimit.contains(x, z);
+        }
+    }
+
+    /** A circle in world blocks. */
+    public static final class RenderLimit {
+        public double x;
+        public double z;
+        public double radius;
+
+        public boolean contains(double px, double pz) {
+            double dx = px - x;
+            double dz = pz - z;
+            return dx * dx + dz * dz <= radius * radius;
+        }
+
+        /** True when any part of the square from min to max (inclusive block bounds) lies inside the circle. */
+        public boolean touches(double minX, double minZ, double maxX, double maxZ) {
+            double cx = Math.max(minX, Math.min(x, maxX));
+            double cz = Math.max(minZ, Math.min(z, maxZ));
+            return contains(cx, cz);
+        }
+    }
+
+    private static final WorldSettings DEFAULT_WORLD = new WorldSettings();
+
+    /** Settings of a world, the defaults when it is not listed. Never null. */
+    public WorldSettings world(String name) {
+        WorldSettings w = name == null || worlds == null ? null : worlds.get(name);
+        return w == null ? DEFAULT_WORLD : w;
+    }
+
+    /** False when the worlds object disables this world. */
+    public boolean worldEnabled(String name) {
+        return world(name).enabled;
+    }
+
+    /** Whether daily snapshots and the event log run. */
+    public boolean timelineEnabled() {
+        return timeline.enabled;
+    }
+
+    /** Server local hour of the daily snapshot, 0 to 23. */
+    public int timelineHour() {
+        return timeline.hour;
+    }
+
+    /** Days of snapshots kept, 0 or more. */
+    public int timelineRetainDays() {
+        return timeline.retainDays;
+    }
+
+    /** Disk the timeline may use in MB. 0 means no cap. */
+    public int timelineMaxDiskMb() {
+        return timeline.maxDiskMb;
+    }
+
+    /** Whether the daily event log is written. */
+    public boolean timelineEvents() {
+        return timeline.events;
+    }
 
     /** Thrown when atlas.json cannot be used. The message says why in one line. */
     public static final class InvalidConfigException extends IOException {
@@ -117,6 +220,8 @@ public final class AtlasConfig {
         v.put("kills", "public");
         v.put("leaderboard", "public");
         v.put("lastSeen", "linked");
+        v.put("timeline", "public");
+        v.put("layers", "public");
         return v;
     }
 
@@ -209,6 +314,34 @@ public final class AtlasConfig {
                 continue;
             }
             checkType(f, v);
+            if (f.getName().equals("timeline") && v.isJsonObject()) {
+                for (String k : Timeline.KEYS) {
+                    if (!v.getAsJsonObject().has(k)) {
+                        added.add("timeline." + k);
+                    }
+                }
+                for (String k : v.getAsJsonObject().keySet()) {
+                    if (!Timeline.KEYS.contains(k)) {
+                        cfg.unknownKeys.add("timeline." + k);
+                    }
+                }
+            } else if (f.getName().equals("worlds") && v.isJsonObject()) {
+                for (Map.Entry<String, JsonElement> e : v.getAsJsonObject().entrySet()) {
+                    for (String k : e.getValue().getAsJsonObject().keySet()) {
+                        if (!WorldSettings.KEYS.contains(k)) {
+                            cfg.unknownKeys.add("worlds." + e.getKey() + "." + k);
+                        }
+                    }
+                    JsonElement limit = e.getValue().getAsJsonObject().get("renderLimit");
+                    if (limit != null && limit.isJsonObject()) {
+                        for (String k : limit.getAsJsonObject().keySet()) {
+                            if (!List.of("x", "z", "radius").contains(k)) {
+                                cfg.unknownKeys.add("worlds." + e.getKey() + ".renderLimit." + k);
+                            }
+                        }
+                    }
+                }
+            }
         }
         for (String key : root.keySet()) {
             if (!knownKey(key)) {
@@ -275,6 +408,10 @@ public final class AtlasConfig {
         if (cfg.trustedProxies == null) {
             cfg.trustedProxies = new ArrayList<>();
         }
+        if (cfg.defaultWorld == null) {
+            cfg.defaultWorld = "";
+        }
+        cfg.defaultWorld = cfg.defaultWorld.trim();
         if (cfg.adminToken == null || cfg.adminToken.isBlank()) {
             cfg.adminToken = randomToken();
             if (!added.contains("adminToken")) {
@@ -307,6 +444,30 @@ public final class AtlasConfig {
         nonNegative("tileRequestsPerMinute", tileRequestsPerMinute);
         nonNegative("chunkImagesPerMinute", chunkImagesPerMinute);
         nonNegative("tileMaxAgeHours", tileMaxAgeHours);
+        if (timeline == null) {
+            throw new InvalidConfigException("timeline must be an object");
+        }
+        if (timeline.hour < 0 || timeline.hour > 23) {
+            throw new InvalidConfigException("timeline.hour is " + timeline.hour + " but must be between 0 and 23");
+        }
+        nonNegative("timeline.retainDays", timeline.retainDays);
+        nonNegative("timeline.maxDiskMb", timeline.maxDiskMb);
+        if (worlds == null) {
+            worlds = new LinkedHashMap<>();
+        }
+        for (Map.Entry<String, WorldSettings> e : worlds.entrySet()) {
+            String key = "worlds." + e.getKey();
+            if (e.getKey().isBlank()) {
+                throw new InvalidConfigException("worlds holds an entry with an empty name");
+            }
+            if (e.getValue() == null) {
+                throw new InvalidConfigException(key + " must be an object");
+            }
+            RenderLimit r = e.getValue().renderLimit;
+            if (r != null && !(r.radius > 0 && Double.isFinite(r.radius))) {
+                throw new InvalidConfigException(key + ".renderLimit.radius must be a number above 0");
+            }
+        }
         if (trustedProxies != null) {
             for (String p : trustedProxies) {
                 if (p == null) {
@@ -326,6 +487,47 @@ public final class AtlasConfig {
     private static void checkType(Field f, JsonElement v) throws InvalidConfigException {
         Class<?> t = f.getType();
         String key = f.getName();
+        if (t == Timeline.class) {
+            if (!v.isJsonObject()) {
+                throw wrongType(key, "an object");
+            }
+            JsonObject o = v.getAsJsonObject();
+            checkValue(o, "enabled", "timeline.enabled", boolean.class, false);
+            checkValue(o, "hour", "timeline.hour", int.class, false);
+            checkValue(o, "retainDays", "timeline.retainDays", int.class, false);
+            checkValue(o, "maxDiskMb", "timeline.maxDiskMb", int.class, false);
+            checkValue(o, "events", "timeline.events", boolean.class, false);
+            return;
+        }
+        if (key.equals("worlds")) {
+            if (!v.isJsonObject()) {
+                throw wrongType(key, "an object of world names and settings");
+            }
+            for (Map.Entry<String, JsonElement> e : v.getAsJsonObject().entrySet()) {
+                String wk = "worlds." + e.getKey();
+                if (!e.getValue().isJsonObject()) {
+                    throw wrongType(wk, "an object");
+                }
+                JsonObject o = e.getValue().getAsJsonObject();
+                checkValue(o, "enabled", wk + ".enabled", boolean.class, false);
+                checkValue(o, "displayName", wk + ".displayName", String.class, true);
+                checkValue(o, "hidden", wk + ".hidden", boolean.class, true);
+                JsonElement limit = o.get("renderLimit");
+                if (limit != null && !limit.isJsonNull()) {
+                    if (!limit.isJsonObject()) {
+                        throw wrongType(wk + ".renderLimit", "an object with x, z and radius, or null");
+                    }
+                    JsonObject l = limit.getAsJsonObject();
+                    for (String c : List.of("x", "z", "radius")) {
+                        if (!l.has(c)) {
+                            throw new InvalidConfigException(wk + ".renderLimit needs x, z and radius");
+                        }
+                        checkValue(l, c, wk + ".renderLimit." + c, double.class, false);
+                    }
+                }
+            }
+            return;
+        }
         if (t == String.class) {
             if (!v.isJsonNull() && !(v.isJsonPrimitive() && v.getAsJsonPrimitive().isString())) {
                 throw wrongType(key, "a string");
@@ -364,6 +566,42 @@ public final class AtlasConfig {
                 if (!(level.isJsonPrimitive() && level.getAsJsonPrimitive().isString())) {
                     throw wrongType(key + "." + e.getKey(), "a string");
                 }
+            }
+        }
+    }
+
+    /** Checks one value of a nested object. An absent key is fine, it keeps its default. */
+    private static void checkValue(JsonObject o, String name, String key, Class<?> type, boolean nullable)
+            throws InvalidConfigException {
+        JsonElement v = o.get(name);
+        if (v == null) {
+            return;
+        }
+        if (v.isJsonNull()) {
+            if (nullable) {
+                return;
+            }
+            throw new InvalidConfigException(key + " must not be null");
+        }
+        if (type == boolean.class) {
+            if (!(v.isJsonPrimitive() && v.getAsJsonPrimitive().isBoolean())) {
+                throw wrongType(key, "true or false");
+            }
+        } else if (type == String.class) {
+            if (!(v.isJsonPrimitive() && v.getAsJsonPrimitive().isString())) {
+                throw wrongType(key, "a string");
+            }
+        } else if (type == int.class) {
+            if (!isNumber(v)) {
+                throw wrongType(key, "a whole number");
+            }
+            double d = v.getAsDouble();
+            if (d != Math.rint(d) || d < Integer.MIN_VALUE || d > Integer.MAX_VALUE) {
+                throw wrongType(key, "a whole number");
+            }
+        } else if (type == double.class) {
+            if (!isNumber(v)) {
+                throw wrongType(key, "a number");
             }
         }
     }

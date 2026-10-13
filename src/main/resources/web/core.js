@@ -117,7 +117,9 @@
     players: new Map(), offline: [], playersHidden: false, interval: 1000, lastPlayersAt: 0,
     factions: [], nations: null, territories: null, points: null, markers: [], worldEvents: [],
     feed: [], chat: [], kills: [], timeline: [], leaderboard: null, health: null,
-    follow: null, tileVersions: new Map(), conn: "connecting",
+    follow: null, tileVersions: new Map(), conn: "connecting", defaultWorld: null,
+    // The date picked on the timeline and the snapshot whose tiles show for it. Both are null on the live map.
+    tlDate: null, tlTiles: null,
     hiddenKinds: new Set(A.store.get("hiddenKinds", []))
   };
 

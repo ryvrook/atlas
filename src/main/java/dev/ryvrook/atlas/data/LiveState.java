@@ -3,6 +3,11 @@ package dev.ryvrook.atlas.data;
 import com.hypixel.hytale.component.Ref;
 import com.hypixel.hytale.component.Store;
 import com.hypixel.hytale.math.vector.Transform;
+import com.hypixel.hytale.server.core.asset.type.entityeffect.config.EntityEffect;
+import com.hypixel.hytale.server.core.entity.effect.EffectControllerComponent;
+import com.hypixel.hytale.server.core.entity.movement.MovementStatesComponent;
+import com.hypixel.hytale.server.core.modules.entity.component.HiddenFromAdventurePlayers;
+import com.hypixel.hytale.protocol.MovementStates;
 import com.hypixel.hytale.server.core.modules.entitystats.EntityStatMap;
 import com.hypixel.hytale.server.core.modules.entitystats.EntityStatValue;
 import com.hypixel.hytale.server.core.modules.entitystats.asset.DefaultEntityStatTypes;
@@ -60,11 +65,52 @@ public final class LiveState {
     private final Map<String, WorldInfo> worldInfo = new ConcurrentHashMap<>();
     private final Map<UUID, float[]> health = new ConcurrentHashMap<>();
     private final Map<UUID, Deque<double[]>> trails = new ConcurrentHashMap<>();
+    /** Players read as crouching or invisible on the last world thread read, with which of the two. */
+    private final Map<UUID, String> autoHidden = new ConcurrentHashMap<>();
+    /** Effect indexes already judged, true for effects whose id names invisibility. */
+    private final Map<Integer, Boolean> invisibleEffects = new ConcurrentHashMap<>();
+    private volatile java.util.function.Consumer<PlayerSample> joinListener = p -> { };
+    /** Players of the previous sample, null before the first one, so players online at start are no joins. */
+    private java.util.Set<UUID> lastOnline;
+    private volatile boolean hideCrouching;
+    private volatile boolean hideInvisible;
     private final Map<UUID, String> trailWorld = new ConcurrentHashMap<>();
     private long lastTrailAt;
 
+    /** Sets the automatic hide rules from atlas.json. Takes effect on the next world thread read. */
+    public void setHideRules(boolean crouching, boolean invisible) {
+        hideCrouching = crouching;
+        hideInvisible = invisible;
+        if (!crouching && !invisible) {
+            autoHidden.clear();
+        }
+    }
+
+    /**
+     * crouching or invisible when an automatic hide rule that is switched on applies to the player, read on
+     * the world thread at most two seconds ago, otherwise null.
+     */
+    public String autoHideReason(UUID uuid) {
+        if (uuid == null) {
+            return null;
+        }
+        String r = autoHidden.get(uuid);
+        if (r == null) {
+            return null;
+        }
+        if ("crouching".equals(r) ? hideCrouching : hideInvisible) {
+            return r;
+        }
+        return null;
+    }
+
+    /** Told about each player that appears in a sample after the first one, for the timeline. */
+    public void onJoin(java.util.function.Consumer<PlayerSample> listener) {
+        joinListener = listener == null ? p -> { } : listener;
+    }
+
     /** Samples every online player. Safe to call from the scheduler. */
-    public List<PlayerSample> sample() {
+    public synchronized List<PlayerSample> sample() {
         List<PlayerSample> out = new ArrayList<>();
         Universe universe = Universe.get();
         if (universe == null) {
@@ -96,6 +142,18 @@ public final class LiveState {
         }
         long now = System.currentTimeMillis();
         players = Collections.unmodifiableList(out);
+        java.util.Set<UUID> online = new java.util.HashSet<>(out.size() * 2);
+        for (PlayerSample p : out) {
+            online.add(p.uuid());
+            if (lastOnline != null && !lastOnline.contains(p.uuid())) {
+                try {
+                    joinListener.accept(p);
+                } catch (RuntimeException ignored) {
+                    // The timeline must never break the player sample.
+                }
+            }
+        }
+        lastOnline = online;
         if (now - lastTrailAt >= TRAIL_STEP_MS) {
             lastTrailAt = now;
             recordTrails(out, now);
@@ -123,6 +181,7 @@ public final class LiveState {
             }
         }
         trails.keySet().removeIf(u -> !online.contains(u));
+        autoHidden.keySet().removeIf(u -> !online.contains(u));
         trailWorld.keySet().removeIf(u -> !online.contains(u));
         health.keySet().removeIf(u -> !online.contains(u));
     }
@@ -253,13 +312,25 @@ public final class LiveState {
         if (next == null) {
             return;
         }
-        if (!wantHealth || store == null) {
+        boolean hideRules = hideCrouching || hideInvisible;
+        if ((!wantHealth && !hideRules) || store == null) {
             return;
         }
         for (PlayerRef ref : world.getPlayerRefs()) {
             try {
                 Ref<EntityStore> entity = ref.getReference();
                 if (entity == null || !entity.isValid()) {
+                    continue;
+                }
+                if (hideRules) {
+                    String reason = hideReason(store, entity);
+                    if (reason == null) {
+                        autoHidden.remove(ref.getUuid());
+                    } else {
+                        autoHidden.put(ref.getUuid(), reason);
+                    }
+                }
+                if (!wantHealth) {
                     continue;
                 }
                 EntityStatMap stats = store.getComponent(entity, EntityStatMap.getComponentType());
@@ -274,5 +345,56 @@ public final class LiveState {
                 // Entity removed between scheduling and running.
             }
         }
+    }
+
+    /**
+     * Reads the automatic hide state of one player on the world thread. Crouching comes from the movement
+     * states component. Invisible means the entity carries HiddenFromAdventurePlayers, the engine's own
+     * way to hide an entity from players, or has an active entity effect whose id names invisibility,
+     * which is how plugins add invisibility potions. Three component reads, so it stays cheap.
+     */
+    private String hideReason(Store<EntityStore> store, Ref<EntityStore> entity) {
+        if (hideInvisible) {
+            if (store.getComponent(entity, HiddenFromAdventurePlayers.getComponentType()) != null) {
+                return "invisible";
+            }
+            EffectControllerComponent effects = store.getComponent(entity, EffectControllerComponent.getComponentType());
+            if (effects != null) {
+                int[] active = effects.getActiveEffectIndexes();
+                if (active != null) {
+                    for (int index : active) {
+                        if (invisibleEffect(index)) {
+                            return "invisible";
+                        }
+                    }
+                }
+            }
+        }
+        if (hideCrouching) {
+            MovementStatesComponent move = store.getComponent(entity, MovementStatesComponent.getComponentType());
+            MovementStates states = move == null ? null : move.getMovementStates();
+            if (states != null && (states.crouching || states.forcedCrouching)) {
+                return "crouching";
+            }
+        }
+        return null;
+    }
+
+    private boolean invisibleEffect(int index) {
+        Boolean known = invisibleEffects.get(index);
+        if (known != null) {
+            return known;
+        }
+        boolean invisible = false;
+        try {
+            EntityEffect e = EntityEffect.getAssetMap().getAsset(index);
+            String id = e == null ? null : e.getId();
+            invisible = id != null && id.toLowerCase(java.util.Locale.ROOT).contains("invisib");
+        } catch (RuntimeException ignored) {
+            // Asset map not ready. Judged again on the next read.
+            return false;
+        }
+        invisibleEffects.put(index, invisible);
+        return invisible;
     }
 }

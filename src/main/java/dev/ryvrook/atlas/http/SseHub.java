@@ -64,9 +64,11 @@ public final class SseHub {
     /** Replay bytes kept across every client. Past it ended clients are forgotten, oldest first. */
     static final long REPLAY_BUDGET_BYTES = 32L * 1024 * 1024;
     /** Events that tell the browser to fetch something again. Never dropped from a full queue. */
-    static final Set<String> CONTROL = Set.of("hello", "markers", "tiles", "worlds", "leaderboard", "snapshot");
+    static final Set<String> CONTROL = Set.of("hello", "markers", "tiles", "worlds", "leaderboard", "snapshot",
+            "layers", "timeline");
     /** Events whose payload names a world in a top level world field, checked against the world gate. */
-    static final Set<String> WORLD_SCOPED = Set.of("kill", "feed", "worldevent", "markers", "tiles");
+    static final Set<String> WORLD_SCOPED = Set.of("kill", "feed", "worldevent", "markers", "tiles", "layers",
+            "timeline");
 
     /** Resolves the viewer of a stream again and describes it for the hello event. */
     public interface Identity {
@@ -638,6 +640,25 @@ public final class SseHub {
         Frame frame = new Frame(sequence.incrementAndGet(), frame(event, json), CONTROL.contains(event));
         for (Client c : clients) {
             if (!c.closed && filter.test(c) && (w == null || gate.test(c.viewer, w))) {
+                c.offer(frame);
+            }
+        }
+    }
+
+    /**
+     * Sends the same payload to every open stream whose viewer may see the world. A null world skips
+     * the world gate. Events in CONTROL (layers and timeline among them) are never dropped from a
+     * full queue. The payload must already be safe for every viewer, so it should only tell the
+     * browser what to fetch again, and the fetch applies the viewer's own tier.
+     */
+    public void broadcast(String event, String world, String json) {
+        if (clients.isEmpty() || event == null || json == null) {
+            return;
+        }
+        BiPredicate<Viewer, String> gate = worldGate;
+        Frame frame = new Frame(sequence.incrementAndGet(), frame(event, json), CONTROL.contains(event));
+        for (Client c : clients) {
+            if (!c.closed && (world == null || gate.test(c.viewer, world))) {
                 c.offer(frame);
             }
         }

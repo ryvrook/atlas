@@ -25,8 +25,11 @@ import dev.ryvrook.atlas.data.PersonalMarkers;
 import dev.ryvrook.atlas.http.AtlasVersion;
 import dev.ryvrook.atlas.http.SseHub;
 import dev.ryvrook.atlas.http.TrustedProxies;
+import dev.ryvrook.atlas.markers.MarkerRoutes;
+import dev.ryvrook.atlas.markers.MarkerService;
 import dev.ryvrook.atlas.tiles.ExploredIndex;
 import dev.ryvrook.atlas.tiles.TileService;
+import dev.ryvrook.atlas.timeline.EventLog;
 import dev.ryvrook.atlas.util.Json;
 
 import java.nio.file.Path;
@@ -80,6 +83,9 @@ public final class Atlas {
     private volatile Executor background;
     /** Worlds seen on the last marker poll, with whether each is a portal or instance world. */
     private final Map<String, Boolean> seenWorlds = new ConcurrentHashMap<>();
+    /** Marker layers from the API, the drop folder and the admin commands. */
+    private final MarkerService markers;
+    private final MarkerRoutes markerRoutes;
 
     public Atlas(AtlasConfig config, Path dataDir) {
         this.config = config;
@@ -93,6 +99,13 @@ public final class Atlas {
         this.lastSeen = new LastSeen(dataDir);
         this.leaderboard = new Leaderboard(resolveFeats(config));
         this.mapMod = new MapModSettings(resolveMapMod(config));
+        this.markers = new MarkerService(this, dataDir);
+        this.markerRoutes = new MarkerRoutes(this, markers);
+        live.setHideRules(config.hidePlayersCrouching, config.hidePlayersInvisible);
+        // Timeline events. Names are recorded as they are, the hidden rule is applied when they are served.
+        live.onJoin(p -> EventLog.record(p.world(), System.currentTimeMillis(), "join", null, null, p.name(), p.uuid(),
+                p.name() + " joined the server."));
+        leaderboard.onEvent(this::featEvent);
         engine.onEvents(new EngineData.EventListener() {
             @Override
             public void started(EngineData.ActiveEvent e) {
@@ -141,6 +154,7 @@ public final class Atlas {
         mapMod.setDir(resolveMapMod(cfg));
         tiles.setCacheMb(cfg.tileCacheMb);
         proxies = TrustedProxies.parse(cfg.trustedProxies);
+        live.setHideRules(cfg.hidePlayersCrouching, cfg.hidePlayersInvisible);
         adminCache.clear();
     }
 
@@ -200,6 +214,21 @@ public final class Atlas {
         return personal;
     }
 
+    /** Marker layers from the API, the drop folder and the admin commands. */
+    public MarkerService markers() {
+        return markers;
+    }
+
+    /** The api/layers routes, called by the web server after {@link #route}. */
+    public MarkerRoutes markerRoutes() {
+        return markerRoutes;
+    }
+
+    /** Withdraws the marker API so other plugins run their disable hooks. Called when the plugin stops. */
+    public void shutdown() {
+        markers.stop();
+    }
+
     /** Drops admin permission answers older than the cache time. Runs every ten minutes. */
     public void pruneAdminCache() {
         long now = System.currentTimeMillis();
@@ -256,6 +285,13 @@ public final class Atlas {
     /** Hands Atlas the scheduler, which runs work that must not hold up a world thread. */
     public void useExecutor(Executor executor) {
         this.background = executor;
+        // The plugin hands the scheduler over from start, which is when the marker API goes live.
+        markers.start();
+    }
+
+    /** Runs a task on the Atlas scheduler, or on a fresh virtual thread before the scheduler is known. */
+    public void runLater(Runnable r) {
+        runInBackground(r);
     }
 
     /** Runs a task on the Atlas scheduler, or on a fresh virtual thread before the scheduler is known. */
@@ -500,7 +536,7 @@ public final class Atlas {
         if (uuid == null) {
             return false;
         }
-        if (links.isHidden(uuid)) {
+        if (links.isHidden(uuid) || markers.apiHiddenReason(uuid) != null) {
             return true;
         }
         JsonObject snap = snapshot.view().playerByUuid.get(uuid.toString().toLowerCase(Locale.ROOT));
@@ -514,6 +550,36 @@ public final class Atlas {
             return flag;
         }
         return snapshotHidden.getOrDefault(uuid, Boolean.FALSE);
+    }
+
+    /**
+     * Why a player is hidden, for admins. list for the hide list, the reason another plugin gave through the
+     * API, dominion for the snapshot flag, crouching or invisible for the automatic rules, or null.
+     */
+    public String hiddenReason(UUID uuid) {
+        if (uuid == null) {
+            return null;
+        }
+        if (links.isHidden(uuid)) {
+            return "list";
+        }
+        String plugin = markers.apiHiddenReason(uuid);
+        if (plugin != null) {
+            return plugin;
+        }
+        if (isHiddenPlayer(uuid)) {
+            return "dominion";
+        }
+        return live.autoHideReason(uuid);
+    }
+
+    /** Hides or shows a player for everyone but admins and themself, saved in the hide list. True when it changed. */
+    public boolean setHiddenPlayer(UUID uuid, boolean hidden) {
+        if (uuid == null || links.isHidden(uuid) == hidden) {
+            return false;
+        }
+        links.toggleHidden(uuid);
+        return true;
     }
 
     /** Whether this viewer must not see the player's name or position. Admins and the player themself always may. */
@@ -532,12 +598,18 @@ public final class Atlas {
         }
         boolean self = v.uuid() != null && v.uuid().equals(uuid);
         boolean hidden = isHiddenPlayer(uuid) || Json.bool(snap, "hidden");
+        // Crouching and invisible players are hidden from the players layer only. Their names stay in kills and feeds.
+        String autoHidden = live.autoHideReason(uuid);
         String faction = snap != null ? Json.str(snap, "faction") : view.factionOfPlayer.get(uuidKey);
         if (faction != null && faction.isBlank()) {
             faction = null;
         }
+        if (!self && world != null && !cfg.worldEnabled(world)) {
+            // A world switched off in atlas.json is not on the map for anyone.
+            return null;
+        }
         if (!v.admin() && !self) {
-            if (hidden) {
+            if (hidden || autoHidden != null) {
                 return null;
             }
             if (hiddenWorld(v, world)) {
@@ -581,7 +653,8 @@ public final class Atlas {
         }
         row.addProperty("located", located);
         row.addProperty("underground", underground);
-        Payloads.put(row, "hidden", v.admin() ? (Boolean) hidden : null);
+        Payloads.put(row, "hidden", v.admin() ? (Boolean) (hidden || autoHidden != null) : null);
+        Payloads.put(row, "hiddenReason", v.admin() ? hiddenReason(uuid) : null);
         Payloads.put(row, "faction", faction);
         String color = snap != null ? Payloads.text(snap, "color") : null;
         if (color == null && faction != null) {
@@ -599,13 +672,36 @@ public final class Atlas {
 
     // ---- worlds ------------------------------------------------------------
 
-    /** True when the world is a portal or instance world this viewer may not open. */
+    /**
+     * True when this viewer may not open the world. A world disabled in atlas.json is closed to everyone,
+     * admins included. Otherwise admins open every world, a world with hidden set in atlas.json follows
+     * that flag, and portal and instance worlds are hidden while showPortalWorlds is false.
+     */
     public boolean hiddenWorld(Viewer v, String world) {
-        if (world == null || v.admin() || config.showPortalWorlds) {
+        if (world == null) {
+            return false;
+        }
+        AtlasConfig cfg = config;
+        AtlasConfig.WorldSettings ws = cfg.world(world);
+        if (!ws.enabled) {
+            return true;
+        }
+        if (v.admin()) {
+            return false;
+        }
+        if (ws.hidden != null) {
+            return ws.hidden;
+        }
+        if (cfg.showPortalWorlds) {
             return false;
         }
         LiveState.WorldInfo info = live.worlds().get(world);
         return info != null && info.kind() != null && info.kind().transientWorld();
+    }
+
+    /** True when the engine has the world loaded. Without a running universe, as in tests, every name counts. */
+    public boolean worldExists(String world) {
+        return world != null && worldKnown(world, false);
     }
 
     public JsonObject worldsPayload(Viewer v) {
@@ -613,6 +709,9 @@ public final class Atlas {
         out.addProperty("apiVersion", API_VERSION);
         out.addProperty("title", config.publicTitle);
         out.addProperty("standalone", !snapshot.present());
+        AtlasConfig cfg = config;
+        Payloads.put(out, "defaultWorld", cfg.defaultWorld.isEmpty() || hiddenWorld(v, cfg.defaultWorld)
+                ? null : cfg.defaultWorld);
         out.add("viewer", viewerJson(v));
         out.add("server", serverJson());
         JsonObject tile = new JsonObject();
@@ -640,11 +739,18 @@ public final class Atlas {
             for (World w : u.getWorlds().values()) {
                 JsonObject o = new JsonObject();
                 String name = w.getName();
+                AtlasConfig.WorldSettings ws = cfg.world(name);
+                if (!ws.enabled) {
+                    // Disabled worlds are left out for everyone and answer 404 everywhere.
+                    continue;
+                }
                 o.addProperty("name", name);
                 LiveState.WorldInfo info = live.worlds().get(name);
                 LiveState.WorldKind kind = info == null || info.kind() == null ? LiveState.WorldKind.plain(name) : info.kind();
                 o.addProperty("kind", kind.kind());
-                o.addProperty("displayName", kind.displayName() == null ? name : kind.displayName());
+                String display = ws.displayName != null && !ws.displayName.isBlank() ? ws.displayName.trim()
+                        : kind.displayName() == null ? name : kind.displayName();
+                o.addProperty("displayName", display);
                 o.addProperty("hiddenWorld", hiddenWorld(v, name));
                 o.add("portal", portalJson(kind.portal()));
                 Payloads.put(o, "players", showCounts ? (Number) w.getPlayerCount() : null);
@@ -689,6 +795,16 @@ public final class Atlas {
                     o.add("border", bd);
                 } else {
                     o.add("border", JsonNull.INSTANCE);
+                }
+                if (ws.renderLimit != null) {
+                    JsonObject rl = new JsonObject();
+                    rl.addProperty("shape", "circle");
+                    rl.addProperty("x", ws.renderLimit.x);
+                    rl.addProperty("z", ws.renderLimit.z);
+                    rl.addProperty("radius", ws.renderLimit.radius);
+                    o.add("renderLimit", rl);
+                } else {
+                    o.add("renderLimit", JsonNull.INSTANCE);
                 }
                 worlds.add(o);
             }
@@ -1176,6 +1292,11 @@ public final class Atlas {
         if (line == null) {
             return;
         }
+        if ("dominion".equals(Json.str(line, "source"))) {
+            // Lines Atlas writes are recorded where they happen, with their place and kind.
+            EventLog.record(timelineWorld(Json.str(line, "world")), (long) Json.num(line, "at", System.currentTimeMillis()),
+                    "dominion", null, null, null, Json.str(line, "text"));
+        }
         synchronized (feed) {
             feed.addLast(line);
             while (feed.size() > FEED_KEEP) {
@@ -1541,7 +1662,15 @@ public final class Atlas {
             background = executor;
         }
         forgetRemovedWorlds();
+        markers.poll();
+        // The first read of a world raises no change, so its shared markers are remembered here instead.
+        for (String world : seenWorlds.keySet()) {
+            if (!sharedSeen.containsKey(world) && engine.shared(world) != null) {
+                recordSharedChanges(world);
+            }
+        }
         engine.pollShared(executor, world -> {
+            recordSharedChanges(world);
             JsonObject o = new JsonObject();
             o.addProperty("world", world);
             o.addProperty("own", false);
@@ -1554,6 +1683,40 @@ public final class Atlas {
             sse.broadcastAll("markers", Json.GSON.toJson(o),
                     c -> uuid.equals(personalOwner(c.viewer())) && c.viewer().canSee(config, "markers"));
         });
+    }
+
+    /** Shared markers seen per world at the last change, so the timeline can name what was added or removed. */
+    private final Map<String, Map<String, EngineData.SharedMarker>> sharedSeen = new ConcurrentHashMap<>();
+
+    /** Records shared markers added or removed since the last change of a world. The first look only remembers them. */
+    private void recordSharedChanges(String world) {
+        EngineData.SharedSet set = engine.shared(world);
+        if (set == null) {
+            return;
+        }
+        Map<String, EngineData.SharedMarker> now = new java.util.LinkedHashMap<>();
+        for (EngineData.SharedMarker m : set.markers()) {
+            now.put(m.id(), m);
+        }
+        Map<String, EngineData.SharedMarker> before = sharedSeen.put(world, now);
+        if (before == null) {
+            return;
+        }
+        long at = System.currentTimeMillis();
+        for (EngineData.SharedMarker m : now.values()) {
+            if (!before.containsKey(m.id())) {
+                String who = config.showMarkerAuthors ? m.byName() : null;
+                EventLog.record(world, at, "marker.add", (double) m.x(), (double) m.z(), who,
+                        who == null ? null : m.byUuid(), (who == null ? "A marker was placed" : who + " placed a marker")
+                                + (m.name() == null || m.name().isBlank() ? "." : ", " + m.name() + "."));
+            }
+        }
+        for (EngineData.SharedMarker m : before.values()) {
+            if (!now.containsKey(m.id())) {
+                EventLog.record(world, at, "marker.remove", (double) m.x(), (double) m.z(), null, null,
+                        "A marker was removed" + (m.name() == null || m.name().isBlank() ? "." : ", " + m.name() + "."));
+            }
+        }
     }
 
     /** Compares the loaded worlds with the previous poll and drops the caches of worlds that are gone. */
@@ -1581,11 +1744,13 @@ public final class Atlas {
      */
     public void worldRemoved(String name, boolean transientWorld) {
         seenWorlds.remove(name);
+        sharedSeen.remove(name);
         engine.forgetMarkers(name);
         personal.dropWorld(name);
         live.forget(name);
         if (transientWorld) {
             heat.dropWorld(name);
+            markers.forgetWorld(name);
         }
     }
 
@@ -1644,6 +1809,9 @@ public final class Atlas {
         sse.broadcastAll("worldevent", Json.GSON.toJson(o), c -> c.viewer().canSee(config, "worldevents")
                 && !hiddenWorld(c.viewer(), e.world()));
         String where = worldLabel(e.world());
+        EventLog.record(e.world(), at, "start".equals(state) ? "worldevent.start" : "worldevent.end",
+                e.x() == null ? null : e.x().doubleValue(), e.z() == null ? null : e.z().doubleValue(), null,
+                "start".equals(state) ? e.displayName() + " began." : e.displayName() + " ended.");
         feedLine("worldevent", "start".equals(state)
                 ? e.displayName() + " began in " + where + "."
                 : e.displayName() + " ended in " + where + ".", at, e.world());
@@ -1745,19 +1913,62 @@ public final class Atlas {
         KillLog.Party killer = k.killer();
         if (!victim.player() && victim.boss() && killer != null) {
             feedLine("boss", feedName(killer) + " defeated " + victim.name() + " in " + where + ".", k.at(), k.world());
+            EventLog.record(timelineWorld(k.world()), k.at(), "kill", null, null, killer.name(),
+                    killer.player() ? killer.uuid() : null, killer.name() + " defeated " + victim.name() + ".");
         } else if (victim.player()) {
-            String text;
-            if (killer != null && killer.player()) {
-                text = feedName(victim) + " was slain by " + feedName(killer) + " in " + where + ".";
-            } else if (killer != null) {
-                text = feedName(victim) + " was slain by " + (killer.boss() ? "" : "a ") + killer.name() + " in " + where + ".";
-            } else if (k.cause() != null) {
-                text = feedName(victim) + " died from " + k.cause().replace('_', ' ').toLowerCase(Locale.ROOT) + " in " + where + ".";
-            } else {
-                text = feedName(victim) + " died in " + where + ".";
-            }
-            feedLine("death", text, k.at(), k.world());
+            feedLine("death", deathText(victim, killer, k.cause(), where, true), k.at(), k.world());
+            boolean pvp = killer != null && killer.player();
+            EventLog.record(timelineWorld(k.world()), k.at(), pvp ? "kill" : "death", null, null, victim.name(),
+                    victim.uuid(), deathText(victim, killer, k.cause(), null, false));
         }
+    }
+
+    /** The sentence for a player death. shared means feed text, which names hidden players as A player. */
+    private String deathText(KillLog.Party victim, KillLog.Party killer, String cause, String where, boolean shared) {
+        String v = shared ? feedName(victim) : victim.name();
+        String tail = where == null ? "." : " in " + where + ".";
+        if (killer != null && killer.player()) {
+            return v + " was slain by " + (shared ? feedName(killer) : killer.name()) + tail;
+        } else if (killer != null) {
+            return v + " was slain by " + (killer.boss() ? "" : "a ") + killer.name() + tail;
+        } else if (cause != null) {
+            return v + " died from " + cause.replace('_', ' ').toLowerCase(Locale.ROOT) + tail;
+        }
+        return v + " died" + tail;
+    }
+
+    /** The world a timeline event without one is filed under, the configured default world or the engine's. */
+    private String timelineWorld(String world) {
+        if (world != null && !world.isBlank()) {
+            return world;
+        }
+        if (!config.defaultWorld.isEmpty()) {
+            return config.defaultWorld;
+        }
+        try {
+            Universe u = Universe.get();
+            World d = u == null ? null : u.getDefaultWorld();
+            if (d != null) {
+                return d.getName();
+            }
+        } catch (RuntimeException ignored) {
+            // Universe not ready.
+        }
+        return "default";
+    }
+
+    /** Records a new Feats unlock, milestone or first in the world the player is in. */
+    private void featEvent(Leaderboard.FeatEvent e) {
+        LiveState.PlayerSample p = e.uuid() == null ? null : live.sampleOf(e.uuid());
+        String who = e.name();
+        String tier = e.tier() == null || e.tier().isBlank() ? "" : " " + e.tier().toLowerCase(Locale.ROOT);
+        String text = switch (e.kind()) {
+            case "feats.milestone" -> (who == null ? "A milestone was reached, " : who + " reached the milestone ")
+                    + e.featName() + ".";
+            case "feats.first" -> (who == null ? "Someone" : who) + " was the first to earn " + e.featName() + ".";
+            default -> (who == null ? "A player" : who) + " earned the" + tier + " feat " + e.featName() + ".";
+        };
+        EventLog.record(timelineWorld(p == null ? null : p.world()), e.at(), e.kind(), null, null, who, e.uuid(), text);
     }
 
     /** Feed text is shared by every viewer, so hidden players are always A player there. */
@@ -1782,17 +1993,19 @@ public final class Atlas {
             return;
         }
         lastSeen.record(new LastSeen.Entry(uuid, name, System.currentTimeMillis(), world, x, y, z));
+        EventLog.record(world, System.currentTimeMillis(), "leave", null, null, name, uuid,
+                (name == null ? "A player" : name) + " left the server.");
     }
 
     // ---- routing -------------------------------------------------------------
 
     /** The status and body of one API answer. */
     public record ApiResult(int status, JsonObject body) {
-        static ApiResult ok(JsonObject body) {
+        public static ApiResult ok(JsonObject body) {
             return new ApiResult(200, body);
         }
 
-        static ApiResult error(int status, String message) {
+        public static ApiResult error(int status, String message) {
             return new ApiResult(status, Payloads.error(message));
         }
     }

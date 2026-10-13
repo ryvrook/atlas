@@ -21,6 +21,8 @@ import dev.ryvrook.atlas.http.ApiServer;
 import dev.ryvrook.atlas.systems.BlockActivitySystem;
 import dev.ryvrook.atlas.systems.ChunkSaveSystem;
 import dev.ryvrook.atlas.systems.DeathSystem;
+import dev.ryvrook.atlas.timeline.Timeline;
+import dev.ryvrook.atlas.timeline.TimelineRoutes;
 import dev.ryvrook.atlas.util.Json;
 import org.joml.Vector3d;
 
@@ -55,6 +57,7 @@ public final class AtlasPlugin extends JavaPlugin {
 
     private Atlas atlas;
     private ApiServer server;
+    private volatile Timeline timeline;
     private volatile ScheduledThreadPoolExecutor scheduler;
     private final List<ScheduledFuture<?>> tasks = new ArrayList<>();
     private ScheduledFuture<?> playerTask;
@@ -88,6 +91,11 @@ public final class AtlasPlugin extends JavaPlugin {
         return server;
     }
 
+    /** The timeline, or null before setup. */
+    public Timeline timeline() {
+        return timeline;
+    }
+
     @Override
     protected void setup() {
         AtlasConfig cfg;
@@ -112,11 +120,19 @@ public final class AtlasPlugin extends JavaPlugin {
         server = new ApiServer(atlas, getLogger());
         server.setHealthExtras(this::healthExtras);
         server.setOtherMapMods(this::otherMapMods);
+        timeline = new Timeline(atlas, getDataDirectory(), getLogger());
+        server.setTimeline(new TimelineRoutes(atlas, this::timeline));
 
         getCommandRegistry().registerCommand(new AtlasCommand(this));
         getEntityStoreRegistry().registerSystem(BlockActivitySystem.breaks(atlas.heat()));
         getEntityStoreRegistry().registerSystem(BlockActivitySystem.places(atlas.heat()));
-        getEntityStoreRegistry().registerSystem(new DeathSystem(atlas::addKill));
+        getEntityStoreRegistry().registerSystem(new DeathSystem(k -> {
+            atlas.addKill(k);
+            Timeline t = timeline;
+            if (t != null) {
+                t.death(k);
+            }
+        }));
         getChunkStoreRegistry().registerSystem(new ChunkSaveSystem(atlas.tiles()));
         getEventRegistry().registerAsyncGlobal(PlayerChatEvent.class, future -> future.thenApply(this::onChat));
         getEventRegistry().registerGlobal(PlayerDisconnectEvent.class, this::onDisconnect);
@@ -165,6 +181,7 @@ public final class AtlasPlugin extends JavaPlugin {
         pollMapMod();
         atlas.seedFeed();
         atlas.leaderboard().poll();
+        timeline.start(ex);
         if (configError == null) {
             server.startWithRetry(ex);
             warnPublicUrl();
@@ -211,10 +228,14 @@ public final class AtlasPlugin extends JavaPlugin {
         if (ex != null) {
             ex.shutdownNow();
         }
+        if (timeline != null) {
+            timeline.stop();
+        }
         if (server != null) {
             server.stop();
         }
         if (atlas != null) {
+            atlas.shutdown();
             atlas.tiles().shutdown();
             saveQuietly();
         }
@@ -714,7 +735,9 @@ public final class AtlasPlugin extends JavaPlugin {
         }
         configError = null;
         warnConfig(next);
+        AtlasConfig before = atlas.config();
         atlas.setConfig(next);
+        applyWorldSettings(before, next);
         warnRejectedProxies();
         pollSnapshot();
         pollMapMod();
@@ -728,6 +751,41 @@ public final class AtlasPlugin extends JavaPlugin {
         }
         warnPublicUrl();
         return problem;
+    }
+
+    /**
+     * Applies changed per world settings after a reload. A world that was switched off drops its tiles in
+     * memory and its queued renders, its tiles on disk stay so switching it on again brings it back. Open
+     * browsers are told to fetch the world list again when any world setting changed.
+     */
+    private void applyWorldSettings(AtlasConfig before, AtlasConfig next) {
+        if (before == null) {
+            return;
+        }
+        Set<String> names = new java.util.TreeSet<>(next.worlds.keySet());
+        names.addAll(before.worlds.keySet());
+        boolean changed = !before.defaultWorld.equals(next.defaultWorld);
+        for (String name : names) {
+            AtlasConfig.WorldSettings a = before.world(name);
+            AtlasConfig.WorldSettings b = next.world(name);
+            if (a.enabled && !b.enabled) {
+                atlas.tiles().forgetMemory(name);
+            }
+            changed |= a.enabled != b.enabled || !java.util.Objects.equals(a.hidden, b.hidden)
+                    || !java.util.Objects.equals(a.displayName, b.displayName) || !sameLimit(a.renderLimit, b.renderLimit);
+        }
+        if (changed) {
+            JsonObject o = new JsonObject();
+            o.addProperty("updatedAt", System.currentTimeMillis());
+            atlas.sse().broadcastAll("worlds", Json.GSON.toJson(o), c -> true);
+        }
+    }
+
+    private static boolean sameLimit(AtlasConfig.RenderLimit a, AtlasConfig.RenderLimit b) {
+        if (a == null || b == null) {
+            return a == b;
+        }
+        return a.x == b.x && a.z == b.z && a.radius == b.radius;
     }
 
     /** True while atlas.json is rejected and the web server is kept down. */

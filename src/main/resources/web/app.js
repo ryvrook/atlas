@@ -10,6 +10,7 @@
  *   map.js              The Leaflet map, tile geometry from api/worlds, every overlay, players with
  *                       interpolation, measure, context menu, follow, coordinates and the layers popover.
  *   panel.js            The side panel and bottom sheet, its tabs and every tab view including the faction page.
+ *   timeline.js         The date slider, past days on the map, their events and stats, and the Timeline tab.
  *   app.js              This file. Boot, the world picker, the event stream, search, linking, theme and keys.
  *
  * All URLs are relative (api/worlds, never /api/worlds) so the map also works under a sub path. The client
@@ -70,6 +71,7 @@
     if (!state.tile || JSON.stringify(state.tile) !== JSON.stringify(d.tile)) { state.tile = d.tile || {}; A.initGeometry(state.tile); }
     state.worlds = Array.isArray(d.worlds) ? d.worlds : [];
     state.worldsAt = Date.now();
+    state.defaultWorld = typeof d.defaultWorld === "string" ? d.defaultWorld : null;
     renderWorldButton();
     if (!$("world-menu").hidden) renderWorldMenu();
     updateOnline();
@@ -106,9 +108,10 @@
   }
   setInterval(refetchWorlds, 30000);
 
+  // The world atlas.json names to open first, when the viewer may open it. Otherwise a world with players in it.
   function defaultWorld() {
     const list = visibleWorlds();
-    return list.find((w) => (w.kind || "world") === "world" && w.players > 0) || list.find((w) => w.players > 0) || list.find((w) => (w.kind || "world") === "world") || list[0] || null;
+    return list.find((w) => w.name === state.defaultWorld) || list.find((w) => (w.kind || "world") === "world" && w.players > 0) || list.find((w) => w.players > 0) || list.find((w) => (w.kind || "world") === "world") || list[0] || null;
   }
   const kindBadge = (w) => {
     const k = w.kind || "world";
@@ -182,6 +185,7 @@
       A.groups.heat.clearLayers();
       A.groups.paths.clearLayers();
       A.syncPlayerMarkers();
+      A.emit("world", name);
     }
     const zoom = A.defaultZoom();
     const b = w && w.bounds && [w.bounds.minX, w.bounds.minZ, w.bounds.maxX, w.bounds.maxZ].every((n) => typeof n === "number" && isFinite(n)) ? w.bounds : null;
@@ -228,6 +232,8 @@
     A.loadWorldEvents();
     A.loadHeat();
     A.loadPaths();
+    A.loadLayers();
+    if (A.loadTimeline) A.loadTimeline();
   }
   // Data that does not depend on the world. The faction list is fetched by the views and search that use it.
   function loadShared(render) {
@@ -403,6 +409,10 @@
     on("worlds", () => refetchWorlds());
     // The shared marker set of a world changed, or with own set the viewer's own markers did.
     on("markers", (d) => { if (!d.world || d.world === state.world) markersSoon(); });
+    // Marker layers of a world changed. Only the named layers are fetched again and replaced.
+    on("layers", (d) => { if (d.world === state.world) A.loadLayers(Array.isArray(d.layers) ? d.layers : null); });
+    // A snapshot of a world finished, so its timeline has a new day.
+    on("timeline", (d) => A.emit("timelineDay", d));
   }
   const spread = (fn) => setTimeout(fn, Math.random() * 1000);
   let markersTimer = null;
@@ -567,6 +577,7 @@
       if (!$("world-menu").hidden) { closeWorldMenu(); return; }
       if (!$("account-menu").hidden) { closeAccountMenu(); return; }
       if (A.clearTools()) return;
+      if (A.timelineEsc && A.timelineEsc()) return;
       if (narrow() && A.panelOpen()) A.setPanel(false);
       return;
     }
@@ -598,6 +609,8 @@
         }
         name = def.name;
         if (byUrl && q.has("x") && q.has("z")) view = { x: +q.get("x"), z: +q.get("z"), zoom: q.has("zoom") ? +q.get("zoom") : null };
+        // A shared link with t opens that day of the timeline once the days of the world are known.
+        if (byUrl && q.get("t") && A.timelineWant) A.timelineWant(q.get("t"));
       } else {
         const c = A.fromLatLng(map.getCenter());
         view = { x: c.x, z: c.z, zoom: map.getZoom() };

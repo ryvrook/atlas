@@ -514,6 +514,72 @@ path.world-border-halo:hover { stroke: rgba(22, 18, 14, .55); }
 .measure-label { background: var(--surface-solid); color: var(--text); border: 1px solid var(--border-strong); border-radius: 4px; padding: 3px 8px; font-size: 12.5px; font-weight: 600; box-shadow: var(--shadow-sm); }
 .measure-label::before { display: none; }
 
+/* Render limit. The outside of the circle is covered in the map background and the edge is a faint dash. */
+path.render-limit-mask { fill: var(--mapbg); fill-opacity: 1; }
+path.render-limit { stroke: var(--faint); stroke-opacity: .75; }
+
+/* Marker layer popups, html the server prepared, in the panel look. */
+.atlas-popup .leaflet-popup-content-wrapper { background: var(--surface-solid); color: var(--text); border: 1px solid var(--border-strong); border-radius: 5px; box-shadow: var(--shadow-sm); }
+.atlas-popup .leaflet-popup-content { margin: 10px 13px; font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.atlas-popup .leaflet-popup-tip { background: var(--surface-solid); border: 1px solid var(--border-strong); box-shadow: none; }
+.atlas-popup a.leaflet-popup-close-button { color: var(--muted); width: 32px; height: 32px; font: 20px/30px var(--font); }
+.atlas-popup img { max-width: 100%; height: auto; }
+.ml-zoom { display: block; font-size: 12px; color: var(--faint); }
+
+/* Timeline bar. Under the map on wide screens, above the bottom sheet on phones. */
+:root { --tl-h: 58px; }
+.tl-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; height: var(--tl-h); z-index: 1050; display: flex; align-items: center; gap: 10px;
+  padding: 0 12px; background: var(--surface-solid); border-top: 1px solid var(--border); box-shadow: 0 -4px 16px rgba(8, 6, 4, .18);
+}
+body.tl-open #stage { bottom: var(--tl-h); }
+body.tl-open #panel { bottom: calc(var(--tl-h) + 12px); }
+#tl-play { flex: none; background: var(--accent); color: var(--accent-ink); border-radius: 50%; width: 40px; height: 40px; }
+#tl-play:hover { filter: brightness(1.06); background: var(--accent); }
+#tl-play .ic { fill: currentColor; stroke-width: 1.4; }
+#tl-play[aria-pressed="true"] .ic { fill: none; stroke-width: 2.6; }
+.tl-track { position: relative; flex: 1; min-width: 0; height: 44px; }
+#tl-strip { position: absolute; left: 0; right: 0; top: 0; width: 100%; height: 30px; pointer-events: none; }
+#tl-range { position: absolute; left: 0; right: 0; top: 0; width: 100%; height: 30px; margin: 0; background: transparent; -webkit-appearance: none; appearance: none; cursor: pointer; }
+#tl-range:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#tl-range::-webkit-slider-runnable-track { height: 30px; background: transparent; }
+#tl-range::-moz-range-track { height: 30px; background: transparent; }
+#tl-range::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 30px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 22%, transparent); border: 2px solid var(--accent); box-shadow: var(--shadow-sm); }
+#tl-range::-moz-range-thumb { width: 12px; height: 26px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 22%, transparent); border: 2px solid var(--accent); }
+.tl-ends { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between; font-size: 11px; color: var(--faint); pointer-events: none; padding: 0 2px; }
+.tl-side { display: flex; align-items: center; gap: 6px; flex: none; }
+.tl-label { font-weight: 650; font-size: 14px; min-width: 92px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tl-label.past { color: var(--accent); }
+#tl-speed, .tl-select { height: 34px; font-size: 13px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--surface-2); }
+#tl-changed .ic { fill: color-mix(in srgb, var(--accent) 35%, transparent); }
+
+/* A past day dims the live overlays. The day's own markers and the changed tint sit in panes of their own. */
+.leaflet-overlay-pane, .leaflet-marker-pane, .leaflet-shadow-pane { transition: opacity var(--dur) var(--ease); }
+body.tl-past .leaflet-overlay-pane, body.tl-past .leaflet-marker-pane, body.tl-past .leaflet-shadow-pane { opacity: .3; }
+path.tl-changed { fill: var(--accent); fill-opacity: .26; stroke: var(--accent); stroke-opacity: .9; }
+.tl-chip { border-color: color-mix(in srgb, var(--accent) 55%, transparent); padding: 4px 4px 4px 10px; }
+.tl-chip > .ic { color: var(--accent); }
+.tl-chip b { font-weight: 650; }
+
+/* Timeline tab */
+.tl-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 10px; }
+.tl-ctl .btn.primary .ic { fill: currentColor; }
+.tl-ctl .btn.primary[aria-pressed="true"] .ic { fill: none; stroke-width: 2.6; }
+.tl-ctl .icon-btn { border: 1px solid var(--border); }
+.tl-ctl .icon-btn:disabled { opacity: .4; cursor: default; }
+.fchip .tl-sw { background: color-mix(in srgb, var(--accent) 55%, transparent); border: 1px solid var(--accent); }
+.tl-spark { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.spark { background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 6px 8px 4px; min-width: 0; }
+.spark-head { display: flex; justify-content: space-between; gap: 6px; font-size: 12px; color: var(--muted); }
+.spark-head b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 650; }
+.spark canvas { display: block; width: 100%; height: 32px; cursor: pointer; }
+.tl-ev .tl-kind { font-weight: 650; }
+.tl-ev .btn.small { margin-left: 4px; }
+.tl-admin { text-align: center; margin: -8px 0 8px; }
+.tl-admin .note { text-align: left; margin-top: 10px; }
+.tl-cmd { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.tl-cmd code { flex: 1; min-width: 0; font: 13px var(--mono); background: var(--surface-solid); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; overflow-wrap: anywhere; color: var(--text); }
+
 /* Narrow screens and phones */
 @media (max-width: 900px) {
   #search { width: 190px; }
@@ -562,6 +628,16 @@ path.world-border-halo:hover { stroke: rgba(22, 18, 14, .55); }
   .tab { flex: none; min-width: 44px; height: 40px; padding: 0 10px; }
   .tab .lbl { display: none; }
   .tab[aria-selected="true"] .lbl { display: inline; }
+  /* The timeline bar rides on top of the sheet or its peek, and the speed and tint switches live in the tab. */
+  :root { --tl-h: 54px; }
+  .tl-bar { bottom: calc(var(--peek-h) + env(safe-area-inset-bottom)); padding: 0 8px; gap: 8px; border-radius: 10px 10px 0 0; border: 1px solid var(--border); border-bottom: 0; transition: bottom var(--dur) var(--ease); }
+  body:not(.panel-closed) .tl-bar { bottom: var(--sheet-h); }
+  body.tl-open #stage { bottom: 0; }
+  body.tl-open #panel { bottom: 0; }
+  #tl-speed, #tl-changed { display: none; }
+  .tl-label { min-width: 0; font-size: 13px; }
+  body.tl-open #hud { bottom: calc(var(--peek-h) + env(safe-area-inset-bottom) + var(--tl-h) + 10px); }
+  body.tl-open:not(.panel-closed) #hud { bottom: calc(var(--sheet-h) + var(--tl-h) + 10px); }
 }
 /* Touch sized targets on phones and other coarse pointers. */
 @media (max-width: 720px), (pointer: coarse) {
@@ -578,6 +654,10 @@ path.world-border-halo:hover { stroke: rgba(22, 18, 14, .55); }
   details.fold > summary { min-height: 40px; }
   .fac::after { top: -10px; bottom: -10px; }
   .row { min-height: 44px; }
+  #tl-speed, .tl-select { height: 40px; }
+  #tl-range { top: -5px; height: 40px; }
+  #tl-range::-webkit-slider-runnable-track { height: 40px; }
+  #tl-range::-webkit-slider-thumb { height: 34px; width: 16px; }
 }
 /* The mod icon stays in the bar on phones until the bar runs out of room. */
 @media (max-width: 520px) {
