@@ -54,6 +54,10 @@ public final class PersonalMarkers {
      * made for one browser tab can never swallow the change the player's other streams need to hear.
      */
     private final Map<UUID, Map<String, Long>> announced = new ConcurrentHashMap<>();
+    /** Reads of one player and world queued on the world thread, keyed by uuid and world name. */
+    private final Map<String, CompletableFuture<PersonalSet>> reads = new ConcurrentHashMap<>();
+    /** Worlds with a poll queued on their thread. */
+    private final Set<String> pollInFlight = ConcurrentHashMap.newKeySet();
 
     /**
      * Builds the entries from the engine values. Pure, so it can be checked without a running
@@ -168,8 +172,14 @@ public final class PersonalMarkers {
      * with null when the player is not in that world or the world is going away.
      */
     public CompletableFuture<PersonalSet> refresh(World world, UUID uuid) {
-        CompletableFuture<PersonalSet> f = new CompletableFuture<>();
         String name = world.getName();
+        String key = uuid + "/" + name;
+        CompletableFuture<PersonalSet> f = new CompletableFuture<>();
+        // Requests for the same player and world while a read is queued share that read.
+        CompletableFuture<PersonalSet> running = reads.putIfAbsent(key, f);
+        if (running != null) {
+            return running;
+        }
         try {
             world.execute(() -> {
                 try {
@@ -182,9 +192,12 @@ public final class PersonalMarkers {
                     f.complete(get(uuid, name));
                 } catch (Throwable t) {
                     f.complete(null);
+                } finally {
+                    reads.remove(key, f);
                 }
             });
         } catch (RuntimeException e) {
+            reads.remove(key, f);
             f.complete(null);
         }
         return f;
@@ -211,26 +224,32 @@ public final class PersonalMarkers {
                     here.add(r.getUuid());
                 }
             }
-            if (here.isEmpty()) {
+            if (here.isEmpty() || !pollInFlight.add(name)) {
+                // Nobody to read, or the previous poll of this world has not run yet.
                 continue;
             }
             CompletableFuture<Map<UUID, List<Entry>>> read = new CompletableFuture<>();
             try {
                 w.execute(() -> {
                     Map<UUID, List<Entry>> found = new java.util.HashMap<>();
-                    for (UUID id : here) {
-                        try {
-                            List<Entry> e = read(w, id);
-                            if (e != null) {
-                                found.put(id, e);
+                    try {
+                        for (UUID id : here) {
+                            try {
+                                List<Entry> e = read(w, id);
+                                if (e != null) {
+                                    found.put(id, e);
+                                }
+                            } catch (RuntimeException ignored) {
+                                // Player leaving while we read.
                             }
-                        } catch (RuntimeException ignored) {
-                            // Player leaving while we read.
                         }
+                    } finally {
+                        pollInFlight.remove(name);
+                        read.complete(found);
                     }
-                    read.complete(found);
                 });
             } catch (RuntimeException e) {
+                pollInFlight.remove(name);
                 continue;
             }
             read.thenAcceptAsync(found -> {
@@ -259,6 +278,14 @@ public final class PersonalMarkers {
 
     /** Forgets every set of a removed world. */
     public void dropWorld(String world) {
+        pollInFlight.remove(world);
+        reads.entrySet().removeIf(e -> {
+            if (e.getKey().endsWith("/" + world)) {
+                e.getValue().complete(null);
+                return true;
+            }
+            return false;
+        });
         for (Map<String, PersonalSet> m : cache.values()) {
             m.remove(world);
         }

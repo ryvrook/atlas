@@ -7,7 +7,8 @@ import java.util.function.Predicate;
 
 /** A size bounded least recently used cache of encoded tiles. */
 public final class ByteLru {
-    public record Entry(byte[] data, boolean partial, long createdAt) {
+    /** One encoded tile. etag is the strong tag of data, createdAt the time its render started. */
+    public record Entry(byte[] data, boolean partial, long createdAt, String etag) {
     }
 
     private final LinkedHashMap<String, Entry> map = new LinkedHashMap<>(256, 0.75f, true);

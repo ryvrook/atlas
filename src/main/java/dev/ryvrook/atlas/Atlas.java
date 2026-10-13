@@ -20,6 +20,7 @@ import dev.ryvrook.atlas.data.Leaderboard;
 import dev.ryvrook.atlas.data.LiveState;
 import dev.ryvrook.atlas.data.MapModSettings;
 import dev.ryvrook.atlas.data.MarkerMerge;
+import dev.ryvrook.atlas.data.Payloads;
 import dev.ryvrook.atlas.data.PersonalMarkers;
 import dev.ryvrook.atlas.http.AtlasVersion;
 import dev.ryvrook.atlas.http.SseHub;
@@ -37,6 +38,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.logging.Level;
 
 /**
  * Shared state behind the web server and the commands. Every payload the browser sees is built
@@ -44,6 +47,9 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class Atlas {
     public static final String ADMIN_PERMISSION = "atlas.admin";
+    /** The browser API version, sent in api/worlds and the hello event. */
+    public static final int API_VERSION = 1;
+    private static final String HIDDEN_LAYER = "This layer is not visible to you.";
     private static final int FEED_KEEP = 100;
     private static final int CHAT_KEEP = 100;
 
@@ -70,6 +76,10 @@ public final class Atlas {
     private final Map<String, Long> announced = new ConcurrentHashMap<>();
     /** Last hidden flag Dominion wrote for each player, kept after they leave the snapshot. */
     private final Map<UUID, Boolean> snapshotHidden = new ConcurrentHashMap<>();
+    /** The Atlas scheduler, for work that must leave the world thread. Null until the plugin hands it over. */
+    private volatile Executor background;
+    /** Worlds seen on the last marker poll, with whether each is a portal or instance world. */
+    private final Map<String, Boolean> seenWorlds = new ConcurrentHashMap<>();
 
     public Atlas(AtlasConfig config, Path dataDir) {
         this.config = config;
@@ -214,14 +224,60 @@ public final class Atlas {
     /** The server object shared by api/worlds and the hello event. */
     public JsonObject serverJson() {
         JsonObject o = new JsonObject();
+        o.addProperty("apiVersion", API_VERSION);
         o.addProperty("title", config.publicTitle);
-        o.addProperty("publicUrl", config.hasPublicUrl() ? config.publicUrl.trim() : null);
-        long now = System.currentTimeMillis();
-        o.addProperty("uptimeMs", now - startedAt);
+        Payloads.put(o, "publicUrl", config.hasPublicUrl() ? config.publicUrl.trim() : null);
         o.addProperty("version", AtlasVersion.VERSION);
+        long now = System.currentTimeMillis();
         o.addProperty("now", now);
+        o.addProperty("uptimeSeconds", (now - startedAt) / 1000);
         o.addProperty("betterMap", mapRules() != null);
         return o;
+    }
+
+    /** The hello event body {apiVersion, viewer, server}. */
+    public JsonObject helloPayload(Viewer v) {
+        JsonObject hello = new JsonObject();
+        hello.addProperty("apiVersion", API_VERSION);
+        hello.add("viewer", viewerJson(v));
+        hello.add("server", serverJson());
+        return hello;
+    }
+
+    /** The hello body without clock values, compared as text to spot identity changes. */
+    public JsonObject helloIdentity(Viewer v) {
+        JsonObject hello = helloPayload(v);
+        JsonObject server = hello.getAsJsonObject("server");
+        server.remove("now");
+        server.remove("uptimeSeconds");
+        return hello;
+    }
+
+    /** Hands Atlas the scheduler, which runs work that must not hold up a world thread. */
+    public void useExecutor(Executor executor) {
+        this.background = executor;
+    }
+
+    /** Runs a task on the Atlas scheduler, or on a fresh virtual thread before the scheduler is known. */
+    private void runInBackground(Runnable r) {
+        Executor ex = background;
+        if (ex != null) {
+            try {
+                ex.execute(r);
+                return;
+            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                // Shutting down. Fall through.
+            }
+        }
+        Thread.ofVirtual().name("Atlas-background").start(r);
+    }
+
+    private static void log(Level level, String format, Object... args) {
+        try {
+            com.hypixel.hytale.logger.HytaleLogger.get("Atlas").at(level).log(String.format(Locale.ROOT, format, args));
+        } catch (RuntimeException | LinkageError ignored) {
+            // No logging backend, as in unit tests.
+        }
     }
 
     // ---- identity ----------------------------------------------------------
@@ -274,10 +330,10 @@ public final class Atlas {
     public JsonObject viewerJson(Viewer v) {
         JsonObject o = new JsonObject();
         o.addProperty("linked", v.linked());
-        o.addProperty("name", v.name());
-        o.addProperty("faction", v.faction());
+        Payloads.put(o, "name", v.name());
+        Payloads.put(o, "faction", v.faction());
         o.addProperty("admin", v.admin());
-        o.addProperty("viewingAs", v.viewingAs());
+        Payloads.put(o, "viewingAs", v.viewingAs());
         JsonObject layers = new JsonObject();
         for (String layer : config.visibility.keySet()) {
             layers.addProperty(layer, v.canSee(config, layer) && (!"players".equals(layer) || config.showPlayers || v.admin()));
@@ -288,16 +344,27 @@ public final class Atlas {
 
     // ---- players -----------------------------------------------------------
 
-    /** Players visible to the viewer, optionally limited to one world. */
+    /** True when this viewer may see the players layer at all. */
+    public boolean seesPlayers(Viewer v) {
+        return v.canSee(config, "players") && (config.showPlayers || v.admin());
+    }
+
+    /**
+     * Players visible to the viewer, optionally limited to one world. This is the players event body,
+     * so it always carries hidden, full and left. The live push overwrites full and left on partial frames.
+     */
     public JsonObject playersPayload(Viewer v, String worldFilter, boolean withTrails) {
         AtlasConfig cfg = config;
         JsonObject out = new JsonObject();
         long now = System.currentTimeMillis();
         out.addProperty("at", now);
         JsonArray list = new JsonArray();
+        boolean visible = seesPlayers(v);
+        out.addProperty("hidden", !visible);
+        out.addProperty("full", true);
         out.add("players", list);
-        if (!v.canSee(cfg, "players") || (!cfg.showPlayers && !v.admin())) {
-            out.addProperty("hidden", true);
+        out.add("left", new JsonArray());
+        if (!visible) {
             return out;
         }
         boolean trails = withTrails && v.canSee(cfg, "paths");
@@ -312,18 +379,14 @@ public final class Atlas {
             }
             JsonObject snap = view.playerByUuid.get(key);
             JsonObject row = playerRow(v, cfg, view, key, p.name(), p.world(), p.x(), p.y(), p.z(), snap,
-                    p.health(), p.maxHealth(), factionLimited, true);
+                    p.health(), p.maxHealth(), factionLimited, true, "live");
             if (row == null) {
                 continue;
             }
-            row.addProperty("source", "live");
             if (trails) {
                 JsonArray t = new JsonArray();
                 for (double[] pt : live.trail(p.uuid())) {
-                    JsonArray xy = new JsonArray();
-                    xy.add(pt[0]);
-                    xy.add(pt[1]);
-                    t.add(xy);
+                    t.add(Payloads.pair(Math.round(pt[0]), Math.round(pt[1])));
                 }
                 row.add("trail", t);
             }
@@ -347,9 +410,9 @@ public final class Atlas {
                 double sz = Json.num(s, "z", Double.NaN);
                 boolean located = !Double.isNaN(sx) && !Double.isNaN(sz);
                 JsonObject row = playerRow(v, cfg, view, e.getKey(), Json.str(s, "name"), world,
-                        located ? sx : 0, Double.isNaN(sy) ? 0 : sy, located ? sz : 0, s, null, null, factionLimited, located);
+                        located ? sx : 0, Double.isNaN(sy) ? 0 : sy, located ? sz : 0, s, null, null, factionLimited,
+                        located, "snapshot");
                 if (row != null) {
-                    row.addProperty("source", "snapshot");
                     list.add(row);
                 }
             }
@@ -358,18 +421,19 @@ public final class Atlas {
     }
 
     /**
-     * The api/players payload. Adds the offline list of players seen in the last seven days when the
-     * viewer may see the lastSeen layer.
+     * The api/players body {at, players, offline}. Offline holds the players seen in the last seven days
+     * when the viewer may also see the lastSeen layer, and is null otherwise.
      */
     public JsonObject playersApiPayload(Viewer v, String worldFilter, boolean withTrails) {
-        AtlasConfig cfg = config;
-        JsonObject out = playersPayload(v, worldFilter, withTrails);
-        // The offline list shows names and positions, so it needs everything the live list needs as well
-        // as the lastSeen layer.
-        if (!v.canSee(cfg, "players") || (!cfg.showPlayers && !v.admin()) || !v.canSee(cfg, "lastSeen")) {
-            return out;
+        if (!seesPlayers(v)) {
+            return Payloads.error(HIDDEN_LAYER);
         }
-        out.add("offline", offlinePlayers(v, worldFilter));
+        JsonObject p = playersPayload(v, worldFilter, withTrails);
+        JsonObject out = new JsonObject();
+        out.add("at", p.get("at"));
+        out.add("players", p.get("players"));
+        // The offline list shows names and positions, so it needs the lastSeen layer as well.
+        out.add("offline", v.canSee(config, "lastSeen") ? offlinePlayers(v, worldFilter) : JsonNull.INSTANCE);
         return out;
     }
 
@@ -408,9 +472,9 @@ public final class Atlas {
                 }
             }
             JsonObject row = new JsonObject();
-            row.addProperty("name", e.name());
-            row.addProperty("faction", faction);
-            row.addProperty("lastSeen", e.at());
+            Payloads.person(row, "uuid", "name", e.uuid(), e.name() == null ? "" : e.name(), hiddenFrom(v, e.uuid()));
+            Payloads.put(row, "faction", faction);
+            row.addProperty("at", e.at());
             row.addProperty("world", e.world());
             if (v.admin() || self) {
                 row.addProperty("x", Math.round(e.x()));
@@ -454,15 +518,12 @@ public final class Atlas {
 
     /** Whether this viewer must not see the player's name or position. Admins and the player themself always may. */
     private boolean hiddenFrom(Viewer v, UUID uuid) {
-        if (uuid == null || v.admin() || uuid.equals(v.uuid())) {
-            return false;
-        }
-        return isHiddenPlayer(uuid);
+        return Payloads.hiddenFrom(v.admin(), v.uuid(), uuid, this::isHiddenPlayer);
     }
 
     private JsonObject playerRow(Viewer v, AtlasConfig cfg, DominionSnapshot.View view, String uuidKey, String name,
                                  String world, double x, double y, double z, JsonObject snap,
-                                 Float hp, Float maxHp, boolean factionLimited, boolean located) {
+                                 Float hp, Float maxHp, boolean factionLimited, boolean located, String source) {
         UUID uuid;
         try {
             uuid = UUID.fromString(uuidKey);
@@ -479,6 +540,10 @@ public final class Atlas {
             if (hidden) {
                 return null;
             }
+            if (hiddenWorld(v, world)) {
+                // A portal or instance world this viewer may not open. Its players stay off every list and stream.
+                return null;
+            }
             if (factionLimited && !v.sameFaction(faction)) {
                 return null;
             }
@@ -491,53 +556,61 @@ public final class Atlas {
         }
         JsonObject row = new JsonObject();
         row.addProperty("uuid", uuidKey);
-        row.addProperty("name", name);
-        row.addProperty("world", world);
+        row.addProperty("name", name == null ? "" : name);
+        Payloads.put(row, "world", world);
+        boolean underground = false;
         if (!located) {
             // Online but without a known position. Every viewer, admins included, gets null coordinates.
             row.add("x", JsonNull.INSTANCE);
             row.add("y", JsonNull.INSTANCE);
             row.add("z", JsonNull.INSTANCE);
-            row.addProperty("located", false);
-            if (v.admin()) {
-                row.addProperty("hidden", hidden);
-            }
         } else if (v.admin()) {
             row.addProperty("x", Math.round(x * 100) / 100.0);
             row.addProperty("y", Math.round(y * 100) / 100.0);
             row.addProperty("z", Math.round(z * 100) / 100.0);
-            row.addProperty("hidden", hidden);
         } else if (!self && y < cfg.hideBelowY) {
             // Below the hideBelowY line the player counts as underground. Non admins get no position.
             row.add("x", JsonNull.INSTANCE);
             row.add("y", JsonNull.INSTANCE);
             row.add("z", JsonNull.INSTANCE);
-            row.addProperty("underground", true);
+            underground = true;
         } else {
             row.addProperty("x", Math.round(x));
             row.addProperty("y", Math.round(y));
             row.addProperty("z", Math.round(z));
         }
-        row.addProperty("faction", faction);
-        String color = snap != null ? Json.str(snap, "color") : null;
+        row.addProperty("located", located);
+        row.addProperty("underground", underground);
+        Payloads.put(row, "hidden", v.admin() ? (Boolean) hidden : null);
+        Payloads.put(row, "faction", faction);
+        String color = snap != null ? Payloads.text(snap, "color") : null;
         if (color == null && faction != null) {
-            color = Json.str(view.faction(faction), "color");
+            color = Payloads.text(view.faction(faction), "color");
         }
-        row.addProperty("color", color);
-        if ((cfg.showPlayerHealth || v.admin()) && hp != null) {
-            row.addProperty("health", Math.round(hp * 10) / 10.0);
-            row.addProperty("maxHealth", maxHp == null ? null : Math.round(maxHp * 10) / 10.0);
-        }
-        if (self) {
-            row.addProperty("self", true);
-        }
+        Payloads.put(row, "color", color);
+        boolean health = (cfg.showPlayerHealth || v.admin()) && hp != null;
+        Payloads.put(row, "health", health ? (Number) (Math.round(hp * 10) / 10.0) : null);
+        Payloads.put(row, "maxHealth", health && maxHp != null ? (Number) (Math.round(maxHp * 10) / 10.0) : null);
+        row.addProperty("self", self);
+        row.addProperty("source", source);
+        row.add("trail", JsonNull.INSTANCE);
         return row;
     }
 
     // ---- worlds ------------------------------------------------------------
 
+    /** True when the world is a portal or instance world this viewer may not open. */
+    public boolean hiddenWorld(Viewer v, String world) {
+        if (world == null || v.admin() || config.showPortalWorlds) {
+            return false;
+        }
+        LiveState.WorldInfo info = live.worlds().get(world);
+        return info != null && info.kind() != null && info.kind().transientWorld();
+    }
+
     public JsonObject worldsPayload(Viewer v) {
         JsonObject out = new JsonObject();
+        out.addProperty("apiVersion", API_VERSION);
         out.addProperty("title", config.publicTitle);
         out.addProperty("standalone", !snapshot.present());
         out.add("viewer", viewerJson(v));
@@ -560,20 +633,21 @@ public final class Atlas {
         tile.add("levels", levels);
         out.add("tile", tile);
         JsonArray worlds = new JsonArray();
-        boolean showCounts = v.canSee(config, "players") && (config.showPlayers || v.admin());
+        boolean showCounts = seesPlayers(v);
         MapModSettings.Settings rules = mapRules();
         Universe u = Universe.get();
         if (u != null) {
             for (World w : u.getWorlds().values()) {
                 JsonObject o = new JsonObject();
-                o.addProperty("name", w.getName());
-                LiveState.WorldInfo info = live.worlds().get(w.getName());
-                LiveState.WorldKind kind = info == null || info.kind() == null ? LiveState.WorldKind.plain(w.getName()) : info.kind();
+                String name = w.getName();
+                o.addProperty("name", name);
+                LiveState.WorldInfo info = live.worlds().get(name);
+                LiveState.WorldKind kind = info == null || info.kind() == null ? LiveState.WorldKind.plain(name) : info.kind();
                 o.addProperty("kind", kind.kind());
-                o.addProperty("displayName", kind.displayName() == null ? w.getName() : kind.displayName());
-                o.addProperty("hidden", kind.transientWorld() && !config.showPortalWorlds && !v.admin());
-                o.add("portal", kind.portal() == null ? JsonNull.INSTANCE : kind.portal().deepCopy());
-                o.addProperty("players", showCounts ? w.getPlayerCount() : 0);
+                o.addProperty("displayName", kind.displayName() == null ? name : kind.displayName());
+                o.addProperty("hiddenWorld", hiddenWorld(v, name));
+                o.add("portal", portalJson(kind.portal()));
+                Payloads.put(o, "players", showCounts ? (Number) w.getPlayerCount() : null);
                 if (info != null && info.spawn() != null && (rules == null || !rules.spawnHidden())) {
                     JsonObject s = new JsonObject();
                     s.addProperty("x", Math.round(info.spawn()[0]));
@@ -586,13 +660,13 @@ public final class Atlas {
                 if (info != null && info.hour() != null) {
                     JsonObject t = new JsonObject();
                     t.addProperty("hour", info.hour());
-                    t.addProperty("dayProgress", info.dayProgress());
+                    t.addProperty("dayProgress", info.dayProgress() == null ? 0 : info.dayProgress());
                     o.add("time", t);
                 } else {
                     o.add("time", JsonNull.INSTANCE);
                 }
                 o.addProperty("mapEnabled", info != null && info.mapEnabled());
-                ExploredIndex ex = tiles.explored(w.getName());
+                ExploredIndex ex = tiles.explored(name);
                 o.addProperty("exploredChunks", ex.size());
                 int[] b = ex.bounds();
                 if (b != null) {
@@ -602,8 +676,11 @@ public final class Atlas {
                     bo.addProperty("maxX", b[2] * 32 + 32);
                     bo.addProperty("maxZ", b[3] * 32 + 32);
                     o.add("bounds", bo);
+                } else {
+                    o.add("bounds", JsonNull.INSTANCE);
                 }
-                if (rules != null && rules.border() != null) {
+                // BetterMap draws its border only on the worlds it tracks.
+                if (rules != null && rules.border() != null && rules.tracks(name)) {
                     JsonObject bd = new JsonObject();
                     bd.addProperty("shape", "circle");
                     bd.addProperty("x", rules.border().x());
@@ -620,19 +697,36 @@ public final class Atlas {
         return out;
     }
 
+    /** The portal state with its fixed field list, or null. */
+    private static JsonElement portalJson(JsonObject p) {
+        if (p == null) {
+            return JsonNull.INSTANCE;
+        }
+        JsonObject o = new JsonObject();
+        Payloads.put(o, "type", Payloads.text(p, "type"));
+        String typeName = Payloads.text(p, "typeName");
+        o.addProperty("typeName", typeName == null ? "" : typeName);
+        o.addProperty("timeLimit", Payloads.flag(p, "timeLimit"));
+        Payloads.put(o, "remainingSeconds", Payloads.number(p, "remainingSeconds"));
+        Payloads.put(o, "elapsedSeconds", Payloads.number(p, "elapsedSeconds"));
+        Payloads.put(o, "voidStage", Payloads.whole(p, "voidStage"));
+        o.addProperty("voidActive", Payloads.flag(p, "voidActive"));
+        o.addProperty("entries", Payloads.whole(p, "entries", 0));
+        return o;
+    }
+
     // ---- territories and points --------------------------------------------
 
     public JsonObject territoriesPayload(Viewer v, String world) {
         JsonObject out = new JsonObject();
         DominionSnapshot.View view = snapshot.view();
         out.addProperty("world", world);
-        out.addProperty("at", view.at());
+        Payloads.put(out, "at", snapshot.present() ? (Number) view.at() : null);
         JsonArray list = new JsonArray();
         JsonArray sieges = new JsonArray();
         out.add("territories", list);
         out.add("sieges", sieges);
         if (!v.canSee(config, "territories")) {
-            out.addProperty("hidden", true);
             return out;
         }
         boolean limited = v.factionLimited(config, "territories");
@@ -644,18 +738,7 @@ public final class Atlas {
             if (limited && !v.sameFaction(Json.str(t, "tag"))) {
                 continue;
             }
-            JsonObject copy = t.deepCopy();
-            // The client walks these as [cx, cz] pairs, so anything else is dropped here.
-            copy.add("chunks", cleanChunks(Json.arr(t, "chunks")));
-            copy.add("breached", cleanChunks(Json.arr(t, "breached")));
-            copy.add("zones", cleanZones(Json.arr(t, "zones")));
-            JsonObject f = view.faction(Json.str(t, "tag"));
-            if (f != null) {
-                copy.addProperty("power", Json.num(f, "power", 0));
-                copy.addProperty("maxPower", Json.num(f, "maxPower", 0));
-                copy.addProperty("claims", Json.num(f, "claims", 0));
-            }
-            list.add(copy);
+            list.add(Payloads.territory(t, view.faction(Json.str(t, "tag"))));
         }
         long now = System.currentTimeMillis();
         for (JsonElement e : view.sieges()) {
@@ -673,45 +756,30 @@ public final class Atlas {
             if (ends > 0 && ends < now - 60_000) {
                 continue;
             }
-            sieges.add(s.deepCopy());
+            sieges.add(Payloads.siege(s));
         }
         return out;
     }
 
-    /** Named zones inside a territory, kept only when they have a name and at least one chunk. */
-    private static JsonArray cleanZones(JsonArray in) {
-        JsonArray out = new JsonArray();
-        for (JsonElement e : in) {
-            if (!e.isJsonObject()) {
-                continue;
-            }
-            JsonObject z = e.getAsJsonObject();
-            String name = Json.str(z, "name");
-            JsonArray chunks = cleanChunks(Json.arr(z, "chunks"));
-            if (name == null || name.isBlank() || chunks.isEmpty()) {
-                continue;
-            }
-            JsonObject o = new JsonObject();
-            o.addProperty("id", Json.str(z, "id"));
-            o.addProperty("name", name);
-            o.add("chunks", chunks);
-            out.add(o);
+    /**
+     * Points of interest read on the world thread, waiting up to two seconds. Null when the world map is
+     * not ready or the world thread did not answer in time.
+     */
+    private Map<String, MapMarker> pointsOfInterest(World w) {
+        java.util.concurrent.CompletableFuture<Map<String, MapMarker>> f = new java.util.concurrent.CompletableFuture<>();
+        try {
+            w.execute(() -> {
+                try {
+                    Map<String, MapMarker> poi = w.getWorldMapManager().getPointsOfInterest();
+                    f.complete(poi == null ? Map.of() : new java.util.LinkedHashMap<>(poi));
+                } catch (Throwable t) {
+                    f.complete(null);
+                }
+            });
+            return f.get(2, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return null;
         }
-        return out;
-    }
-
-    private static JsonArray cleanChunks(JsonArray in) {
-        JsonArray out = new JsonArray();
-        for (JsonElement e : in) {
-            int[] c = DominionSnapshot.chunkOf(e);
-            if (c != null) {
-                JsonArray pair = new JsonArray();
-                pair.add(c[0]);
-                pair.add(c[1]);
-                out.add(pair);
-            }
-        }
-        return out;
     }
 
     public JsonObject pointsPayload(Viewer v, String world) {
@@ -737,7 +805,7 @@ public final class Atlas {
                     continue;
                 }
                 String kind = Json.str(p, "kind");
-                boolean eventPoint = isEventKind(kind);
+                boolean eventPoint = Payloads.isEventKind(kind);
                 if (eventPoint ? !seeEvents : !seePoints) {
                     continue;
                 }
@@ -747,94 +815,38 @@ public final class Atlas {
                 if (!eventPoint && limited && !ownerless && !v.sameFaction(fac)) {
                     continue;
                 }
-                JsonObject copy = p.deepCopy();
-                if (eventPoint) {
-                    copy.addProperty("event", true);
-                    mergeEventStatus(copy, kind, events);
-                }
-                if (!v.admin()) {
-                    copy.addProperty("x", Math.round(Json.num(p, "x", 0)));
-                    copy.addProperty("z", Math.round(Json.num(p, "z", 0)));
-                    copy.remove("y");
-                }
-                points.add(copy);
+                points.add(Payloads.point(p, v.admin(), events));
             }
         }
         if (v.canSee(config, "zones")) {
             Universe u = Universe.get();
             World w = u == null ? null : u.getWorld(world);
-            if (w != null) {
-                try {
-                    Map<String, MapMarker> poi = w.getWorldMapManager().getPointsOfInterest();
-                    MapModSettings.Settings rules = mapRules();
-                    if (poi != null && (rules == null || !rules.hideAllPoi())) {
-                        for (Map.Entry<String, MapMarker> e : new ArrayList<>(poi.entrySet())) {
-                            MapMarker m = e.getValue();
-                            if (m == null || m.transform == null || m.transform.position == null) {
-                                continue;
-                            }
-                            if (rules != null && hiddenPoint(rules, world, m)) {
-                                continue;
-                            }
-                            JsonObject z = new JsonObject();
-                            z.addProperty("id", m.id != null ? m.id : e.getKey());
-                            String name = null;
-                            if (m.name != null) {
-                                name = m.name.rawText != null ? m.name.rawText : m.name.messageId;
-                            }
-                            z.addProperty("name", prettyName(name != null ? name : e.getKey()));
-                            z.addProperty("x", Math.round(m.transform.position.x));
-                            z.addProperty("z", Math.round(m.transform.position.z));
-                            z.addProperty("icon", m.markerImage);
-                            zones.add(z);
-                        }
+            MapModSettings.Settings rules = mapRules();
+            Map<String, MapMarker> poi = w == null || (rules != null && rules.hideAllPoi()) ? null : pointsOfInterest(w);
+            if (poi != null) {
+                for (Map.Entry<String, MapMarker> e : poi.entrySet()) {
+                    MapMarker m = e.getValue();
+                    if (m == null || m.transform == null || m.transform.position == null) {
+                        continue;
                     }
-                } catch (RuntimeException ignored) {
-                    // World map disabled or not generated yet.
+                    if (rules != null && hiddenPoint(rules, world, m)) {
+                        continue;
+                    }
+                    JsonObject z = new JsonObject();
+                    z.addProperty("id", m.id != null ? m.id : e.getKey());
+                    String name = null;
+                    if (m.name != null) {
+                        name = m.name.rawText != null ? m.name.rawText : m.name.messageId;
+                    }
+                    z.addProperty("name", prettyName(name != null ? name : e.getKey()));
+                    z.addProperty("x", Math.round(m.transform.position.x));
+                    z.addProperty("z", Math.round(m.transform.position.z));
+                    Payloads.put(z, "icon", m.markerImage);
+                    zones.add(z);
                 }
             }
         }
         return out;
-    }
-
-    static boolean isEventKind(String kind) {
-        if (kind == null) {
-            return false;
-        }
-        String k = kind.toLowerCase(Locale.ROOT);
-        return k.equals("hill") || k.equals("koth") || k.equals("outpost") || k.equals("envoy");
-    }
-
-    /** Copies the holder, control and status lines of the matching hill or outpost onto a point. */
-    private static void mergeEventStatus(JsonObject point, String kind, JsonObject events) {
-        if (events == null) {
-            return;
-        }
-        String k = kind.toLowerCase(Locale.ROOT);
-        String list = k.equals("outpost") ? "outposts" : k.equals("envoy") ? null : "koths";
-        if (list == null) {
-            return;
-        }
-        String label = Json.str(point, "label");
-        String id = Json.str(point, "id");
-        for (JsonElement e : Json.arr(events, list)) {
-            if (!e.isJsonObject()) {
-                continue;
-            }
-            JsonObject o = e.getAsJsonObject();
-            String name = Json.str(o, "name");
-            if (name == null || !(name.equalsIgnoreCase(label) || name.equalsIgnoreCase(id)
-                    || (id != null && id.toLowerCase(Locale.ROOT).endsWith(":" + name.toLowerCase(Locale.ROOT))))) {
-                continue;
-            }
-            for (String f : new String[]{"holder", "control", "status"}) {
-                String val = Json.str(o, f);
-                if (val != null && !point.has(f)) {
-                    point.addProperty(f, val);
-                }
-            }
-            return;
-        }
     }
 
     /** Turns translation keys such as server.map.zone.Emerald_Wilds into readable names. */
@@ -852,43 +864,18 @@ public final class Atlas {
 
     // ---- factions and stats ------------------------------------------------
 
-    private static final String[] FACTION_FIELDS = {"id", "tag", "name", "color", "leader", "members", "online",
-            "claims", "power", "maxPower", "value", "rank", "kills", "deaths", "siegesWon", "siegesLost", "level",
-            "points", "relations", "createdAt", "description"};
-
     private JsonObject factionRow(Viewer v, DominionSnapshot.View view, JsonObject f) {
-        JsonObject o = new JsonObject();
-        for (String k : FACTION_FIELDS) {
-            JsonElement e = f.get(k);
-            if (e != null) {
-                o.add(k, e.deepCopy());
-            }
-        }
-        if (o.has("members") && o.get("members").isJsonArray()) {
-            o.addProperty("memberCount", o.getAsJsonArray("members").size());
-            if (!v.admin() && !v.sameFaction(Json.str(f, "tag"))) {
-                o.remove("members");
-                o.addProperty("members", f.getAsJsonArray("members").size());
-            }
-        }
-        if (v.admin() || v.sameFaction(Json.str(f, "tag"))) {
-            JsonElement bank = f.get("bank");
-            if (bank != null) {
-                o.add("bank", bank.deepCopy());
-            }
-        }
+        boolean bank = v.admin() || v.sameFaction(Json.str(f, "tag"));
         JsonObject nation = v.canSee(config, "nations") ? view.nationOf(f) : null;
-        o.add("nation", nation == null ? JsonNull.INSTANCE : nation);
-        return o;
+        return Payloads.faction(f, bank, nation);
     }
 
     public JsonObject factionsPayload(Viewer v) {
         JsonObject out = new JsonObject();
+        Payloads.put(out, "at", snapshot.present() ? (Number) snapshot.view().at() : null);
         JsonArray list = new JsonArray();
         out.add("factions", list);
-        out.addProperty("at", snapshot.view().at());
         if (!v.canSee(config, "factions")) {
-            out.addProperty("hidden", true);
             return out;
         }
         boolean limited = v.factionLimited(config, "factions");
@@ -898,7 +885,7 @@ public final class Atlas {
                 continue;
             }
             JsonObject f = e.getAsJsonObject();
-            if (limited && !v.sameFaction(Json.str(f, "tag"))) {
+            if (Payloads.text(f, "tag") == null || (limited && !v.sameFaction(Json.str(f, "tag")))) {
                 continue;
             }
             rows.add(factionRow(v, snapshot.view(), f));
@@ -915,7 +902,7 @@ public final class Atlas {
         }
         DominionSnapshot.View view = snapshot.view();
         JsonObject f = view.faction(tag);
-        if (f == null || (v.factionLimited(config, "factions") && !v.sameFaction(tag))) {
+        if (f == null || Payloads.text(f, "tag") == null || (v.factionLimited(config, "factions") && !v.sameFaction(tag))) {
             return null;
         }
         JsonObject out = new JsonObject();
@@ -962,7 +949,7 @@ public final class Atlas {
             if (realTag.equalsIgnoreCase(Json.str(p, "faction"))) {
                 JsonObject o = new JsonObject();
                 o.addProperty("name", Json.str(p, "name"));
-                o.addProperty("world", Json.str(p, "world"));
+                Payloads.put(o, "world", Json.str(p, "world"));
                 online.add(o);
             }
         }
@@ -975,7 +962,7 @@ public final class Atlas {
                 }
                 JsonObject s = e.getAsJsonObject();
                 if (realTag.equalsIgnoreCase(Json.str(s, "attacker")) || realTag.equalsIgnoreCase(Json.str(s, "defender"))) {
-                    sieges.add(s.deepCopy());
+                    sieges.add(Payloads.siege(s));
                 }
             }
         }
@@ -991,46 +978,31 @@ public final class Atlas {
      */
     public JsonObject nationsPayload(Viewer v) {
         JsonObject out = new JsonObject();
+        DominionSnapshot.View view = snapshot.view();
+        Payloads.put(out, "at", snapshot.present() ? (Number) view.at() : null);
         JsonArray list = new JsonArray();
         JsonArray independent = new JsonArray();
         out.add("nations", list);
         out.add("independent", independent);
-        DominionSnapshot.View view = snapshot.view();
-        out.addProperty("at", view.at());
         if (!v.canSee(config, "nations")) {
-            out.addProperty("hidden", true);
             return out;
         }
         Map<String, JsonObject> nations = new java.util.LinkedHashMap<>();
         for (JsonObject listed : view.nations) {
-            JsonObject o = new JsonObject();
-            String tag = Json.str(listed, "tag");
-            String name = Json.str(listed, "name");
-            o.addProperty("tag", tag);
-            o.addProperty("name", name == null || name.isBlank() ? tag : name);
-            String color = Json.str(listed, "color");
-            if (color != null && !color.isBlank()) {
-                o.addProperty("color", color);
-            }
-            String id = Json.str(listed, "id");
-            if (id != null && !id.isBlank()) {
-                o.addProperty("id", id);
+            String tag = Payloads.text(listed, "tag");
+            if (tag == null) {
+                continue;
             }
             JsonElement members = listed.get("members");
-            if (members != null && members.isJsonArray()) {
-                o.addProperty("memberCount", members.getAsJsonArray().size());
-            }
-            o.add("factions", new JsonArray());
-            o.addProperty("value", 0.0);
-            o.addProperty("claims", 0.0);
-            nations.put(tag.trim().toUpperCase(Locale.ROOT), o);
+            nations.put(tag.trim().toUpperCase(Locale.ROOT), nationRow(listed,
+                    members != null && members.isJsonArray() ? members.getAsJsonArray().size() : 0));
         }
         boolean showFactions = v.canSee(config, "factions");
         boolean limited = showFactions && v.factionLimited(config, "factions");
         List<JsonObject> rows = new ArrayList<>();
         if (showFactions) {
             for (JsonElement e : view.factions()) {
-                if (e.isJsonObject()) {
+                if (e.isJsonObject() && Payloads.text(e.getAsJsonObject(), "tag") != null) {
                     rows.add(e.getAsJsonObject());
                 }
             }
@@ -1040,31 +1012,20 @@ public final class Atlas {
             if (limited && !v.sameFaction(Json.str(f, "tag"))) {
                 continue;
             }
-            JsonObject brief = new JsonObject();
-            for (String k : new String[]{"tag", "name", "color", "value", "claims", "power"}) {
-                JsonElement x = f.get(k);
-                if (x != null) {
-                    brief.add(k, x.deepCopy());
-                }
-            }
-            brief.addProperty("members", f.get("members") != null && f.get("members").isJsonArray()
-                    ? f.getAsJsonArray("members").size() : (long) Json.num(f, "members", 0));
+            JsonObject brief = Payloads.factionBrief(f);
             JsonObject nation = view.nationOf(f);
             if (nation == null) {
                 independent.add(brief);
                 continue;
             }
-            String key = Json.str(nation, "tag").toUpperCase(Locale.ROOT);
-            JsonObject n = nations.computeIfAbsent(key, k -> {
-                JsonObject o = nation.deepCopy();
-                o.add("factions", new JsonArray());
-                o.addProperty("value", 0.0);
-                o.addProperty("claims", 0.0);
-                return o;
-            });
+            String key = Json.str(nation, "tag").trim().toUpperCase(Locale.ROOT);
+            JsonObject n = nations.computeIfAbsent(key, k -> nationRow(nation, 0));
             n.getAsJsonArray("factions").add(brief);
-            n.addProperty("value", Json.num(n, "value", 0) + Json.num(f, "value", 0));
-            n.addProperty("claims", Json.num(n, "claims", 0) + Json.num(f, "claims", 0));
+            n.addProperty("value", Json.num(n, "value", 0) + Json.num(brief, "value", 0));
+            n.addProperty("claims", (long) Json.num(n, "claims", 0) + (long) Json.num(brief, "claims", 0));
+            if (n.get("memberCount").getAsLong() < n.getAsJsonArray("factions").size()) {
+                n.addProperty("memberCount", n.getAsJsonArray("factions").size());
+            }
         }
         List<JsonObject> sorted = new ArrayList<>(nations.values());
         sorted.sort((a, b) -> Double.compare(Json.num(b, "value", 0), Json.num(a, "value", 0)));
@@ -1072,100 +1033,38 @@ public final class Atlas {
         return out;
     }
 
-    /**
-     * The events summary for the stats panel. Hills and outposts keep their name, status, holder and
-     * control lines, envoys are counted, bounties and the season are passed through.
-     */
-    private JsonElement eventsSummary(Viewer v, JsonObject events) {
-        if (events == null || !v.canSee(config, "events")) {
-            return JsonNull.INSTANCE;
-        }
-        JsonObject out = new JsonObject();
-        if (events.has("enabled")) {
-            out.addProperty("enabled", Json.bool(events, "enabled"));
-        }
-        out.add("koths", namedRows(Json.arr(events, "koths"), "status", "holder", "endsAt"));
-        out.add("outposts", namedRows(Json.arr(events, "outposts"), "holder", "control", "status"));
-        JsonArray envoys = new JsonArray();
-        for (JsonElement e : Json.arr(events, "envoys")) {
-            if (e.isJsonPrimitive()) {
-                envoys.add(e.getAsString());
-            } else if (e.isJsonObject()) {
-                String text = Json.str(e.getAsJsonObject(), "name");
-                if (text == null) {
-                    text = Json.str(e.getAsJsonObject(), "status");
-                }
-                if (text != null) {
-                    envoys.add(text);
-                }
-            }
-        }
-        out.add("envoys", envoys);
-        out.addProperty("bounties", (long) Json.num(events, "bounties", 0));
-        JsonElement season = events.get("season");
-        if (season == null || season.isJsonNull()) {
-            out.add("season", JsonNull.INSTANCE);
-        } else if (season.isJsonPrimitive()) {
-            out.addProperty("season", season.getAsString());
-        } else if (season.isJsonObject()) {
-            String status = Json.str(season.getAsJsonObject(), "status");
-            out.addProperty("season", status != null ? status : Json.str(season.getAsJsonObject(), "phase"));
-            double ends = Json.num(season.getAsJsonObject(), "endsAt", 0);
-            if (ends > 0) {
-                out.addProperty("seasonEndsAt", (long) ends);
-            }
-        }
-        return out;
-    }
-
-    private static JsonArray namedRows(JsonArray in, String... keys) {
-        JsonArray out = new JsonArray();
-        for (JsonElement e : in) {
-            JsonObject o = new JsonObject();
-            if (e.isJsonPrimitive()) {
-                o.addProperty("name", e.getAsString());
-            } else if (e.isJsonObject()) {
-                String name = Json.str(e.getAsJsonObject(), "name");
-                if (name == null) {
-                    continue;
-                }
-                o.addProperty("name", name);
-                for (String k : keys) {
-                    JsonElement x = e.getAsJsonObject().get(k);
-                    if (x != null && x.isJsonPrimitive()) {
-                        o.add(k, x.deepCopy());
-                    }
-                }
-            } else {
-                continue;
-            }
-            out.add(o);
-        }
-        return out;
+    private static JsonObject nationRow(JsonObject n, int memberCount) {
+        JsonObject o = new JsonObject();
+        Payloads.put(o, "id", Payloads.text(n, "id"));
+        String tag = Payloads.text(n, "tag");
+        String name = Payloads.text(n, "name");
+        o.addProperty("tag", tag == null ? "" : tag);
+        o.addProperty("name", name == null ? (tag == null ? "" : tag) : name);
+        Payloads.put(o, "color", Payloads.text(n, "color"));
+        o.addProperty("memberCount", memberCount);
+        o.addProperty("value", 0.0);
+        o.addProperty("claims", 0L);
+        o.add("factions", new JsonArray());
+        return o;
     }
 
     public JsonObject statsPayload(Viewer v) {
         JsonObject out = new JsonObject();
-        if (!v.canSee(config, "stats")) {
-            out.addProperty("hidden", true);
-            return out;
-        }
         long now = System.currentTimeMillis();
         DominionSnapshot.View view = snapshot.view();
         Universe u = Universe.get();
         out.addProperty("at", now);
         out.addProperty("online", u == null ? 0 : u.getPlayerCount());
         out.addProperty("worlds", u == null ? 0 : u.getWorlds().size());
-        out.addProperty("uptimeMs", now - startedAt);
+        out.addProperty("uptimeSeconds", (now - startedAt) / 1000);
         JsonObject snap = new JsonObject();
         snap.addProperty("present", snapshot.present());
-        snap.addProperty("at", snapshot.present() ? view.at() : 0);
+        Payloads.put(snap, "at", snapshot.present() ? (Number) view.at() : null);
         out.add("snapshot", snap);
         if (snapshot.present()) {
-            JsonArray factions = view.factions();
             int claims = 0;
             List<JsonObject> rows = new ArrayList<>();
-            for (JsonElement e : factions) {
+            for (JsonElement e : view.factions()) {
                 if (e.isJsonObject()) {
                     rows.add(e.getAsJsonObject());
                     claims += (int) Json.num(e.getAsJsonObject(), "claims", 0);
@@ -1175,14 +1074,11 @@ public final class Atlas {
             fs.addProperty("count", rows.size());
             fs.addProperty("claims", claims);
             boolean showFactions = v.canSee(config, "factions") && !v.factionLimited(config, "factions");
-            if (showFactions) {
-                fs.add("topValue", top(rows, "value"));
-                fs.add("topPower", top(rows, "power"));
-                fs.add("topKills", top(rows, "kills"));
-            }
+            fs.add("topValue", showFactions ? Payloads.top(rows, "value") : JsonNull.INSTANCE);
+            fs.add("topPower", showFactions ? Payloads.top(rows, "power") : JsonNull.INSTANCE);
+            fs.add("topKills", showFactions ? Payloads.top(rows, "kills") : JsonNull.INSTANCE);
             out.add("factions", fs);
-            JsonObject grace = Json.obj(view.root, "grace");
-            out.add("grace", grace == null ? JsonNull.INSTANCE : grace.deepCopy());
+            out.add("grace", Payloads.grace(Json.obj(view.root, "grace")));
             out.addProperty("eotw", Json.bool(view.root, "eotw"));
             int active = 0;
             for (JsonElement e : view.sieges()) {
@@ -1195,7 +1091,13 @@ public final class Atlas {
                 }
             }
             out.addProperty("activeSieges", active);
-            out.add("events", eventsSummary(v, view.events()));
+            out.add("events", view.events() != null && v.canSee(config, "events") ? Payloads.events(view.events()) : JsonNull.INSTANCE);
+        } else {
+            out.add("factions", JsonNull.INSTANCE);
+            out.add("grace", JsonNull.INSTANCE);
+            out.add("eotw", JsonNull.INSTANCE);
+            out.add("activeSieges", JsonNull.INSTANCE);
+            out.add("events", JsonNull.INSTANCE);
         }
         JsonObject activity = new JsonObject();
         long[] hour = heat.totals(now - 60 * 60 * 1000L);
@@ -1208,26 +1110,15 @@ public final class Atlas {
         return out;
     }
 
-    private static JsonArray top(List<JsonObject> rows, String key) {
-        List<JsonObject> sorted = new ArrayList<>(rows);
-        sorted.sort((a, b) -> Double.compare(Json.num(b, key, 0), Json.num(a, key, 0)));
-        JsonArray out = new JsonArray();
-        for (int i = 0; i < Math.min(5, sorted.size()); i++) {
-            JsonObject f = sorted.get(i);
-            JsonObject o = new JsonObject();
-            o.addProperty("tag", Json.str(f, "tag"));
-            o.addProperty("name", Json.str(f, "name"));
-            o.addProperty("color", Json.str(f, "color"));
-            o.addProperty(key, Json.num(f, key, 0));
-            out.add(o);
-        }
-        return out;
+    /** The from time of a changes or heat query, clamped to the heat retention. */
+    private static long clampSince(long since, long now) {
+        return Math.max(now - HeatTracker.RETENTION_MS, Math.min(since, now));
     }
 
+    /** Tiles redrawn since a time, as [zoom, x, z, at] rows. */
     public JsonObject changesPayload(Viewer v, String world, long since) {
         long now = System.currentTimeMillis();
-        long floor = now - HeatTracker.RETENTION_MS;
-        long from = Math.max(floor, Math.min(since, now));
+        long from = clampSince(since, now);
         JsonObject out = new JsonObject();
         out.addProperty("world", world);
         out.addProperty("now", now);
@@ -1244,34 +1135,47 @@ public final class Atlas {
             }
         }
         out.add("tiles", changed);
-        if (v.canSee(config, "heat")) {
-            JsonObject h = new JsonObject();
-            h.addProperty("bucketMs", HeatTracker.BUCKET_MS);
-            JsonArray rows = heat.query(world, from);
-            if (v.factionLimited(config, "heat")) {
-                // Faction viewers only see activity inside their own land.
-                DominionSnapshot.View view = snapshot.view();
-                JsonArray own = new JsonArray();
-                for (JsonElement re : rows) {
-                    JsonArray r = re.getAsJsonArray();
-                    JsonObject t = view.territoryAt(world, r.get(0).getAsInt(), r.get(1).getAsInt());
-                    if (t != null && v.sameFaction(Json.str(t, "tag"))) {
-                        own.add(r);
-                    }
+        return out;
+    }
+
+    /** Block activity per chunk since a time, as [cx, cz, breaks, places] rows. */
+    public JsonObject heatPayload(Viewer v, String world, long since) {
+        long now = System.currentTimeMillis();
+        long from = clampSince(since, now);
+        JsonObject out = new JsonObject();
+        out.addProperty("world", world);
+        out.addProperty("now", now);
+        out.addProperty("since", from);
+        out.addProperty("bucketSeconds", HeatTracker.BUCKET_MS / 1000);
+        JsonArray rows = v.canSee(config, "heat") ? heat.query(world, from) : new JsonArray();
+        if (v.canSee(config, "heat") && v.factionLimited(config, "heat")) {
+            // Faction viewers only see activity inside their own land.
+            DominionSnapshot.View view = snapshot.view();
+            JsonArray own = new JsonArray();
+            for (JsonElement re : rows) {
+                JsonArray r = re.getAsJsonArray();
+                JsonObject t = view.territoryAt(world, r.get(0).getAsInt(), r.get(1).getAsInt());
+                if (t != null && v.sameFaction(Json.str(t, "tag"))) {
+                    own.add(r);
                 }
-                rows = own;
             }
-            h.add("chunks", rows);
-            out.add("heat", h);
-        } else {
-            out.add("heat", JsonNull.INSTANCE);
+            rows = own;
         }
+        out.add("chunks", rows);
         return out;
     }
 
     // ---- feed and chat -----------------------------------------------------
 
-    public void addFeed(JsonObject line) {
+    /**
+     * Adds a feed line and sends it to browsers. Lines from the Dominion snapshot and from Atlas are both
+     * reduced to {at, type, text, source}. Lines without text are dropped.
+     */
+    public void addFeed(JsonObject raw) {
+        JsonObject line = Payloads.feedLine(raw);
+        if (line == null) {
+            return;
+        }
         synchronized (feed) {
             feed.addLast(line);
             while (feed.size() > FEED_KEEP) {
@@ -1281,25 +1185,39 @@ public final class Atlas {
         sse.broadcastAll("feed", Json.GSON.toJson(line), c -> c.viewer().canSee(config, "feed"));
     }
 
-    public JsonArray recentFeed() {
+    /** The feedlog event body {items: [FeedLine]}, oldest first. */
+    public JsonObject recentFeed() {
         JsonArray a = new JsonArray();
         synchronized (feed) {
             feed.forEach(a::add);
         }
-        return a;
+        return items(a);
     }
 
-    /** Adds a chat line captured from a chat event. The tag is the sender's faction from the snapshot. */
+    private static JsonObject items(JsonArray a) {
+        JsonObject o = new JsonObject();
+        o.add("items", a);
+        return o;
+    }
+
+    /**
+     * Adds a chat line captured from a chat event. The tag is the sender's faction from the snapshot. A
+     * hidden player's line is shown as A player, since chat is shared by every viewer.
+     */
     public void addChat(UUID sender, String name, String text) {
-        addChat(name, factionOf(sender), text, System.currentTimeMillis());
+        boolean hidden = isHiddenPlayer(sender);
+        addChat(hidden ? Payloads.HIDDEN_NAME : name, hidden ? null : factionOf(sender), text, System.currentTimeMillis());
     }
 
     /** Adds a chat line with its own time. The tag is the sender's faction tag, null when there is none. */
     public void addChat(String name, String tag, String text, long at) {
+        if (text == null) {
+            return;
+        }
         JsonObject line = new JsonObject();
         line.addProperty("at", at);
-        line.addProperty("name", name);
-        line.addProperty("tag", tag == null || tag.isBlank() ? null : tag);
+        line.addProperty("name", name == null ? "" : name);
+        Payloads.put(line, "tag", tag == null || tag.isBlank() ? null : tag);
         line.addProperty("text", text);
         synchronized (chat) {
             chat.addLast(line);
@@ -1310,12 +1228,13 @@ public final class Atlas {
         sse.broadcastAll("chat", Json.GSON.toJson(line), c -> c.viewer().canSee(config, "chat"));
     }
 
-    public JsonArray recentChat() {
+    /** The chatlog event body {items: [ChatLine]}, oldest first. */
+    public JsonObject recentChat() {
         JsonArray a = new JsonArray();
         synchronized (chat) {
             chat.forEach(a::add);
         }
-        return a;
+        return items(a);
     }
 
     /** Seeds the feed buffer from a freshly loaded snapshot without broadcasting. */
@@ -1328,7 +1247,10 @@ public final class Atlas {
             int start = Math.max(0, lines.size() - FEED_KEEP);
             for (int i = start; i < lines.size(); i++) {
                 if (lines.get(i).isJsonObject()) {
-                    feed.addLast(lines.get(i).getAsJsonObject());
+                    JsonObject line = Payloads.feedLine(lines.get(i).getAsJsonObject());
+                    if (line != null) {
+                        feed.addLast(line);
+                    }
                 }
             }
         }
@@ -1344,10 +1266,10 @@ public final class Atlas {
     public JsonObject markersPayload(Viewer v, String worldName) {
         JsonObject out = new JsonObject();
         out.addProperty("world", worldName);
+        out.add("at", JsonNull.INSTANCE);
         JsonArray list = new JsonArray();
         out.add("markers", list);
         if (!v.canSee(config, "markers")) {
-            out.addProperty("hidden", true);
             return out;
         }
         Universe u = Universe.get();
@@ -1423,9 +1345,50 @@ public final class Atlas {
             }
         }
         for (MarkerMerge.Candidate c : MarkerMerge.dedupe(visible, owner)) {
-            list.add(c.json());
+            list.add(markerJson(c));
         }
         return out;
+    }
+
+    /** One marker with the fixed API field list. kind is the drawn type and source where it came from. */
+    private static JsonObject markerJson(MarkerMerge.Candidate c) {
+        JsonObject m = c.json();
+        JsonObject o = new JsonObject();
+        String id = Payloads.text(m, "id");
+        o.addProperty("id", id == null ? "" : id);
+        String kind = Payloads.text(m, "kind");
+        o.addProperty("kind", kind == null ? "engine" : kind);
+        o.addProperty("source", c.source() == null ? "other" : c.source());
+        String name = Payloads.text(m, "name");
+        o.addProperty("name", name == null ? "" : name);
+        o.addProperty("x", Payloads.whole(m, "x", 0));
+        Payloads.put(o, "y", Payloads.whole(m, "y"));
+        o.addProperty("z", Payloads.whole(m, "z", 0));
+        Payloads.put(o, "icon", Payloads.text(m, "icon"));
+        o.addProperty("major", Payloads.flag(m, "major"));
+        JsonObject alert = Json.obj(m, "alert");
+        if (alert == null) {
+            o.add("alert", JsonNull.INSTANCE);
+        } else {
+            JsonObject a = new JsonObject();
+            Payloads.put(a, "icon", Payloads.text(alert, "icon"));
+            a.addProperty("durationSeconds", Payloads.number(alert, "durationSeconds", 0));
+            a.addProperty("timeoutSeconds", Payloads.number(alert, "timeoutSeconds", 0));
+            Payloads.put(a, "tint", Payloads.text(alert, "tint"));
+            o.add("alert", a);
+        }
+        Payloads.put(o, "tint", Payloads.text(m, "tint"));
+        JsonObject by = Json.obj(m, "by");
+        if (by == null) {
+            o.add("by", JsonNull.INSTANCE);
+        } else {
+            JsonObject b = new JsonObject();
+            Payloads.put(b, "uuid", Payloads.text(by, "uuid"));
+            Payloads.put(b, "name", Payloads.text(by, "name"));
+            o.add("by", b);
+        }
+        o.addProperty("own", Payloads.flag(m, "own"));
+        return o;
     }
 
     /**
@@ -1568,14 +1531,20 @@ public final class Atlas {
     }
 
     /**
-     * Reads shared markers of every world and the personal markers of players with an open stream on
-     * the world threads, and sends markers events for the sets that changed. The comparison and the
-     * sending run on the given executor, which is the Atlas scheduler.
+     * Reads the markers of every world and the personal markers of players with an open stream on the
+     * world threads, and sends markers events for the sets that changed. The comparison and the sending
+     * run on the given executor, which is the Atlas scheduler. Worlds that went away since the previous
+     * poll are forgotten here as well.
      */
-    public void pollMarkers(java.util.concurrent.Executor executor) {
+    public void pollMarkers(Executor executor) {
+        if (background == null) {
+            background = executor;
+        }
+        forgetRemovedWorlds();
         engine.pollShared(executor, world -> {
             JsonObject o = new JsonObject();
             o.addProperty("world", world);
+            o.addProperty("own", false);
             sse.broadcastAll("markers", Json.GSON.toJson(o), c -> c.viewer().canSee(config, "markers"));
         });
         personal.poll(sse.viewerUuids(), executor, (uuid, world) -> {
@@ -1587,6 +1556,39 @@ public final class Atlas {
         });
     }
 
+    /** Compares the loaded worlds with the previous poll and drops the caches of worlds that are gone. */
+    private void forgetRemovedWorlds() {
+        Universe u = Universe.get();
+        if (u == null) {
+            return;
+        }
+        java.util.Set<String> now = new java.util.HashSet<>(u.getWorlds().keySet());
+        for (String gone : new ArrayList<>(seenWorlds.keySet())) {
+            if (!now.contains(gone)) {
+                worldRemoved(gone, Boolean.TRUE.equals(seenWorlds.get(gone)));
+            }
+        }
+        for (String name : now) {
+            LiveState.WorldInfo info = live.worlds().get(name);
+            boolean transientWorld = info != null && info.kind() != null && info.kind().transientWorld();
+            seenWorlds.merge(name, transientWorld, (a, b) -> a || b);
+        }
+    }
+
+    /**
+     * Forgets a removed world. Marker caches and jobs, personal sets and the world's in flight reads always
+     * go. Heat goes only for portal and instance worlds, whose map data is dropped with them.
+     */
+    public void worldRemoved(String name, boolean transientWorld) {
+        seenWorlds.remove(name);
+        engine.forgetMarkers(name);
+        personal.dropWorld(name);
+        live.forget(name);
+        if (transientWorld) {
+            heat.dropWorld(name);
+        }
+    }
+
     private JsonObject worldEventJson(EngineData.ActiveEvent e) {
         JsonObject o = new JsonObject();
         o.addProperty("id", e.id().toString());
@@ -1594,8 +1596,8 @@ public final class Atlas {
         o.addProperty("name", e.name());
         o.addProperty("displayName", e.displayName());
         o.addProperty("startedAt", e.startedAt());
-        o.addProperty("x", e.x());
-        o.addProperty("z", e.z());
+        Payloads.put(o, "x", e.x());
+        Payloads.put(o, "z", e.z());
         o.addProperty("located", located(e));
         return o;
     }
@@ -1610,10 +1612,12 @@ public final class Atlas {
         JsonArray list = new JsonArray();
         out.add("events", list);
         if (!v.canSee(config, "worldevents")) {
-            out.addProperty("hidden", true);
             return out;
         }
         for (EngineData.ActiveEvent e : engine.activeEvents(world)) {
+            if (world == null && hiddenWorld(v, e.world())) {
+                continue;
+            }
             list.add(worldEventJson(e));
         }
         return out;
@@ -1623,7 +1627,7 @@ public final class Atlas {
      * Announces a world event start or end over the event stream and in the Atlas feed. Events without a
      * location are not announced.
      */
-    void worldEventChanged(EngineData.ActiveEvent e, String state, long at) {
+    public void worldEventChanged(EngineData.ActiveEvent e, String state, long at) {
         if (!located(e)) {
             // Events without a location are background state such as bootstrap and prelude events.
             return;
@@ -1634,14 +1638,15 @@ public final class Atlas {
         o.addProperty("name", e.name());
         o.addProperty("displayName", e.displayName());
         o.addProperty("state", state);
-        o.addProperty("x", e.x());
-        o.addProperty("z", e.z());
+        Payloads.put(o, "x", e.x());
+        Payloads.put(o, "z", e.z());
         o.addProperty("at", at);
-        sse.broadcastAll("worldevent", Json.GSON.toJson(o), c -> c.viewer().canSee(config, "worldevents"));
+        sse.broadcastAll("worldevent", Json.GSON.toJson(o), c -> c.viewer().canSee(config, "worldevents")
+                && !hiddenWorld(c.viewer(), e.world()));
         String where = worldLabel(e.world());
         feedLine("worldevent", "start".equals(state)
                 ? e.displayName() + " began in " + where + "."
-                : e.displayName() + " ended in " + where + ".", at);
+                : e.displayName() + " ended in " + where + ".", at, e.world());
     }
 
     /** The display name of a world for feed lines. */
@@ -1653,33 +1658,24 @@ public final class Atlas {
         return world == null ? "the world" : world;
     }
 
-    private void feedLine(String type, String text, long at) {
+    /** Adds a feed line written by Atlas. world is the world the line is about, so the world gate applies. */
+    private void feedLine(String type, String text, long at, String world) {
         JsonObject line = new JsonObject();
         line.addProperty("at", at);
         line.addProperty("type", type);
         line.addProperty("text", text);
         line.addProperty("source", "atlas");
+        line.addProperty("world", world);
         addFeed(line);
-    }
-
-    /** The name of a kill party as this viewer may see it. Hidden players are A player to non admins. */
-    private String partyName(Viewer v, KillLog.Party p) {
-        if (p.player() && hiddenFrom(v, p.uuid())) {
-            return "A player";
-        }
-        return p.name();
     }
 
     private JsonObject partyJson(Viewer v, KillLog.Party p) {
         JsonObject o = new JsonObject();
-        o.addProperty("name", partyName(v, p));
-        o.addProperty("type", p.type());
+        boolean hidden = p.player() && hiddenFrom(v, p.uuid());
+        Payloads.person(o, "uuid", "name", p.player() ? p.uuid() : null, p.name() == null ? "" : p.name(), hidden);
+        o.addProperty("type", p.type() == null ? (p.player() ? "Player" : "") : p.type());
         o.addProperty("player", p.player());
-        if (!p.player()) {
-            o.addProperty("boss", p.boss());
-        } else {
-            o.addProperty("boss", false);
-        }
+        o.addProperty("boss", !p.player() && p.boss());
         return o;
     }
 
@@ -1694,15 +1690,15 @@ public final class Atlas {
         }
         JsonObject o = new JsonObject();
         o.addProperty("at", k.at());
-        o.addProperty("world", k.world());
+        Payloads.put(o, "world", k.world());
         o.add("victim", partyJson(v, k.victim()));
         o.add("killer", k.killer() == null ? JsonNull.INSTANCE : partyJson(v, k.killer()));
-        o.addProperty("cause", k.cause());
+        Payloads.put(o, "cause", k.cause());
         o.addProperty("ranged", k.ranged());
         return o;
     }
 
-    public JsonArray killLog(Viewer v, int limit) {
+    private JsonArray killRows(Viewer v, int limit) {
         JsonArray list = new JsonArray();
         if (!v.canSee(config, "kills")) {
             return list;
@@ -1719,18 +1715,27 @@ public final class Atlas {
         return list;
     }
 
+    /** The killlog event body {items: [Kill]}, newest last. */
+    public JsonObject killLog(Viewer v, int limit) {
+        return items(killRows(v, limit));
+    }
+
     public JsonObject killsPayload(Viewer v, int limit) {
         JsonObject out = new JsonObject();
-        out.add("kills", killLog(v, Math.min(KillLog.KEEP, Math.max(1, limit))));
-        if (!v.canSee(config, "kills")) {
-            out.addProperty("hidden", true);
-        }
+        out.add("kills", killRows(v, Math.min(KillLog.KEEP, Math.max(1, limit))));
         return out;
     }
 
-    /** Records a death from the death system, sends it to browsers and adds boss kills and player deaths to the feed. */
+    /**
+     * Records a death from the death system. The log entry is made at once, and sending it to browsers and
+     * writing the feed line run on the Atlas scheduler so the world thread is not held up.
+     */
     public void addKill(KillLog.Kill k) {
         kills.add(k);
+        runInBackground(() -> announceKill(k));
+    }
+
+    private void announceKill(KillLog.Kill k) {
         sse.broadcast("kill", c -> c.viewer().canSee(config, "kills"), c -> {
             JsonObject o = killJson(c.viewer(), k);
             return o == null ? null : Json.GSON.toJson(o);
@@ -1739,7 +1744,7 @@ public final class Atlas {
         KillLog.Party victim = k.victim();
         KillLog.Party killer = k.killer();
         if (!victim.player() && victim.boss() && killer != null) {
-            feedLine("boss", feedName(killer) + " defeated " + victim.name() + " in " + where + ".", k.at());
+            feedLine("boss", feedName(killer) + " defeated " + victim.name() + " in " + where + ".", k.at(), k.world());
         } else if (victim.player()) {
             String text;
             if (killer != null && killer.player()) {
@@ -1751,69 +1756,24 @@ public final class Atlas {
             } else {
                 text = feedName(victim) + " died in " + where + ".";
             }
-            feedLine("death", text, k.at());
+            feedLine("death", text, k.at(), k.world());
         }
     }
 
     /** Feed text is shared by every viewer, so hidden players are always A player there. */
     private String feedName(KillLog.Party p) {
         if (p.player() && isHiddenPlayer(p.uuid())) {
-            return "A player";
+            return Payloads.HIDDEN_NAME;
         }
         return p.name();
     }
 
-    /**
-     * Active boss bars. EncounterBossBarState keeps its target, name and hard mode flag in private
-     * fields with no getters in 0.7.0, so the list stays empty instead of reading private state.
-     */
-    public JsonObject bossesPayload(Viewer v) {
-        JsonObject out = new JsonObject();
-        out.add("bosses", new JsonArray());
-        if (!v.canSee(config, "events")) {
-            out.addProperty("hidden", true);
-        }
-        return out;
-    }
-
-    /** The Feats export unchanged plus available and updatedAt, with hidden players renamed for non admins. */
+    /** The leaderboard from the Feats export, with hidden players renamed for this viewer. */
     public JsonObject leaderboardPayload(Viewer v) {
-        JsonObject out = new JsonObject();
         if (!v.canSee(config, "leaderboard")) {
-            out.addProperty("available", false);
-            out.addProperty("hidden", true);
-            return out;
+            return Payloads.emptyLeaderboard();
         }
-        JsonObject root = leaderboard.root();
-        if (root == null) {
-            out.addProperty("available", false);
-            return out;
-        }
-        out = root.deepCopy();
-        out.addProperty("available", true);
-        out.addProperty("updatedAt", leaderboard.updatedAt());
-        if (!v.admin()) {
-            for (String list : new String[]{"players", "recent"}) {
-                for (JsonElement e : Json.arr(out, list)) {
-                    if (!e.isJsonObject()) {
-                        continue;
-                    }
-                    JsonObject row = e.getAsJsonObject();
-                    String raw = Json.str(row, "uuid");
-                    UUID uuid;
-                    try {
-                        uuid = raw == null ? null : UUID.fromString(raw);
-                    } catch (IllegalArgumentException ex) {
-                        uuid = null;
-                    }
-                    if (hiddenFrom(v, uuid)) {
-                        row.addProperty("name", "A player");
-                        row.add("uuid", JsonNull.INSTANCE);
-                    }
-                }
-            }
-        }
-        return out;
+        return Payloads.leaderboard(leaderboard.root(), leaderboard.updatedAt(), uuid -> hiddenFrom(v, uuid));
     }
 
     /** Records where a player was when they left. Called from the disconnect event. */
@@ -1822,5 +1782,124 @@ public final class Atlas {
             return;
         }
         lastSeen.record(new LastSeen.Entry(uuid, name, System.currentTimeMillis(), world, x, y, z));
+    }
+
+    // ---- routing -------------------------------------------------------------
+
+    /** The status and body of one API answer. */
+    public record ApiResult(int status, JsonObject body) {
+        static ApiResult ok(JsonObject body) {
+            return new ApiResult(200, body);
+        }
+
+        static ApiResult error(int status, String message) {
+            return new ApiResult(status, Payloads.error(message));
+        }
+    }
+
+    private static final ApiResult NOT_FOUND = ApiResult.error(404, "Not found.");
+
+    /** The layer each data endpoint needs, checked before the body is built. */
+    private boolean layerVisible(Viewer v, String head) {
+        return switch (head) {
+            case "players" -> seesPlayers(v);
+            case "markers" -> v.canSee(config, "markers");
+            case "worldevents" -> v.canSee(config, "worldevents");
+            case "kills" -> v.canSee(config, "kills");
+            case "leaderboard" -> v.canSee(config, "leaderboard");
+            case "territories" -> v.canSee(config, "territories");
+            case "points" -> v.canSee(config, "points") || v.canSee(config, "events") || v.canSee(config, "zones");
+            case "factions" -> v.canSee(config, "factions");
+            case "nations" -> v.canSee(config, "nations");
+            case "stats" -> v.canSee(config, "stats");
+            case "changes" -> v.canSee(config, "terrain");
+            case "heat" -> v.canSee(config, "heat");
+            default -> true;
+        };
+    }
+
+    /**
+     * True when a world exists for the API. A world the engine has loaded exists, and so does a world the
+     * Dominion snapshot lists, for territories and points. Without a running universe, as in tests, every
+     * name counts.
+     */
+    private boolean worldKnown(String world, boolean snapshotWorlds) {
+        Universe u = Universe.get();
+        if (u == null) {
+            return true;
+        }
+        if (u.getWorld(world) != null) {
+            return true;
+        }
+        return snapshotWorlds && snapshot.view().worlds.containsKey(world);
+    }
+
+    /**
+     * Answers the data endpoints of API version 1. parts are the decoded path parts after /api/. Returns
+     * null for endpoints this does not answer (health, tiles, events, link and marker icons), which the
+     * web server handles itself. A hidden layer answers 403, an unknown world or faction 404, and every
+     * body follows api-v1.
+     */
+    public ApiResult route(Viewer v, List<String> parts, Map<String, String> query) {
+        if (parts == null || parts.isEmpty()) {
+            return null;
+        }
+        String head = parts.get(0);
+        java.util.Set<String> mine = java.util.Set.of("worlds", "players", "markers", "worldevents", "kills",
+                "leaderboard", "territories", "points", "factions", "nations", "stats", "changes", "heat", "bosses");
+        if (!mine.contains(head)) {
+            return null;
+        }
+        if ("bosses".equals(head)) {
+            return NOT_FOUND;
+        }
+        if ("worlds".equals(head)) {
+            return parts.size() == 1 ? ApiResult.ok(worldsPayload(v)) : NOT_FOUND;
+        }
+        boolean worldInPath = java.util.Set.of("markers", "territories", "points", "changes", "heat").contains(head);
+        String world = worldInPath ? (parts.size() >= 2 ? parts.get(1) : null) : query.get("world");
+        if (worldInPath && (world == null || world.isBlank())) {
+            return ApiResult.error(400, "Name a world.");
+        }
+        if (world != null && (hiddenWorld(v, world) || !worldKnown(world, "territories".equals(head) || "points".equals(head)))) {
+            return ApiResult.error(404, "No world with that name.");
+        }
+        if (!layerVisible(v, head)) {
+            return ApiResult.error(403, HIDDEN_LAYER);
+        }
+        long since = parseLong(query.get("since"), System.currentTimeMillis() - 60 * 60 * 1000L);
+        return switch (head) {
+            case "players" -> ApiResult.ok(playersApiPayload(v, world,
+                    "1".equals(query.get("trails")) || "true".equals(query.get("trails"))));
+            case "markers" -> ApiResult.ok(markersPayload(v, world));
+            case "worldevents" -> ApiResult.ok(worldEventsPayload(v, world));
+            case "kills" -> ApiResult.ok(killsPayload(v, (int) Math.min(KillLog.KEEP, Math.max(1, parseLong(query.get("limit"), 50)))));
+            case "leaderboard" -> ApiResult.ok(leaderboardPayload(v));
+            case "territories" -> ApiResult.ok(territoriesPayload(v, world));
+            case "points" -> ApiResult.ok(pointsPayload(v, world));
+            case "factions" -> {
+                if (parts.size() < 2) {
+                    yield ApiResult.ok(factionsPayload(v));
+                }
+                JsonObject f = factionPayload(v, parts.get(1));
+                yield f == null ? ApiResult.error(404, "No faction with that tag is visible.") : ApiResult.ok(f);
+            }
+            case "nations" -> ApiResult.ok(nationsPayload(v));
+            case "stats" -> ApiResult.ok(statsPayload(v));
+            case "changes" -> ApiResult.ok(changesPayload(v, world, since));
+            case "heat" -> ApiResult.ok(heatPayload(v, world, since));
+            default -> NOT_FOUND;
+        };
+    }
+
+    private static long parseLong(String s, long def) {
+        if (s == null || s.isBlank()) {
+            return def;
+        }
+        try {
+            return Long.parseLong(s.trim());
+        } catch (NumberFormatException e) {
+            return def;
+        }
     }
 }

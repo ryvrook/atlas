@@ -98,24 +98,228 @@ public final class ApiServer {
     private final com.hypixel.hytale.logger.HytaleLogger logger;
     private Bound bound;
     private volatile byte[] indexHtml;
+    private volatile byte[] indexGzip;
     private volatile String indexEtag;
     private volatile String indexCsp = CSP;
     private final java.util.concurrent.atomic.AtomicBoolean proxyWarned = new java.util.concurrent.atomic.AtomicBoolean();
     /** Static files read from the jar, which never change while the server runs. Only files that exist are kept. */
-    private final Map<String, byte[]> staticFiles = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<String, StaticFile> staticFiles = new java.util.concurrent.ConcurrentHashMap<>();
     private final MarkerIcons markerIcons = new MarkerIcons();
     private final Semaphore inFlight = new Semaphore(MAX_IN_FLIGHT);
+    private final RateLimiter apiLimiter = new RateLimiter();
+    /** Random id sent with health answers, so a probe of the port can tell this server from another program. */
+    private final String instanceId = Long.toHexString(new java.security.SecureRandom().nextLong());
+    private final RateLimiter tileLimiter = new RateLimiter();
+    /** Extra health figures from the plugin, such as failing tasks and disk writes. */
+    private volatile java.util.function.Consumer<JsonObject> healthExtras = o -> { };
+    /** Bind retry state, see startWithRetry. Guarded by this. */
+    private java.util.concurrent.ScheduledFuture<?> retryTask;
+    private int retryAttempts;
+    private long retryStartedAt;
+    private long retryNextAt;
+    private String retryError;
+    private boolean retryGaveUp;
 
     public ApiServer(Atlas atlas, com.hypixel.hytale.logger.HytaleLogger logger) {
         this.atlas = atlas;
         this.logger = logger;
+        atlas.sse().setWorldGate((v, w) -> !worldHidden(v, w));
+    }
+
+    /** Lets the plugin add its own figures, such as failing tasks and disk writes, to the admin health answer. */
+    public void setHealthExtras(java.util.function.Consumer<JsonObject> extras) {
+        healthExtras = extras == null ? o -> { } : extras;
     }
 
     /** Binds the configured address and starts serving. Throws when the address cannot be bound. */
     public synchronized void start() throws IOException {
         AtlasConfig cfg = atlas.config();
         setIndex(loadIndex(cfg.publicTitle));
+        precompressStatic();
         bound = bind(cfg);
+    }
+
+    /** Seconds between bind attempts while the port is taken. */
+    static final long RETRY_EVERY_MS = 30_000;
+    /** How long bind attempts go on before Atlas gives up until the next reload. */
+    static final long RETRY_FOR_MS = 10 * 60_000L;
+
+    /**
+     * Starts serving, and when the port is taken keeps trying every 30 seconds for 10 minutes on
+     * the given scheduler. The first failure logs one WARNING and a later success one INFO line.
+     * Returns null when the server is up, otherwise the reason of the first failure. Any other
+     * failure, such as an address that does not exist on this machine, is returned without retries.
+     */
+    public synchronized String startWithRetry(java.util.concurrent.ScheduledExecutorService scheduler) {
+        cancelRetry();
+        try {
+            start();
+            announce(1);
+            return null;
+        } catch (IOException | RuntimeException e) {
+            AtlasConfig cfg = atlas.config();
+            String why = String.valueOf(e.getMessage());
+            if (!(e instanceof java.net.BindException) || scheduler == null) {
+                logger.at(Level.SEVERE).withCause(e).log("Atlas could not start its web server on %s:%d", cfg.bind, cfg.port);
+                return why;
+            }
+            String occupant = describeOccupant(cfg);
+            logger.at(Level.WARNING).log("Atlas could not bind its web server to %s:%d because the port is in use%s. "
+                            + "Atlas tries again every %d seconds for %d minutes.", cfg.bind, cfg.port, occupant,
+                    RETRY_EVERY_MS / 1000, RETRY_FOR_MS / 60_000);
+            retryAttempts = 1;
+            retryStartedAt = System.currentTimeMillis();
+            retryNextAt = retryStartedAt + RETRY_EVERY_MS;
+            retryError = why;
+            retryGaveUp = false;
+            retryTask = scheduler.scheduleWithFixedDelay(this::retryBind, RETRY_EVERY_MS, RETRY_EVERY_MS,
+                    java.util.concurrent.TimeUnit.MILLISECONDS);
+            return "The port " + cfg.port + " is in use. Atlas tries again every 30 seconds for 10 minutes.";
+        }
+    }
+
+    private synchronized void retryBind() {
+        if (retryTask == null || bound != null) {
+            cancelRetry();
+            return;
+        }
+        AtlasConfig cfg = atlas.config();
+        retryAttempts++;
+        try {
+            start();
+            announce(retryAttempts);
+            cancelRetry();
+            retryError = null;
+        } catch (IOException | RuntimeException e) {
+            retryError = String.valueOf(e.getMessage());
+            long now = System.currentTimeMillis();
+            retryNextAt = now + RETRY_EVERY_MS;
+            if (now - retryStartedAt >= RETRY_FOR_MS) {
+                logger.at(Level.SEVERE).log("Atlas gave up binding its web server to %s:%d after %d attempts. "
+                        + "Free the port or change it in atlas.json, then run /atlas reload.", cfg.bind, cfg.port, retryAttempts);
+                retryGaveUp = true;
+                if (retryTask != null) {
+                    retryTask.cancel(false);
+                    retryTask = null;
+                }
+            }
+        }
+    }
+
+    /**
+     * Logs where the map listens, then checks off the request path whether the port answers as
+     * this server or looks shared with another program, and names other map mods when it does.
+     */
+    private void announce(int attempts) {
+        String address = boundAddress();
+        int port = atlas.config().port;
+        Thread.ofVirtual().name("Atlas-port-check").start(() -> {
+            String shared = probeOwnPort();
+            String others = otherMapMods.get();
+            if (attempts > 1) {
+                logger.at(Level.INFO).log("Atlas web map listening on http://%s/ on port %d after %d bind attempts",
+                        address, port, attempts);
+            } else {
+                logger.at(Level.INFO).log("Atlas web map listening on http://%s/ on port %d%s", address, port,
+                        shared == null ? ", and the port answers as Atlas" : "");
+            }
+            if (shared != null) {
+                logger.at(Level.WARNING).log("Atlas port %d looks shared, %s.%s Requests may reach the other program "
+                        + "instead of Atlas. Give Atlas its own port in atlas.json.", port, shared,
+                        others == null || others.isEmpty() ? "" : " Other map mods found in the mods folder are " + others + ".");
+            }
+        });
+    }
+
+    /** Names of other map mods in the mods folder, joined, or empty. Set by the plugin. */
+    private volatile java.util.function.Supplier<String> otherMapMods = () -> "";
+
+    public void setOtherMapMods(java.util.function.Supplier<String> names) {
+        otherMapMods = names == null ? () -> "" : names;
+    }
+
+    /** Stops pending bind attempts and forgets their state. */
+    public synchronized void cancelRetry() {
+        if (retryTask != null) {
+            retryTask.cancel(false);
+            retryTask = null;
+        }
+        retryAttempts = 0;
+        retryGaveUp = false;
+        retryNextAt = 0;
+    }
+
+    /** Bind retry state for the health answer, or null when no retry is pending or failed. */
+    private synchronized JsonObject bindState() {
+        if (retryTask == null && !retryGaveUp) {
+            return null;
+        }
+        JsonObject o = new JsonObject();
+        o.addProperty("state", retryGaveUp ? "failed" : "retrying");
+        o.addProperty("attempts", retryAttempts);
+        o.addProperty("startedAt", retryStartedAt);
+        if (retryGaveUp) {
+            o.add("nextAttemptAt", com.google.gson.JsonNull.INSTANCE);
+        } else {
+            o.addProperty("nextAttemptAt", retryNextAt);
+        }
+        o.addProperty("error", retryError);
+        return o;
+    }
+
+    /**
+     * Asks the bound port over loopback, or over the bound address when it is a specific one, who
+     * answers there. Returns null when this server answered, otherwise a few words on what did. On
+     * some systems a second program can listen on the same port on a more specific address, and the
+     * port then looks shared, with local requests reaching the other program.
+     */
+    public String probeOwnPort() {
+        AtlasConfig cfg = atlas.config();
+        String host = "0.0.0.0".equals(cfg.bind) || "::".equals(cfg.bind) || cfg.bind.isBlank() ? "127.0.0.1" : cfg.bind;
+        try (java.net.Socket sock = new java.net.Socket()) {
+            sock.connect(new InetSocketAddress(host, cfg.port), 1000);
+            sock.setSoTimeout(2000);
+            OutputStream out = sock.getOutputStream();
+            out.write(("GET " + cfg.basePath + "/api/health HTTP/1.0\r\nHost: " + host + "\r\n\r\n")
+                    .getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+            String text = new String(sock.getInputStream().readNBytes(4096), StandardCharsets.ISO_8859_1)
+                    .toLowerCase(java.util.Locale.ROOT);
+            if (text.contains("x-atlas-instance: " + instanceId.toLowerCase(java.util.Locale.ROOT))) {
+                return null;
+            }
+            return text.contains("map") || text.contains("leaflet")
+                    ? "another web map answers on " + host + ":" + cfg.port
+                    : "another program answers on " + host + ":" + cfg.port;
+        } catch (IOException | RuntimeException e) {
+            return "nothing answered on " + host + ":" + cfg.port + " (" + e.getMessage() + ")";
+        }
+    }
+
+    /**
+     * A few words on what holds the port, found by asking it over loopback with a short timeout.
+     * Says when it answered like a web map, which usually means another map mod uses the same port.
+     */
+    private static String describeOccupant(AtlasConfig cfg) {
+        String host = "0.0.0.0".equals(cfg.bind) || "::".equals(cfg.bind) || cfg.bind.isBlank() ? "127.0.0.1" : cfg.bind;
+        try (java.net.Socket sock = new java.net.Socket()) {
+            sock.connect(new InetSocketAddress(host, cfg.port), 1000);
+            sock.setSoTimeout(1500);
+            OutputStream out = sock.getOutputStream();
+            out.write(("GET / HTTP/1.0\r\nHost: " + host + "\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+            byte[] head = sock.getInputStream().readNBytes(4096);
+            String text = new String(head, StandardCharsets.ISO_8859_1).toLowerCase(java.util.Locale.ROOT);
+            if (!text.startsWith("http/")) {
+                return ", by something that is not a web server";
+            }
+            if (text.contains("map") || text.contains("leaflet")) {
+                return ", by a web server that looks like another map mod";
+            }
+            return ", by another web server";
+        } catch (IOException | RuntimeException e) {
+            return "";
+        }
     }
 
     private Bound bind(AtlasConfig cfg) throws IOException {
@@ -163,6 +367,7 @@ public final class ApiServer {
     }
 
     public synchronized void stop() {
+        cancelRetry();
         atlas.sse().closeAll();
         if (bound != null) {
             bound.stop();
@@ -191,6 +396,7 @@ public final class ApiServer {
     }
 
     private void setIndex(byte[] html) {
+        indexGzip = gzip(html);
         indexHtml = html;
         indexEtag = MarkerIcons.etagOf(html);
         indexCsp = indexCsp(new String(html, StandardCharsets.UTF_8));
@@ -240,7 +446,7 @@ public final class ApiServer {
                 return;
             }
         }
-        send(ex, 200, indexHtml, "HEAD".equals(method));
+        sendMaybeGzip(ex, 200, indexHtml, indexGzip);
     }
 
     /** Headers sent with the page and every static file. */
@@ -254,12 +460,20 @@ public final class ApiServer {
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
     }
 
+    /** A static file with its gzip form when that is smaller, and its ETag. */
+    record StaticFile(byte[] raw, byte[] gzip, String etag) {
+    }
+
+    /** Extensions whose files are sent gzipped to browsers that accept it. Images are compressed already. */
+    private static final java.util.Set<String> COMPRESSIBLE = java.util.Set.of("html", "js", "mjs", "css", "json", "map",
+            "svg", "txt", "webmanifest", "ico");
+
     /**
      * Reads a file below web in the jar, or returns null. The relative path must be plain segments,
-     * so nothing outside the web folder is ever read.
+     * so nothing outside the web folder is ever read. Files found are kept with their gzip form.
      */
-    private byte[] staticFile(String rel) {
-        byte[] cached = staticFiles.get(rel);
+    private StaticFile staticFile(String rel) {
+        StaticFile cached = staticFiles.get(rel);
         if (cached != null) {
             return cached;
         }
@@ -275,10 +489,57 @@ public final class ApiServer {
             data = null;
         }
         // Misses are not kept, so requests for made up names cannot fill the cache.
-        if (data != null) {
-            staticFiles.put(rel, data);
+        if (data == null) {
+            return null;
         }
-        return data;
+        StaticFile f = staticEntry(rel, data);
+        staticFiles.put(rel, f);
+        return f;
+    }
+
+    private static StaticFile staticEntry(String rel, byte[] data) {
+        String ext = rel.substring(rel.lastIndexOf('.') + 1).toLowerCase(java.util.Locale.ROOT);
+        byte[] gz = COMPRESSIBLE.contains(ext) && data.length > 256 ? gzip(data) : null;
+        return new StaticFile(data, gz, MarkerIcons.etagOf(data));
+    }
+
+    /**
+     * Reads and compresses every file below web in the plugin jar once, at start, so no request
+     * pays for compression. Files that cannot be listed are still read on first request.
+     */
+    private void precompressStatic() {
+        if (!staticFiles.isEmpty()) {
+            return;
+        }
+        try {
+            java.net.URL root = ApiServer.class.getResource("/web/index.html");
+            if (root == null) {
+                return;
+            }
+            java.net.URI uri = root.toURI();
+            if ("jar".equals(uri.getScheme())) {
+                String spec = uri.getSchemeSpecificPart();
+                String jarPath = spec.substring(0, spec.indexOf("!/"));
+                try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(new java.io.File(new java.net.URI(jarPath)))) {
+                    var entries = zip.entries();
+                    while (entries.hasMoreElements()) {
+                        java.util.zip.ZipEntry e = entries.nextElement();
+                        String name = e.getName();
+                        if (e.isDirectory() || !name.startsWith("web/") || e.getSize() > 8 * 1024 * 1024) {
+                            continue;
+                        }
+                        String rel = safeRelative(name.substring(4));
+                        if (rel != null && !rel.equals("index.html")) {
+                            try (InputStream in = zip.getInputStream(e)) {
+                                staticFiles.put(rel, staticEntry(rel, in.readAllBytes()));
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception | LinkageError e) {
+            logger.at(Level.FINE).withCause(e).log("Atlas could not read its web files ahead of time");
+        }
     }
 
     /** A safe relative path below web, or null when the path holds anything unusual. */
@@ -328,6 +589,18 @@ public final class ApiServer {
      * slot of MAX_IN_FLIGHT and gets 503 with Retry-After when none is free.
      */
     private void handle(HttpExchange ex) throws IOException {
+        long wait = rateWait(ex);
+        if (wait > 0) {
+            try {
+                ex.getResponseHeaders().set("Retry-After", Long.toString(wait));
+                error(ex, 429, "Too many requests. Try again in a moment.");
+            } catch (IOException ignored) {
+                // The client went away.
+            } finally {
+                ex.close();
+            }
+            return;
+        }
         if (isEventStream(ex)) {
             dispatch(ex);
             return;
@@ -348,6 +621,40 @@ public final class ApiServer {
         } finally {
             inFlight.release();
         }
+    }
+
+    /**
+     * Takes one request from the client's API or tile budget and returns the seconds to wait, or 0
+     * when the request may go ahead. Tiles and marker icons use tileRequestsPerMinute, every other
+     * api request apiRequestsPerMinute. The page and its files are not limited. Without
+     * trustedProxies, local and private peers are not limited per address, since behind an
+     * unlisted reverse proxy every browser would share the proxy's address.
+     */
+    private long rateWait(HttpExchange ex) {
+        String path = stripBase(ex.getRequestURI().getRawPath(), atlas.config().basePath);
+        if (!path.startsWith("/api/") || "OPTIONS".equals(ex.getRequestMethod())) {
+            return 0;
+        }
+        boolean tile = path.startsWith("/api/tiles/") || path.startsWith("/api/marker-icons/");
+        AtlasConfig cfg = atlas.config();
+        int limit = tile ? cfg.tileRequestsPerMinute() : cfg.apiRequestsPerMinute();
+        if (limit <= 0) {
+            return 0;
+        }
+        if (atlas.proxies().isEmpty()) {
+            java.net.InetAddress peer = ex.getRemoteAddress() == null ? null : ex.getRemoteAddress().getAddress();
+            if (isLocalOrPrivate(peer)) {
+                return 0;
+            }
+        }
+        String key = LinkService.rateKey(clientAddress(ex));
+        return (tile ? tileLimiter : apiLimiter).acquire(key, limit);
+    }
+
+    /** Drops idle rate limit buckets. Called from the plugin's prune task. */
+    public void pruneRateLimits() {
+        apiLimiter.prune();
+        tileLimiter.prune();
     }
 
     /** True for api/events, with or without the basePath prefix. */
@@ -414,7 +721,8 @@ public final class ApiServer {
                 handleLink(ex);
                 return;
             }
-            if (!"GET".equals(method) && !("HEAD".equals(method) && "marker-icons".equals(head))) {
+            if (!"GET".equals(method) && !"HEAD".equals(method)) {
+                ex.getResponseHeaders().set("Allow", "GET, HEAD");
                 error(ex, 405, "Only GET is allowed here.");
                 return;
             }
@@ -426,10 +734,11 @@ public final class ApiServer {
             String address = clientAddress(ex);
             boolean tokenGiven = givenToken(ex.getRequestHeaders()) != null;
             if (tokenGiven && atlas.links().blocked(address)) {
+                ex.getResponseHeaders().set("Retry-After", "60");
                 error(ex, 429, "Too many attempts. Wait a minute and try again.");
                 return;
             }
-            boolean tokenAdmin = tokenAdmin(ex.getRequestHeaders());
+            boolean tokenAdmin = tokenAdmin(givenToken(ex.getRequestHeaders()));
             if (tokenGiven && !tokenAdmin) {
                 // A wrong admin token counts against the same per address limit as link codes.
                 atlas.links().rateLimited(address);
@@ -442,70 +751,40 @@ public final class ApiServer {
                 error(ex, 404, "Not found.");
                 return;
             }
-            switch (head) {
-                case "health" -> json(ex, 200, health(viewer));
-                case "worlds" -> json(ex, 200, atlas.worldsPayload(viewer));
-                case "players" -> {
-                    JsonObject p = atlas.playersApiPayload(viewer, query.get("world"),
-                            "1".equals(query.get("trails")) || "true".equals(query.get("trails")));
-                    dropHiddenWorldRows(viewer, p, "players");
-                    dropHiddenWorldRows(viewer, p, "offline");
-                    json(ex, 200, p);
-                }
-                case "markers" -> {
-                    if (parts.size() < 2) {
-                        error(ex, 400, "Name a world.");
-                    } else {
-                        json(ex, 200, atlas.markersPayload(viewer, parts.get(1)));
-                    }
-                }
-                case "worldevents" -> {
-                    JsonObject p = atlas.worldEventsPayload(viewer, query.get("world"));
-                    dropHiddenWorldRows(viewer, p, "events");
-                    json(ex, 200, p);
-                }
-                case "kills" -> json(ex, 200, atlas.killsPayload(viewer, (int) Math.min(200, Math.max(1,
-                        parseLong(query.get("limit"), 50)))));
-                case "bosses" -> json(ex, 200, atlas.bossesPayload(viewer));
-                case "leaderboard" -> json(ex, 200, atlas.leaderboardPayload(viewer));
-                case "territories" -> {
-                    if (parts.size() < 2) {
-                        error(ex, 400, "Name a world.");
-                    } else {
-                        json(ex, 200, atlas.territoriesPayload(viewer, parts.get(1)));
-                    }
-                }
-                case "points" -> {
-                    if (parts.size() < 2) {
-                        error(ex, 400, "Name a world.");
-                    } else {
-                        json(ex, 200, atlas.pointsPayload(viewer, parts.get(1)));
-                    }
-                }
-                case "factions" -> {
-                    if (parts.size() < 2) {
-                        json(ex, 200, atlas.factionsPayload(viewer));
-                    } else {
-                        JsonObject f = atlas.factionPayload(viewer, parts.get(1));
-                        if (f == null) {
-                            error(ex, 404, "No faction with that tag is visible.");
-                        } else {
-                            json(ex, 200, f);
+            Atlas.ApiResult routed = atlas.route(viewer, parts, query);
+            if (routed != null) {
+                JsonObject body = routed.body();
+                if (routed.status() == 200) {
+                    switch (head) {
+                        case "players" -> {
+                            dropHiddenWorldRows(viewer, body, "players");
+                            dropHiddenWorldRows(viewer, body, "offline");
+                        }
+                        case "worldevents" -> dropHiddenWorldRows(viewer, body, "events");
+                        case "kills" -> dropHiddenWorldRows(viewer, body, "kills");
+                        default -> {
                         }
                     }
                 }
-                case "stats" -> json(ex, 200, atlas.statsPayload(viewer));
-                case "changes" -> {
-                    if (parts.size() < 2) {
-                        error(ex, 400, "Name a world.");
-                    } else {
-                        long since = parseLong(query.get("since"), System.currentTimeMillis() - 60 * 60 * 1000L);
-                        json(ex, 200, atlas.changesPayload(viewer, parts.get(1), since));
-                    }
+                json(ex, routed.status(), body);
+                return;
+            }
+            switch (head) {
+                case "health" -> {
+                    ex.getResponseHeaders().set("X-Atlas-Instance", instanceId);
+                    json(ex, 200, health(viewer));
                 }
                 case "tiles" -> handleTile(ex, viewer, parts);
-                case "events" -> handleEvents(ex, viewer, tokenAdmin, query.get("world"), query.get("as"));
-                case "nations" -> json(ex, 200, atlas.nationsPayload(viewer));
+                case "events" -> {
+                    if ("HEAD".equals(method)) {
+                        cors(ex.getResponseHeaders());
+                        ex.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
+                        ex.getResponseHeaders().set("Cache-Control", "no-cache");
+                        ex.sendResponseHeaders(200, -1);
+                    } else {
+                        handleEvents(ex, viewer, givenToken(ex.getRequestHeaders()), query.get("world"), query.get("as"));
+                    }
+                }
                 default -> error(ex, 404, "Not found.");
             }
         } catch (IOException e) {
@@ -531,7 +810,7 @@ public final class ApiServer {
             return;
         }
         String rel = safeRelative(decoded);
-        byte[] data = rel == null ? null : staticFile(rel);
+        StaticFile data = rel == null ? null : staticFile(rel);
         if (data == null) {
             error(ex, 404, "Not found.");
             return;
@@ -547,8 +826,17 @@ public final class ApiServer {
         Headers h = ex.getResponseHeaders();
         h.set("Content-Type", typeOf(rel));
         h.set("Cache-Control", STATIC_CACHE);
+        h.set("ETag", data.etag());
         securityHeaders(h, CSP);
-        send(ex, 200, data, "HEAD".equals(method));
+        if (data.gzip() != null) {
+            h.set("Vary", "Accept-Encoding");
+        }
+        String match = ex.getRequestHeaders().getFirst("If-None-Match");
+        if (match != null && etagMatches(match, data.etag())) {
+            ex.sendResponseHeaders(304, -1);
+            return;
+        }
+        sendMaybeGzip(ex, 200, data.raw(), data.gzip());
     }
 
     // ---- identity ----------------------------------------------------------
@@ -578,7 +866,7 @@ public final class ApiServer {
     }
 
     /** Endpoints whose second path part names a world. */
-    private static final java.util.Set<String> WORLD_IN_PATH = java.util.Set.of("tiles", "markers", "territories", "points", "changes");
+    private static final java.util.Set<String> WORLD_IN_PATH = java.util.Set.of("tiles", "markers", "territories", "points", "changes", "heat");
     /** Endpoints that take a world query parameter. */
     private static final java.util.Set<String> WORLD_IN_QUERY = java.util.Set.of("players", "worldevents", "events");
 
@@ -631,12 +919,12 @@ public final class ApiServer {
         return given == null || given.isEmpty() ? null : given;
     }
 
-    private boolean tokenAdmin(Headers h) {
+    /** True when the given token equals the adminToken of the current settings, compared in constant time. */
+    private boolean tokenAdmin(String given) {
         String expected = atlas.config().adminToken;
         if (expected == null || expected.isBlank()) {
             return false;
         }
-        String given = givenToken(h);
         return given != null && MessageDigest.isEqual(given.getBytes(StandardCharsets.UTF_8),
                 expected.getBytes(StandardCharsets.UTF_8));
     }
@@ -693,6 +981,7 @@ public final class ApiServer {
             return;
         }
         if (atlas.links().rateLimited(address)) {
+            ex.getResponseHeaders().set("Retry-After", "60");
             error(ex, 429, "Too many attempts. Wait a minute and try again.");
             return;
         }
@@ -737,24 +1026,38 @@ public final class ApiServer {
             return;
         }
         TileService.Result r = atlas.tiles().get(parts.get(1), zoom, x, z);
+        Headers h = ex.getResponseHeaders();
+        cors(h);
+        h.set("X-Content-Type-Options", "nosniff");
         if (r.status() != 200 || r.png() == null) {
-            cors(ex.getResponseHeaders());
             boolean busy = r.status() == 503;
-            ex.getResponseHeaders().set("Cache-Control", busy ? "no-store" : "public, max-age=30");
+            h.set("Cache-Control", busy ? "no-store" : "public, max-age=30");
             if (busy) {
-                ex.getResponseHeaders().set("Retry-After", "2");
+                h.set("Retry-After", "2");
             }
             ex.sendResponseHeaders(busy ? 503 : 404, -1);
             return;
         }
-        Headers h = ex.getResponseHeaders();
-        cors(h);
-        h.set("Content-Type", "image/png");
+        String etag = tileEtag(r);
         h.set("Cache-Control", r.partial() ? "no-store" : "public, max-age=60");
         if (r.partial()) {
             h.set("X-Atlas-Partial", "1");
         }
-        send(ex, 200, r.png(), false);
+        if (etag != null) {
+            h.set("ETag", etag);
+            String match = ex.getRequestHeaders().getFirst("If-None-Match");
+            if (match != null && etagMatches(match, etag)) {
+                ex.sendResponseHeaders(304, -1);
+                return;
+            }
+        }
+        h.set("Content-Type", "image/png");
+        send(ex, 200, r.png(), isHead(ex));
+    }
+
+    /** The strong ETag of a tile, as the tile service made it from the PNG bytes, or one made here. */
+    private static String tileEtag(TileService.Result r) {
+        return r.etag() != null ? r.etag() : MarkerIcons.etagOf(r.png());
     }
 
     /**
@@ -799,14 +1102,15 @@ public final class ApiServer {
         return false;
     }
 
-    private void handleEvents(HttpExchange ex, Viewer viewer, boolean tokenAdmin, String world, String asTag) throws IOException {
-        // The stream keeps the cookie and token it was opened with and resolves them again every
-        // half minute, so a revoked session, a new faction or a changed permission applies live.
+    private void handleEvents(HttpExchange ex, Viewer viewer, String givenToken, String world, String asTag) throws IOException {
+        // The stream keeps the cookie and admin token it was opened with and checks both again every
+        // half minute against the current sessions and settings, so a revoked session, a changed
+        // adminToken, a new faction or a changed permission applies live.
         String token = cookie(ex.getRequestHeaders(), COOKIE);
         SseHub.Identity identity = new SseHub.Identity() {
             @Override
             public Viewer resolve() {
-                return atlas.viewer(atlas.links().session(token), tokenAdmin, asTag);
+                return atlas.viewer(atlas.links().session(token), tokenAdmin(givenToken), asTag);
             }
 
             @Override
@@ -817,39 +1121,57 @@ public final class ApiServer {
             @Override
             public String hello(Viewer v) {
                 // Compared as text to spot identity changes, so it carries no clock values.
-                JsonObject hello = new JsonObject();
-                hello.add("viewer", atlas.viewerJson(v));
-                JsonObject server = atlas.serverJson();
-                server.remove("uptimeMs");
-                server.remove("now");
-                hello.add("server", server);
-                return Json.GSON.toJson(hello);
+                return Json.GSON.toJson(atlas.helloIdentity(v));
             }
 
             @Override
             public String helloFrame(Viewer v) {
-                JsonObject hello = new JsonObject();
-                hello.add("viewer", atlas.viewerJson(v));
-                hello.add("server", atlas.serverJson());
-                return Json.GSON.toJson(hello);
+                return Json.GSON.toJson(atlas.helloPayload(v));
             }
         };
-        List<byte[]> initial = new ArrayList<>();
-        initial.add(SseHub.frame("hello", identity.helloFrame(viewer)));
-        JsonObject players = atlas.playersPayload(viewer, world, false);
-        players.addProperty("full", true);
-        initial.add(SseHub.frame("players", Json.GSON.toJson(players)));
-        if (viewer.canSee(atlas.config(), "feed")) {
-            initial.add(SseHub.frame("feedlog", Json.GSON.toJson(atlas.recentFeed())));
-        }
-        if (viewer.canSee(atlas.config(), "chat")) {
-            initial.add(SseHub.frame("chatlog", Json.GSON.toJson(atlas.recentChat())));
-        }
-        if (viewer.canSee(atlas.config(), "kills")) {
-            initial.add(SseHub.frame("killlog", Json.GSON.toJson(atlas.killLog(viewer, 50))));
-        }
+        java.util.function.Supplier<List<byte[]>> initial = () -> {
+            List<byte[]> frames = new ArrayList<>();
+            frames.add(SseHub.frame("hello", identity.helloFrame(viewer)));
+            JsonObject players = atlas.playersPayload(viewer, world, false);
+            players.addProperty("full", true);
+            frames.add(SseHub.frame("players", Json.GSON.toJson(players)));
+            if (viewer.canSee(atlas.config(), "feed")) {
+                frames.add(SseHub.frame("feedlog", Json.GSON.toJson(logPayload(viewer, atlas.recentFeed()))));
+            }
+            if (viewer.canSee(atlas.config(), "chat")) {
+                frames.add(SseHub.frame("chatlog", Json.GSON.toJson(logPayload(viewer, atlas.recentChat()))));
+            }
+            if (viewer.canSee(atlas.config(), "kills")) {
+                frames.add(SseHub.frame("killlog", Json.GSON.toJson(logPayload(viewer, atlas.killLog(viewer, 50)))));
+            }
+            return frames;
+        };
         String addressKey = LinkService.rateKey(clientAddress(ex));
         atlas.sse().serve(ex, viewer, world, identity, initial, addressKey, streamLimitFor(ex));
+    }
+
+    /**
+     * A log event body, an object with the rows under items. Rows that name a world this viewer may
+     * not see are left out. Accepts the rows as a bare array or already wrapped that way.
+     */
+    private JsonElement logPayload(Viewer v, JsonElement rows) {
+        com.google.gson.JsonArray list = rows != null && rows.isJsonArray() ? rows.getAsJsonArray()
+                : rows != null && rows.isJsonObject() && rows.getAsJsonObject().has("items")
+                && rows.getAsJsonObject().get("items").isJsonArray()
+                ? rows.getAsJsonObject().getAsJsonArray("items") : null;
+        if (list == null) {
+            return rows;
+        }
+        com.google.gson.JsonArray kept = new com.google.gson.JsonArray();
+        for (JsonElement e : list) {
+            if (e.isJsonObject() && worldHidden(v, Json.str(e.getAsJsonObject(), "world"))) {
+                continue;
+            }
+            kept.add(e);
+        }
+        JsonObject out = rows.isJsonObject() ? rows.getAsJsonObject().deepCopy() : new JsonObject();
+        out.add("items", kept);
+        return out;
     }
 
     /**
@@ -874,19 +1196,26 @@ public final class ApiServer {
         return 0;
     }
 
-    /** Loopback, 10/8, 172.16/12, 192.168/16 and fc00::/7 addresses. */
+    /** Loopback, 10/8, 172.16/12, 192.168/16, 169.254/16, fe80::/10 and fc00::/7 addresses. */
     static boolean isLocalOrPrivate(java.net.InetAddress a) {
         if (a == null) {
             return false;
         }
-        if (a.isLoopbackAddress() || a.isSiteLocalAddress()) {
+        if (a.isLoopbackAddress() || a.isSiteLocalAddress() || a.isLinkLocalAddress()) {
             return true;
         }
         byte[] b = a.getAddress();
         return b.length == 16 && (b[0] & 0xfe) == 0xfc;
     }
 
-    /** Liveness. Only admins get stream counts, cache figures and uptime. */
+    /** A world whose info was not refreshed for this long counts as stalled. The refresh runs every 2 seconds. */
+    static final long WORLD_STALL_MS = 30_000;
+
+    /**
+     * Liveness. Only admins get stream counts, cache figures, uptime and the degraded list, which
+     * names each problem found: a render backlog, worlds whose info refresh stalled, failing tasks
+     * or disk writes, and a bind retry. status is ok when the list is empty, else degraded.
+     */
     private JsonObject health(Viewer viewer) {
         JsonObject o = new JsonObject();
         o.addProperty("ok", true);
@@ -895,7 +1224,7 @@ public final class ApiServer {
             return o;
         }
         o.addProperty("name", "Atlas");
-        o.addProperty("uptimeMs", System.currentTimeMillis() - atlas.startedAt());
+        o.addProperty("uptimeSeconds", (System.currentTimeMillis() - atlas.startedAt()) / 1000);
         o.addProperty("standalone", !atlas.snapshot().present());
         o.addProperty("sseClients", atlas.sse().size());
         JsonObject cache = new JsonObject();
@@ -903,8 +1232,87 @@ public final class ApiServer {
         cache.addProperty("bytes", atlas.tiles().cacheBytes());
         cache.addProperty("maxBytes", atlas.tiles().cacheMaxBytes());
         cache.addProperty("queued", atlas.tiles().queuedTiles());
+        // Tile writes that failed since start, and when the last one failed.
+        cache.addProperty("diskWriteFailures", atlas.tiles().diskWriteFailures());
+        long lastTileFailure = atlas.tiles().lastDiskFailureAt();
+        if (lastTileFailure > 0) {
+            cache.addProperty("lastDiskWriteFailureAt", lastTileFailure);
+        } else {
+            cache.add("lastDiskWriteFailureAt", com.google.gson.JsonNull.INSTANCE);
+        }
         o.add("tileCache", cache);
+        com.google.gson.JsonArray degraded = new com.google.gson.JsonArray();
+        if (lastTileFailure > 0 && System.currentTimeMillis() - lastTileFailure < TILE_FAILURE_RECENT_MS) {
+            degraded.add("tileWriteFailing");
+        }
+
+        JsonElement render = renderStatus();
+        if (render != null && render.isJsonObject()) {
+            JsonObject r = render.getAsJsonObject();
+            // Chunk images left in the shared budget, -1 when unlimited, and the budget per minute.
+            r.addProperty("budgetLeft", atlas.tiles().budgetLeft());
+            r.addProperty("budgetPerMinute", atlas.tiles().budgetPerMinute());
+            if (Json.num(r, "queued", 0) >= RENDER_BACKLOG) {
+                degraded.add("renderBacklog");
+            }
+        }
+        o.add("render", render == null ? com.google.gson.JsonNull.INSTANCE : render);
+
+        long now = System.currentTimeMillis();
+        com.google.gson.JsonArray stalled = new com.google.gson.JsonArray();
+        for (LiveState.WorldInfo w : atlas.live().worlds().values()) {
+            if (w.updatedAt() > 0 && now - w.updatedAt() > WORLD_STALL_MS) {
+                JsonObject row = new JsonObject();
+                row.addProperty("world", w.name());
+                row.addProperty("updatedAt", w.updatedAt());
+                stalled.add(row);
+            }
+        }
+        o.add("stalledWorlds", stalled);
+        if (!stalled.isEmpty()) {
+            degraded.add("worldPollStalled");
+        }
+
+        JsonObject bind = bindState();
+        o.add("bind", bind == null ? com.google.gson.JsonNull.INSTANCE : bind);
+        if (bind != null) {
+            degraded.add("bindRetry");
+        }
+
+        JsonObject extras = new JsonObject();
+        try {
+            healthExtras.accept(extras);
+        } catch (RuntimeException e) {
+            logger.at(Level.FINE).withCause(e).log("Atlas health figures failed");
+        }
+        for (Map.Entry<String, JsonElement> e : extras.entrySet()) {
+            if ("degraded".equals(e.getKey())) {
+                if (e.getValue().isJsonArray()) {
+                    degraded.addAll(e.getValue().getAsJsonArray());
+                }
+            } else {
+                o.add(e.getKey(), e.getValue());
+            }
+        }
+        o.addProperty("status", degraded.isEmpty() ? "ok" : "degraded");
+        o.add("degraded", degraded);
         return o;
+    }
+
+    /** A tile write that failed within this long counts as a current problem in the health answer. */
+    static final long TILE_FAILURE_RECENT_MS = 10 * 60_000L;
+
+    /** Queued tiles at which the render queue counts as a backlog. */
+    static final int RENDER_BACKLOG = 500;
+
+    /** The tile service's render status as JSON, or null when it has none. */
+    private JsonElement renderStatus() {
+        try {
+            Object status = atlas.tiles().renderStatus();
+            return status == null ? null : Json.GSON.toJsonTree(status);
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     // ---- responses ---------------------------------------------------------
@@ -917,21 +1325,79 @@ public final class ApiServer {
         Headers h = ex.getResponseHeaders();
         cors(h);
         h.set("Content-Type", "application/json; charset=utf-8");
+        h.set("X-Content-Type-Options", "nosniff");
         if (!h.containsKey("Cache-Control")) {
             h.set("Cache-Control", "no-store");
         }
         byte[] bytes = Json.GSON.toJson(body).getBytes(StandardCharsets.UTF_8);
-        String accept = ex.getRequestHeaders().getFirst("Accept-Encoding");
-        if (bytes.length > 1024 && accept != null && accept.contains("gzip")) {
-            ByteArrayOutputStream bos = new ByteArrayOutputStream(bytes.length / 4);
+        if (bytes.length > 1024) {
+            h.set("Vary", "Accept-Encoding");
+            byte[] gz = acceptsGzip(ex.getRequestHeaders().getFirst("Accept-Encoding")) ? gzip(bytes) : null;
+            if (gz != null) {
+                h.set("Content-Encoding", "gzip");
+                bytes = gz;
+            }
+        }
+        send(ex, status, bytes, isHead(ex));
+    }
+
+    /** Sends the gzip form when there is one and the client accepts it, else the plain bytes. HEAD gets headers only. */
+    private static void sendMaybeGzip(HttpExchange ex, int status, byte[] raw, byte[] gz) throws IOException {
+        byte[] body = raw;
+        if (gz != null) {
+            ex.getResponseHeaders().set("Vary", "Accept-Encoding");
+            if (acceptsGzip(ex.getRequestHeaders().getFirst("Accept-Encoding"))) {
+                ex.getResponseHeaders().set("Content-Encoding", "gzip");
+                body = gz;
+            }
+        }
+        send(ex, status, body, isHead(ex));
+    }
+
+    /** True when an Accept-Encoding header lists gzip, or a star, without q=0. */
+    static boolean acceptsGzip(String header) {
+        if (header == null) {
+            return false;
+        }
+        for (String part : header.split(",")) {
+            String[] bits = part.trim().split(";");
+            String coding = bits[0].trim().toLowerCase(java.util.Locale.ROOT);
+            if (!coding.equals("gzip") && !coding.equals("x-gzip") && !coding.equals("*")) {
+                continue;
+            }
+            double q = 1;
+            for (int i = 1; i < bits.length; i++) {
+                String b = bits[i].trim().toLowerCase(java.util.Locale.ROOT);
+                if (b.startsWith("q=")) {
+                    try {
+                        q = Double.parseDouble(b.substring(2).trim());
+                    } catch (NumberFormatException e) {
+                        q = 0;
+                    }
+                }
+            }
+            if (q > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static byte[] gzip(byte[] bytes) {
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream(Math.max(64, bytes.length / 3));
             try (GZIPOutputStream gz = new GZIPOutputStream(bos)) {
                 gz.write(bytes);
             }
-            bytes = bos.toByteArray();
-            h.set("Content-Encoding", "gzip");
-            h.set("Vary", "Accept-Encoding");
+            byte[] out = bos.toByteArray();
+            return out.length < bytes.length ? out : null;
+        } catch (IOException e) {
+            return null;
         }
-        send(ex, status, bytes, false);
+    }
+
+    private static boolean isHead(HttpExchange ex) {
+        return "HEAD".equals(ex.getRequestMethod());
     }
 
     private static void error(HttpExchange ex, int status, String message) throws IOException {
@@ -943,6 +1409,9 @@ public final class ApiServer {
 
     private static void send(HttpExchange ex, int status, byte[] body, boolean headOnly) throws IOException {
         if (headOnly) {
+            if (body.length > 0 && status != 304 && status != 204) {
+                ex.getResponseHeaders().set("Content-Length", Integer.toString(body.length));
+            }
             ex.sendResponseHeaders(status, -1);
             return;
         }

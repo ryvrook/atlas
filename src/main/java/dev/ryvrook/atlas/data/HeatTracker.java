@@ -90,6 +90,7 @@ public final class HeatTracker {
         return t;
     }
 
+    /** Drops buckets older than the retention and worlds left without any bucket. */
     public void prune() {
         long oldest = (System.currentTimeMillis() - RETENTION_MS) / BUCKET_MS;
         for (Map<Long, Map<Long, AtomicIntegerArray>> buckets : data.values()) {
@@ -97,6 +98,21 @@ public final class HeatTracker {
                 dirty = true;
             }
         }
+        if (data.values().removeIf(Map::isEmpty)) {
+            dirty = true;
+        }
+    }
+
+    /** Forgets every count of a removed world. */
+    public void dropWorld(String world) {
+        if (data.remove(world) != null) {
+            dirty = true;
+        }
+    }
+
+    /** The worlds with recorded activity. */
+    public java.util.Set<String> worlds() {
+        return java.util.Set.copyOf(data.keySet());
     }
 
     public void load() {
@@ -126,6 +142,8 @@ public final class HeatTracker {
                 }
             }
             prune();
+            // What was just read is what the file holds.
+            dirty = false;
         } catch (Exception e) {
             data.clear();
         }
@@ -135,6 +153,7 @@ public final class HeatTracker {
         if (!dirty) {
             return;
         }
+        // Cleared before the copy so counts made while writing mark the next save.
         dirty = false;
         JsonObject root = new JsonObject();
         for (Map.Entry<String, Map<Long, Map<Long, AtomicIntegerArray>>> w : data.entrySet()) {
@@ -153,6 +172,12 @@ public final class HeatTracker {
             }
             root.add(w.getKey(), wo);
         }
-        Json.writeAtomic(file, Json.GSON.toJson(root));
+        try {
+            Json.writeAtomic(file, Json.GSON.toJson(root));
+        } catch (java.io.IOException | RuntimeException e) {
+            // Only a successful write counts. The changes stay pending for the next save.
+            dirty = true;
+            throw e;
+        }
     }
 }

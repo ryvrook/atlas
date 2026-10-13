@@ -49,6 +49,27 @@ public final class LastSeen {
         return out;
     }
 
+    /**
+     * The player last seen under a name, ignoring case, or null when nobody was or two different
+     * players were.
+     */
+    public UUID byName(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        String wanted = name.trim();
+        UUID found = null;
+        for (Entry e : entries.values()) {
+            if (e.name() != null && e.name().equalsIgnoreCase(wanted)) {
+                if (found != null && !found.equals(e.uuid())) {
+                    return null;
+                }
+                found = e.uuid();
+            }
+        }
+        return found;
+    }
+
     public void prune() {
         long floor = System.currentTimeMillis() - KEEP_MS;
         if (entries.values().removeIf(e -> e.at() < floor)) {

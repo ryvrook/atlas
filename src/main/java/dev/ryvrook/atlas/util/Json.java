@@ -8,10 +8,16 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.FileTime;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Gson helpers. Gson ships inside the Hytale server jar so nothing is bundled. */
 public final class Json {
@@ -21,14 +27,43 @@ public final class Json {
     private Json() {
     }
 
+    private static final AtomicLong TMP_COUNTER = new AtomicLong();
+    /** Suffix of every temporary file writeAtomic creates, so leftovers of a crash can be found and removed. */
+    public static final String TMP_SUFFIX = ".tmp";
+
     public static void writeAtomic(Path file, String text) throws IOException {
-        Files.createDirectories(file.getParent());
-        Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
-        Files.writeString(tmp, text, StandardCharsets.UTF_8);
+        writeAtomic(file, text.getBytes(StandardCharsets.UTF_8), -1);
+    }
+
+    /**
+     * Writes a file so readers see the old or the new content and never a torn one. The bytes go
+     * to a temporary file with a name no other writer uses, are flushed to the disk, and the file
+     * is then moved over the target. A modified time of zero or more is set on the file before the
+     * move, a negative one leaves the current time.
+     */
+    public static void writeAtomic(Path file, byte[] data, long modifiedAtMs) throws IOException {
+        Path parent = file.toAbsolutePath().getParent();
+        Files.createDirectories(parent);
+        Path tmp = parent.resolve(file.getFileName() + "." + ProcessHandle.current().pid() + "-"
+                + TMP_COUNTER.incrementAndGet() + TMP_SUFFIX);
         try {
-            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException e) {
-            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+            try (FileChannel ch = FileChannel.open(tmp, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+                ByteBuffer buf = ByteBuffer.wrap(data);
+                while (buf.hasRemaining()) {
+                    ch.write(buf);
+                }
+                ch.force(true);
+            }
+            if (modifiedAtMs >= 0) {
+                Files.setLastModifiedTime(tmp, FileTime.fromMillis(modifiedAtMs));
+            }
+            try {
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(tmp);
         }
     }
 

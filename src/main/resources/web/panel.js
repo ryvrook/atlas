@@ -28,12 +28,12 @@
     players: () => A.layerOn("players"),
     // Shown while the viewer may see markers and there is something to list or the viewer could have their own.
     // While it is the open tab it stays, so a list that empties shows its empty state instead of vanishing.
-    markers: () => A.layerOn("markers") && !state.missing.markers && (A.hasOwnKinds() || state.markers.some(listable) || state.tab === "markers"),
+    markers: () => A.layerOn("markers") && (A.hasOwnKinds() || state.markers.some(listable) || state.tab === "markers"),
     factions: () => A.layerOn("factions") && !state.standalone,
     nations: () => A.layerOn("nations") && !state.standalone && !!(state.nations && state.nations.length),
     activity: () => SOURCES.some((s) => s.ok()),
     chat: () => A.layerOn("chat"),
-    leaderboard: () => A.layerOn("leaderboard") && !state.missing.leaderboard,
+    leaderboard: () => A.layerOn("leaderboard"),
     stats: () => A.layerOn("stats"),
     admin: () => !!(state.viewer && (state.viewer.admin || state.viewer.viewingAs))
   };
@@ -171,6 +171,21 @@
   const emptyState = (icon, lead, text) => "<div class='empty'>" + A.icon(icon) + "<p class='lead'>" + esc(lead) + "</p>" + (text ? "<p>" + esc(text) + "</p>" : "") + "</div>";
   const loading = () => "<div class='skeleton' style='width:60%'></div><div class='skeleton'></div><div class='skeleton' style='width:80%'></div>";
   const head = (title, extra) => "<div class='sec-head'><h2>" + esc(title) + "</h2>" + (extra || "") + "</div>";
+  // The empty state for a request that failed. 403 means the layer is private for this viewer, 404 that the thing
+  // is not there, 429 that the server asked for a pause, after which the view is drawn again while it is on screen.
+  // what is the subject of the lead sentence, such as Factions or The leaderboard, and are its verb.
+  const failState = (e, icon, what, are, live) => {
+    const st = e && e.status;
+    if (st === 403) return emptyState(icon, what + " " + are + " private", state.viewer && state.viewer.linked ? "Your access on this server does not include this part of the map." : "Link this browser to your player to see more.");
+    if (st === 404) return emptyState(icon, what + " " + are + " not on this map", e.serverText || "");
+    if (st === 429) {
+      const ms = Math.max(1000, e.retryMs || A.busyFor() || 10000);
+      if (live) setTimeout(() => { if (live()) A.render(); }, ms + 250);
+      return emptyState("clock", "The map server is busy", "Trying again in " + A.plural(Math.ceil(ms / 1000), "second") + ".");
+    }
+    return emptyState(icon, what + " could not be loaded", "Try again in a moment.");
+  };
+  A.failState = failState;
 
   function wireFactionLinks(root) {
     root.querySelectorAll("[data-tag]").forEach((el) => {
@@ -203,9 +218,12 @@
     offlineAt = Date.now();
     A.api("api/players").then((d) => {
       state.others = (d.players || []).filter((p) => p && p.world !== state.world);
-      if (Array.isArray(d.offline)) state.offline = d.offline;
+      state.offline = Array.isArray(d.offline) ? d.offline : [];
       A.emit("others");
-    }).catch(() => { offlineAt = 0; });
+    }).catch((e) => {
+      offlineAt = 0;
+      if (e.status === 403) { state.others = []; state.offline = []; offlineAt = Date.now(); A.emit("others"); }
+    });
   };
   setInterval(() => { if (state.tab === "players" && !state.detail && A.panelOpen()) A.refreshAllPlayers(); }, 15000);
   const initial = (n) => esc(String(n || "?").charAt(0).toUpperCase());
@@ -244,7 +262,7 @@
     }
   };
   const offlineRowSpec = {
-    key: (o) => (o.name || "") + "|" + (o.lastSeen || ""),
+    key: (o) => o.uuid || (o.name || "") + "|" + (o.at || ""),
     create: () => {
       const el = document.createElement("div");
       el.className = "row";
@@ -261,7 +279,7 @@
       const title = esc(o.name) + " " + (o.faction ? A.facChip(o.faction, null, true) : "");
       const t = el.querySelector(".title");
       if (t._h !== title) { t.innerHTML = title; t._h = title; }
-      const sub = "Last seen " + A.rel(o.lastSeen) + ", " + A.date(o.lastSeen) + " " + A.clock(o.lastSeen) + (o.world ? " in " + A.worldLabel(o.world) : "");
+      const sub = "Last seen " + A.rel(o.at) + ", " + A.date(o.at) + " " + A.clock(o.at) + (o.world ? " in " + A.worldLabel(o.world) : "");
       const su = el.querySelector(".sub");
       if (su.textContent !== sub) su.textContent = sub;
     }
@@ -445,7 +463,7 @@
       wireOpen(body);
     };
     if (state.factions.length) draw();
-    A.loadFactions().then(draw).catch(() => { if (live()) body.innerHTML = head("Factions") + emptyState("shield", "Faction data is not available", "Try again in a moment."); });
+    A.loadFactions().then(draw).catch((e) => { if (live()) body.innerHTML = head("Factions") + failState(e, "shield", "Factions", "are", live); });
   }
 
   A.openFaction = (tag) => {
@@ -476,7 +494,7 @@
         (f.nation.name && f.nation.name !== f.nation.tag ? " <span class='muted'>" + esc(f.nation.name) + "</span>" : "");
       if (f.description) h += "<p class='muted' style='margin:8px 0 0'>" + esc(f.description) + "</p>";
       h += "</div>";
-      const members = f.memberCount != null ? f.memberCount : (Array.isArray(f.members) ? f.members.length : f.members);
+      const members = f.members;
       h += "<div class='tiles'><div class='tile'><b>" + num(f.value) + "</b><span>Value</span></div><div class='tile'><b>" + num(members) + "</b><span>Members</span></div><div class='tile'><b>" + num(f.online) + "</b><span>Online</span></div></div>";
       h += "<dl class='kv'>";
       const kv = [["Leader", f.leader], ["Rank", f.rank != null ? "#" + f.rank : null], ["Value", num(f.value)], ["Members", num(members)], ["Online", num(f.online)],
@@ -493,11 +511,6 @@
       if (d.lands && d.lands.length) {
         h += "<h3 class='sub'>Land</h3>" + d.lands.map((l) => "<div class='row click land' role='button' tabindex='0' data-world='" + esc(l.world) + "' data-x='" + Number(l.x) + "' data-z='" + Number(l.z) + "'>" + A.icon("pin", "sm") +
           "<div class='grow'><div class='title'>" + esc(A.worldLabel(l.world)) + "</div><div class='sub'>Around X " + num(l.x, 0) + " Z " + num(l.z, 0) + "</div></div><span class='muted num'>" + A.plural(l.claims, "chunk") + "</span></div>").join("");
-      }
-      const onlineNames = new Set((d.onlineMembers || []).map((m) => m.name));
-      if (Array.isArray(f.members) && f.members.length) {
-        const names = f.members.map((m) => typeof m === "string" ? { name: m } : (m && typeof m === "object" ? { name: m.name || m.username || "", role: m.role || m.rank } : null)).filter((m) => m && m.name);
-        if (names.length) h += "<h3 class='sub'>Members</h3><div class='roster'>" + names.map((m) => "<span class='" + (onlineNames.has(m.name) ? "on" : "") + "'>" + esc(m.name) + (m.role ? " <small class='muted'>" + esc(String(m.role).toLowerCase()) + "</small>" : "") + "</span>").join("") + "</div>";
       }
       if (d.onlineMembers && d.onlineMembers.length) {
         h += "<h3 class='sub'>Online now</h3>" + d.onlineMembers.map((m) => "<div class='row click player' role='button' tabindex='0' data-name='" + esc(m.name) + "'><span class='avatar' style='border-color:" + fc + "'>" + esc(String(m.name || "?").charAt(0).toUpperCase()) + "</span><div class='grow'><div class='title'>" + esc(m.name) + "</div><div class='sub'>" + esc(A.worldLabel(m.world)) + "</div></div>" + A.icon("locate", "sm") + "</div>").join("");
@@ -523,9 +536,9 @@
         const s = A.findPlayer(r.dataset.name);
         if (s) A.locatePlayer(s.data.uuid); else A.toast(r.dataset.name + " is not on the map right now");
       }));
-    }).catch(() => {
+    }).catch((e) => {
       if (!live()) return;
-      body.innerHTML = back + emptyState("shield", "That faction is not visible to you", "");
+      body.innerHTML = back + (e.status === 404 ? emptyState("shield", "That faction is not on this map", "It may have disbanded or be hidden from you.") : failState(e, "shield", "Factions", "are", live));
       wireBack();
     });
   }
@@ -560,29 +573,26 @@
         if (el) el.scrollIntoView({ block: "start" });
         state.nationFocus = null;
       }
-    }).catch(() => { if (live()) body.innerHTML = head("Nations") + emptyState("globe", "Nation data is not available", "Try again in a moment."); });
+    }).catch((e) => { if (live()) body.innerHTML = head("Nations") + failState(e, "globe", "Nations", "are", live); });
   }
 
   // ---- activity -----------------------------------------------------------
   const SOURCES = [
     { key: "feed", label: "Feed", ok: () => A.layerOn("feed") },
-    { key: "kills", label: "Kills", ok: () => A.layerOn("kills") && !state.missing.kills },
-    { key: "events", label: "World events", ok: () => A.layerOn("worldevents") && !state.missing.worldevents },
-    // The server may never report bosses, so the source only shows once one has been seen.
-    { key: "bosses", label: "Bosses", ok: () => A.layerOn("events") && !state.missing.bosses && !!(state.bossLog && state.bossLog.length) }
+    { key: "kills", label: "Kills", ok: () => A.layerOn("kills") },
+    { key: "events", label: "World events", ok: () => A.layerOn("worldevents") }
   ];
   const actOff = new Set(A.store.get("activityOff", []));
   function timeline() {
     const items = [];
     const use = (k) => SOURCES.find((s) => s.key === k).ok() && !actOff.has(k);
-    // Atlas also writes its own world event, boss and death lines into the feed. They are skipped when the richer source is shown.
-    const dup = { worldevent: "events", boss: "bosses", death: "kills" };
+    // Atlas also writes its own world event and death lines into the feed. They are skipped when the richer source is shown.
+    const dup = { worldevent: "events", death: "kills" };
     const usable = (k) => SOURCES.find((s) => s.key === k).ok();
     if (use("feed")) for (const l of state.feed) if (!(l && l.source === "atlas" && dup[l.type] && usable(dup[l.type]))) items.push({ at: l.at, src: "feed", l });
     if (use("kills")) for (const k of state.kills) items.push({ at: k.at, src: "kills", k });
     // Events without a position, such as bootstrap events, are bookkeeping and stay out of the timeline.
     if (use("events")) for (const e of state.eventLog || []) if (e.located !== false && !(e.x == null && e.z == null)) items.push({ at: e.at, src: "events", e });
-    if (use("bosses")) for (const b of state.bossLog || []) items.push({ at: b.at, src: "bosses", b });
     items.sort((a, b) => (b.at || 0) - (a.at || 0));
     return items.slice(0, 250);
   }
@@ -590,7 +600,7 @@
   function itemHtml(it) {
     const other = (w) => w && w !== state.world ? " <span class='badge'>" + esc(A.worldLabel(w)) + "</span>" : "";
     if (it.src === "feed") {
-      return "<li class='feedline'><span class='ico'>" + A.icon(it.l.source === "atlas" ? (it.l.type === "worldevent" ? "bolt" : it.l.type === "death" ? "skull" : "boss") : "shield") + "</span><div class='body'>" + esc(it.l.text) + A.when(it.at) + "</div></li>";
+      return "<li class='feedline'><span class='ico'>" + A.icon(it.l.source === "atlas" ? (it.l.type === "worldevent" ? "bolt" : it.l.type === "death" ? "skull" : "activity") : "shield") + "</span><div class='body'>" + esc(it.l.text) + A.when(it.at) + "</div></li>";
     }
     if (it.src === "kills") {
       const k = it.k, v = k.victim || {}, kl = k.killer;
@@ -608,13 +618,11 @@
       return "<li class='event'><span class='ico'>" + A.icon(e.state === "end" ? "portal" : "bolt") + "</span><div class='body'><b>" + esc(e.displayName || A.pretty(e.name)) + "</b> " +
         (e.state === "end" ? "closed" : "opened") + other(e.world) + go + A.when(it.at) + "</div></li>";
     }
-    const b = it.b;
-    return "<li class='boss'><span class='ico'>" + A.icon("boss") + "</span><div class='body'><b>" + esc(b.name || "A boss") + "</b> appeared" + (b.hardMode ? " <span class='badge bad'>hard mode</span>" : "") + other(b.world) + A.when(it.at) + "</div></li>";
+    return "";
   }
   const itemKey = (it) => it.src === "feed" ? "f|" + it.at + "|" + it.l.text
     : it.src === "kills" ? "k|" + [it.k.at, it.k.victim && it.k.victim.name, it.k.victim && it.k.victim.type, it.k.killer && it.k.killer.name].join("|")
-    : it.src === "events" ? "e|" + it.e.id + "|" + it.e.state + "|" + it.at
-    : "b|" + it.b.world + "|" + it.b.name + "|" + it.b.startedAt;
+    : "e|" + it.e.id + "|" + it.e.state + "|" + it.at;
   // Rows are built from html once and only rewritten when something other than the relative time changed.
   const noTime = (h) => h.replace(/<time[\s\S]*?<\/time>/g, "");
   const htmlRowSpec = (key, html) => ({
@@ -704,34 +712,57 @@
   // ---- leaderboard --------------------------------------------------------
   const TIER = { bronze: "var(--tier-bronze)", silver: "var(--tier-silver)", gold: "var(--tier-gold)", platinum: "var(--tier-platinum)" };
   const tierColor = (t) => TIER[String(t || "").toLowerCase()] || "var(--border-strong)";
-  A.loadLeaderboard = () => A.apiOptional("leaderboard", "api/leaderboard").then((d) => { state.leaderboard = d; if (!d) A.buildTabs(); return d; });
+  A.loadLeaderboard = () => A.api("api/leaderboard").then((d) => { state.leaderboard = d; return d; });
+  // Rarity is the share of counted players who own a feat, from 0 to 1. Under five percent a feat counts as rare.
+  const rarityOf = (d, feat, own) => typeof own === "number" ? own : d.rarity && typeof d.rarity[feat] === "number" ? d.rarity[feat] : null;
+  const pct = (r) => r < 0.01 ? "under 1 percent" : Math.round(r * 100) + " percent";
+  const rarityHtml = (r) => r == null ? "" : (r < 0.05 ? "<span class='badge warn'>rare</span> " : "") + "<span class='muted'>owned by " + pct(r) + " of players</span>";
+  const tierChip = (t) => t ? "<span class='tier' style='background:" + tierColor(t) + "'>" + esc(t) + "</span> " : "";
+  function recordsHtml(title, list, empty, nobody) {
+    let h = "<h3 class='sub'>" + esc(title) + "</h3>";
+    if (!list.length) return h + "<p class='muted'>" + esc(empty) + "</p>";
+    return h + "<ul class='feed'>" + list.map((r) => "<li><span class='ico' style='background:" + tierColor(r.tier) + ";color:#1d1812'>" + A.icon("trophy") + "</span><div class='body'><b>" + esc(r.featName || A.pretty(r.feat)) + "</b> " + tierChip(r.tier) +
+      "<div>" + (r.name ? "<b class='pl'>" + esc(r.name) + "</b>" : "<span class='muted'>" + esc(nobody) + "</span>") + "</div>" + A.when(r.at) + "</div></li>").join("") + "</ul>";
+  }
   function renderLeaderboard(live) {
     const draw = (d) => {
-      if (!live()) return;
-      if (!d) { A.buildTabs(); return; }
-      if (d.available === false || !Array.isArray(d.players)) {
+      if (!live() || !d) return;
+      const players = Array.isArray(d.players) ? d.players : [];
+      if (d.available === false) {
         body.innerHTML = head("Leaderboard") + emptyState("trophy", "No leaderboard yet", "The leaderboard appears once the server runs Feats and has written its first export.");
         return;
       }
       let h = head("Leaderboard", d.updatedAt ? "<span class='muted' style='font-size:12px'>Updated " + esc(A.rel(d.updatedAt)) + "</span>" : "");
-      h += "<div class='tiles'><div class='tile'><b>" + num(d.totalFeats) + "</b><span>Feats</span></div><div class='tile'><b>" + num(d.totalPoints) + "</b><span>Points to earn</span></div><div class='tile'><b>" + num(d.players.length) + "</b><span>Players</span></div></div>";
+      // Feats counts the players it rates feats against. That figure is the honest player count when it is there.
+      const counted = Number(d.rarityPlayers) > 0 ? Number(d.rarityPlayers) : players.length;
+      h += "<div class='tiles" + (d.online != null ? " four" : "") + "'><div class='tile'><b>" + num(d.totalFeats) + "</b><span>Feats</span></div><div class='tile'><b>" + num(d.totalPoints) + "</b><span>" + (d.online != null ? "Points" : "Points to earn") + "</span></div>" +
+        "<div class='tile'><b>" + num(counted) + "</b><span>Players</span></div>" + (d.online != null ? "<div class='tile'><b>" + num(d.online) + "</b><span>Online</span></div>" : "") + "</div>";
       h += "<h3 class='sub'>Top players</h3>";
-      if (!d.players.length) h += "<p class='muted'>Nobody has unlocked a feat yet.</p>";
-      const max = Math.max(1, ...d.players.map((p) => Number(p.points) || 0));
+      if (!players.length) h += "<p class='muted'>Nobody has unlocked a feat yet.</p>";
+      const max = Math.max(1, ...players.map((p) => Number(p.points) || 0));
       const medal = ["var(--tier-gold)", "var(--tier-silver)", "var(--tier-bronze)"];
-      h += d.players.slice(0, 100).map((p, i) => "<div class='row lb-row'>" + (i < 3 ? "<span class='medal' style='background:" + medal[i] + "'>" + (i + 1) + "</span>" : "<span class='rank' style='width:24px'>" + (i + 1) + "</span>") +
-        "<div class='grow'><div class='title'><b>" + esc(p.name) + "</b> <span class='muted' style='font-size:12.5px'>" + A.plural(p.unlocked, "feat") + (d.totalFeats ? " of " + num(d.totalFeats) : "") + "</span></div>" +
-        "<div class='bar'><i style='width:" + ((Number(p.points) || 0) / max * 100).toFixed(1) + "%'></i></div></div><span class='pts'>" + num(p.points, 0) + "</span></div>").join("");
+      h += players.slice(0, 100).map((p, i) => {
+        const rank = Number(p.rank) > 0 ? Number(p.rank) : i + 1;
+        return "<div class='row lb-row'>" + (rank <= 3 ? "<span class='medal' style='background:" + medal[rank - 1] + "'>" + rank + "</span>" : "<span class='rank' style='width:24px'>" + rank + "</span>") +
+          "<div class='grow'><div class='title'><b>" + esc(p.name) + "</b> <span class='muted' style='font-size:12.5px'>" + A.plural(p.unlocked, "feat") + (d.totalFeats ? " of " + num(d.totalFeats) : "") + "</span></div>" +
+          (p.lastUnlockAt ? "<div class='sub'>Last unlock " + esc(A.rel(p.lastUnlockAt)) + "</div>" : "") +
+          "<div class='bar'><i style='width:" + ((Number(p.points) || 0) / max * 100).toFixed(1) + "%'></i></div></div><span class='pts'>" + num(p.points, 0) + "</span></div>";
+      }).join("");
       const recent = Array.isArray(d.recent) ? d.recent.slice().sort((a, b) => (b.at || 0) - (a.at || 0)) : [];
       if (recent.length) {
         h += "<h3 class='sub'>Recent unlocks</h3><ul class='feed'>" + recent.map((r) => "<li><span class='ico' style='background:" + tierColor(r.tier) + ";color:#1d1812'>" + A.icon("trophy") + "</span><div class='body'><b class='pl'>" + esc(r.name) + "</b> unlocked <b>" + esc(r.featName || A.pretty(r.feat)) + "</b> " +
-          (r.tier ? "<span class='tier' style='background:" + tierColor(r.tier) + "'>" + esc(r.tier) + "</span> " : "") + (r.hidden ? "<span class='badge'>secret</span> " : "") +
-          "<span class='muted'>" + (r.points != null ? A.plural(r.points, "point") : "") + (r.category ? ", " + esc(r.category) : "") + "</span>" + A.when(r.at) + "</div></li>").join("") + "</ul>";
+          tierChip(r.tier) + (r.hiddenFeat ? "<span class='badge'>secret</span> " : "") +
+          "<span class='muted'>" + (r.points != null ? A.plural(r.points, "point") : "") + (r.category ? ", " + esc(r.category) : "") + "</span>" +
+          (rarityOf(d, r.feat, r.rarity) != null ? "<div class='rar'>" + rarityHtml(rarityOf(d, r.feat, r.rarity)) + "</div>" : "") + A.when(r.at) + "</div></li>").join("") + "</ul>";
       }
+      const milestones = Array.isArray(d.milestones) ? d.milestones : [];
+      const firsts = Array.isArray(d.firsts) ? d.firsts : [];
+      if (milestones.length) h += recordsHtml("Milestones", milestones.slice().reverse(), "", "Reached");
+      if (firsts.length) h += recordsHtml("Firsts", firsts.slice().reverse(), "", "Nobody yet");
       body.innerHTML = h;
     };
     if (state.leaderboard) draw(state.leaderboard); else body.innerHTML = head("Leaderboard") + loading();
-    A.loadLeaderboard().then(draw).catch(() => { if (live() && !state.leaderboard) body.innerHTML = head("Leaderboard") + emptyState("trophy", "The leaderboard could not be loaded", "Try again in a moment."); });
+    A.loadLeaderboard().then(draw).catch((e) => { if (live() && !state.leaderboard) body.innerHTML = head("Leaderboard") + failState(e, "trophy", "The leaderboard", "is", live); });
   }
 
   // ---- stats --------------------------------------------------------------
@@ -740,22 +771,24 @@
     let h = "<h3 class='sub'>Events</h3>";
     if (ev.enabled === false) return h + "<p class='muted'>Server events are switched off.</p>";
     h += "<dl class='kv'>";
-    if (ev.season) h += "<dt>Season</dt><dd>" + esc(ev.season) + (ev.seasonEndsAt ? " and ends in " + A.fmtLeft(ev.seasonEndsAt - Date.now()) : "") + "</dd>";
+    if (ev.season) h += "<dt>Season</dt><dd>" + esc(ev.season) + (ev.seasonEndsAt ? ", ends in <span data-ends='" + Number(ev.seasonEndsAt) + "'>" + A.fmtLeft(ev.seasonEndsAt - Date.now()) + "</span>" : "") + "</dd>";
     h += "<dt>Open bounties</dt><dd>" + num(ev.bounties || 0) + "</dd>";
     h += "<dt>Envoys</dt><dd>" + num((ev.envoys || []).length) + "</dd></dl>";
     const line = (icon, title, rest) => "<li class='event'><span class='ico'>" + A.icon(icon) + "</span><div class='body'><b>" + esc(title) + "</b>" + (rest ? " <span class='muted'>" + rest + "</span>" : "") + "</div></li>";
     let l = "";
-    for (const k of ev.koths || []) l += line("crown", "Hill " + k.name, esc(k.status || "") + (k.holder ? " held by " + A.facChip(k.holder) : ""));
-    for (const o of ev.outposts || []) l += line("tower", "Outpost " + o.name, (o.holder ? "held by " + A.facChip(o.holder) : "not held") + (o.control ? ". " + esc(o.control) : ""));
+    const ends = (x) => x.endsAt ? ", ends in <span data-ends='" + Number(x.endsAt) + "'>" + A.fmtLeft(x.endsAt - Date.now()) + "</span>" : "";
+    for (const k of ev.koths || []) l += line("crown", "Hill " + k.name, esc(k.status || "") + (k.holder ? " held by " + A.facChip(k.holder) : "") + ends(k));
+    for (const o of ev.outposts || []) l += line("tower", "Outpost " + o.name, (o.holder ? "held by " + A.facChip(o.holder) : "not held") + (o.control ? ". " + esc(o.control) : "") + ends(o));
     for (const e of ev.envoys || []) l += line("feather", "Envoy", esc(e));
     return h + (l ? "<ul class='feed'>" + l + "</ul>" : "");
   }
   function statsHtml(d) {
-    if (d.hidden) return emptyState("stats", "Stats are private", "");
-    const uptime = state.server && state.server.uptimeMs != null ? state.server.uptimeMs + (Date.now() - state.serverAt) : d.uptimeMs;
-    let h = "<div class='tiles'><div class='tile'><b>" + num(d.online) + "</b><span>Online</span></div><div class='tile'><b>" + num(d.worlds) + "</b><span>Worlds</span></div><div class='tile'><b>" + esc(A.fmtLeft(uptime)) + "</b><span>Uptime</span></div></div>";
+    // The server block tells how long the server has run, counted on from when it arrived.
+    const sv = state.server && state.server.uptimeSeconds != null ? state.server.uptimeSeconds * 1000 + (Date.now() - state.serverAt) : null;
+    const uptime = sv != null ? sv : d.uptimeSeconds != null ? d.uptimeSeconds * 1000 : null;
+    let h = "<div class='tiles'><div class='tile'><b>" + num(d.online) + "</b><span>Online</span></div><div class='tile'><b>" + num(d.worlds) + "</b><span>Worlds</span></div><div class='tile'><b>" + esc(uptime != null ? A.fmtLeft(uptime) : "none") + "</b><span>Uptime</span></div></div>";
     h += "<dl class='kv'>";
-    if (d.uptimeMs != null && state.server && state.server.uptimeMs != null) h += "<dt>Map uptime</dt><dd>" + esc(A.fmtUptime(d.uptimeMs)) + "</dd>";
+    if (d.uptimeSeconds != null && sv != null) h += "<dt>Map uptime</dt><dd>" + esc(A.fmtUptime(d.uptimeSeconds * 1000)) + "</dd>";
     const fac = state.standalone ? null : d.factions;
     if (fac) h += "<dt>Factions</dt><dd>" + num(d.factions.count) + "</dd><dt>Claimed chunks</dt><dd>" + num(d.factions.claims) + "</dd>";
     if (d.activeSieges != null && !state.standalone) h += "<dt>Active sieges</dt><dd>" + num(d.activeSieges) + "</dd>";
@@ -765,26 +798,46 @@
     const a = d.activity || {};
     h += "<h3 class='sub'>Building activity</h3><dl class='kv'><dt>Broken in the last hour</dt><dd>" + num(a.breaksLastHour) + "</dd><dt>Placed in the last hour</dt><dd>" + num(a.placesLastHour) +
       "</dd><dt>Broken today</dt><dd>" + num(a.breaksLastDay) + "</dd><dt>Placed today</dt><dd>" + num(a.placesLastDay) + "</dd></dl>";
-    const tops = [["topValue", "value", "Most valuable"], ["topPower", "power", "Most power"], ["topKills", "kills", "Most kills"]];
-    for (const [k, f, label] of tops) {
+    const tops = [["topValue", "Most valuable"], ["topPower", "Most power"], ["topKills", "Most kills"]];
+    for (const [k, label] of tops) {
       const list = fac && fac[k];
       if (!list || !list.length) continue;
       h += "<h3 class='sub'>" + label + "</h3>" + list.map((x, i) => "<div class='row click' role='button' tabindex='0' data-open='" + esc(x.tag) + "'><span class='rank'>" + (i + 1) + "</span><span class='swatch' style='background:" + col(x.color) + "'></span><div class='grow'><div class='title'><b>" +
-        esc(x.tag) + "</b> " + esc(x.name) + "</div></div><span class='muted num'>" + num(x[f]) + "</span></div>").join("");
+        esc(x.tag) + "</b> " + esc(x.name) + "</div></div><span class='muted num'>" + num(x.amount) + "</span></div>").join("");
     }
     if (!state.standalone) h += eventsHtml(d.events);
     if (!state.standalone && (!d.snapshot || !d.snapshot.present)) h += "<div class='note'>Faction data has not arrived from the server yet.</div>";
     return h;
   }
+  // The problems api/health names, as sentences. An unknown code is shown with its words split apart.
+  const ISSUES = {
+    renderBacklog: () => "The tile render queue is backed up",
+    worldPollStalled: (hd) => "World details stopped updating" + (Array.isArray(hd.stalledWorlds) && hd.stalledWorlds.length ? " for " + hd.stalledWorlds.map((w) => A.worldLabel(w.world)).join(", ") : ""),
+    bindRetry: () => "The web server is still trying to open its port",
+    taskFailing: () => "A background task keeps failing. See the server log",
+    diskWriteFailing: () => "Saving data to disk failed. See the server log",
+    tileWriteFailing: () => "Saving map tiles to disk failed recently. See the server log"
+  };
+  const issueText = (code, hd) => ISSUES[code] ? ISSUES[code](hd) : A.pretty(code).replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().replace(/^./, (c) => c.toUpperCase());
+  // Admin health from api/health. Figures the server does not send are left out.
   function healthHtml(hd) {
     if (!hd) return "";
     const c = hd.tileCache || {};
     const mb = (b) => b == null ? "none" : num(b / 1048576, 1) + " MB";
-    return "<h3 class='sub'>Server health</h3><dl class='kv'>" + (hd.version ? "<dt>Version</dt><dd>" + esc(hd.version) + "</dd>" : "") +
-      "<dt>Stream clients</dt><dd>" + num(hd.sseClients) + "</dd><dt>Tile cache</dt><dd>" + mb(c.bytes) + " of " + mb(c.maxBytes) + "</dd>" +
-      "<dt>Cached tiles</dt><dd>" + num(c.entries) + "</dd><dt>Tiles waiting</dt><dd>" + num(c.queued) + "</dd>" +
-      // Named only when the server found and honours the settings of the map mod it runs alongside.
-      (state.server && state.server.betterMap === true ? "<dt>Map settings</dt><dd>BetterMap</dd>" : "") + "</dl>";
+    let h = "<h3 class='sub'>Server health</h3>";
+    const issues = Array.isArray(hd.degraded) ? hd.degraded.filter((x) => typeof x === "string") : [];
+    if (issues.length) h += "<div class='note'><span class='badge warn'>needs attention</span> " + issues.map((x) => esc(issueText(x, hd))).join(". ") + ".</div>";
+    else if (Array.isArray(hd.degraded)) h += "<div class='note'><span class='badge good'>healthy</span> Nothing needs attention.</div>";
+    h += "<dl class='kv'>" + (hd.version ? "<dt>Version</dt><dd>" + esc(hd.version) + "</dd>" : "");
+    if (hd.sseClients != null) h += "<dt>Stream clients</dt><dd>" + num(hd.sseClients) + "</dd>";
+    if (hd.tileCache) h += "<dt>Tile cache</dt><dd>" + mb(c.bytes) + " of " + mb(c.maxBytes) + "</dd><dt>Cached tiles</dt><dd>" + num(c.entries) + "</dd><dt>Tiles waiting</dt><dd>" + num(c.queued) + "</dd>";
+    const r = hd.render || hd.renderStatus;
+    if (r && typeof r === "object") {
+      h += "<dt>Rendering</dt><dd>" + (r.paused ? "<span class='badge warn'>paused</span> " : "") + esc(num(r.queued, 0) + " queued, " + num(r.running, 0) + " running, " + num(r.done, 0) + " done") + "</dd>";
+    }
+    // Named only when the server found and honours the settings of the map mod it runs alongside.
+    if (state.server && state.server.betterMap === true) h += "<dt>Map settings</dt><dd>BetterMap</dd>";
+    return h + "</dl>";
   }
   function renderStats(live) {
     body.innerHTML = head("Stats") + loading();
@@ -794,7 +847,7 @@
       body.innerHTML = head("Stats") + statsHtml(d) + healthHtml(hd);
       wireOpen(body);
       wireFactionLinks(body);
-    }).catch(() => { if (live()) body.innerHTML = head("Stats") + emptyState("stats", "Stats are not available", "Try again in a moment."); });
+    }).catch((e) => { if (live()) body.innerHTML = head("Stats") + failState(e, "stats", "Stats", "are", live); });
   }
 
   // ---- admin --------------------------------------------------------------

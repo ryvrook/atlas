@@ -100,19 +100,91 @@ public final class LinkService {
         return slot != null && System.currentTimeMillis() - slot[0] <= 60_000 && slot[1] >= ATTEMPTS_PER_MINUTE;
     }
 
-    /** IPv6 clients are limited per /64 so rotating addresses inside one network does not reset the limit. */
+    /**
+     * The key an address is rate limited under. IPv4 addresses, and IPv6 addresses that carry one
+     * (mapped or compatible forms), are their dotted IPv4 text. Other IPv6 clients are limited per
+     * /64 so rotating addresses inside one network does not reset the limit, and every spelling of
+     * the same network (compressed, expanded, upper case, with a zone id or brackets) gives one key.
+     * Only IP literals are parsed, so no lookup ever reaches DNS. Anything else is used as it is.
+     */
     public static String rateKey(String address) {
         if (address == null) {
             return "?";
         }
-        if (address.indexOf(':') < 0) {
+        String s = address.trim();
+        if (s.startsWith("[") && s.endsWith("]")) {
+            s = s.substring(1, s.length() - 1);
+        }
+        int zone = s.indexOf('%');
+        if (zone >= 0) {
+            s = s.substring(0, zone);
+        }
+        byte[] b = literal(s);
+        if (b == null) {
             return address;
         }
-        String[] groups = address.split(":", -1);
-        if (groups.length < 4) {
-            return address;
+        if (b.length == 4) {
+            return (b[0] & 0xFF) + "." + (b[1] & 0xFF) + "." + (b[2] & 0xFF) + "." + (b[3] & 0xFF);
         }
-        return groups[0] + ":" + groups[1] + ":" + groups[2] + ":" + groups[3] + "::/64";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 8; i += 2) {
+            sb.append(Integer.toHexString(((b[i] & 0xFF) << 8) | (b[i + 1] & 0xFF))).append(':');
+        }
+        return sb.append(":/64").toString();
+    }
+
+    /** The bytes of an IPv4 or IPv6 literal, or null. Characters are checked first so nothing is resolved. */
+    private static byte[] literal(String s) {
+        if (s.isEmpty() || s.length() > 45) {
+            return null;
+        }
+        boolean colon = s.indexOf(':') >= 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            boolean ok = (c >= '0' && c <= '9') || c == '.'
+                    || (colon && (c == ':' || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')));
+            if (!ok) {
+                return null;
+            }
+        }
+        if (!colon) {
+            String[] parts = s.split("\\.", -1);
+            if (parts.length != 4) {
+                return null;
+            }
+            byte[] out = new byte[4];
+            for (int i = 0; i < 4; i++) {
+                if (parts[i].isEmpty() || parts[i].length() > 3) {
+                    return null;
+                }
+                int v = Integer.parseInt(parts[i]);
+                if (v > 255) {
+                    return null;
+                }
+                out[i] = (byte) v;
+            }
+            return out;
+        }
+        try {
+            byte[] b = java.net.InetAddress.getByName(s).getAddress();
+            if (b.length == 16 && isIpv4Compatible(b)) {
+                return new byte[]{b[12], b[13], b[14], b[15]};
+            }
+            return b;
+        } catch (java.net.UnknownHostException | SecurityException e) {
+            return null;
+        }
+    }
+
+    /** True for ::a.b.c.d, the deprecated IPv4 compatible form, which InetAddress keeps as IPv6. */
+    private static boolean isIpv4Compatible(byte[] b) {
+        for (int i = 0; i < 12; i++) {
+            if (b[i] != 0) {
+                return false;
+            }
+        }
+        // :: and ::1 are IPv6 addresses of their own, not IPv4 ones.
+        return (b[12] | b[13]) != 0;
     }
 
     /** Redeems a code. Returns the new token and session, or null when the code is unknown or expired. */
@@ -203,6 +275,49 @@ public final class LinkService {
         if (token != null && !token.isEmpty() && token.length() <= 200 && sessions.remove(hash(token)) != null) {
             changes.incrementAndGet();
         }
+    }
+
+    /**
+     * Removes every session linked to the player, so each browser they linked falls back to a public
+     * viewer on its next request and open streams notice within the identity refresh. Returns the
+     * number of sessions removed.
+     */
+    public int revokePlayer(UUID uuid) {
+        if (uuid == null) {
+            return 0;
+        }
+        int removed = 0;
+        for (Map.Entry<String, Session> e : sessions.entrySet()) {
+            if (uuid.equals(e.getValue().uuid()) && sessions.remove(e.getKey()) != null) {
+                removed++;
+            }
+        }
+        codes.values().removeIf(p -> uuid.equals(p.uuid()));
+        if (removed > 0) {
+            changes.incrementAndGet();
+        }
+        return removed;
+    }
+
+    /**
+     * The player a session was linked as, found by the name stored with the session, ignoring case.
+     * Null when no session carries the name or when two different players share it.
+     */
+    public UUID playerByName(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        String wanted = name.trim();
+        UUID found = null;
+        for (Session s : sessions.values()) {
+            if (s.name() != null && s.name().equalsIgnoreCase(wanted)) {
+                if (found != null && !found.equals(s.uuid())) {
+                    return null;
+                }
+                found = s.uuid();
+            }
+        }
+        return found;
     }
 
     public boolean toggleHidden(UUID uuid) {

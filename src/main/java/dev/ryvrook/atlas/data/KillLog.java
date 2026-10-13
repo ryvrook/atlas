@@ -113,7 +113,7 @@ public final class KillLog {
         }
     }
 
-    public void save() throws java.io.IOException {
+    public synchronized void save() throws java.io.IOException {
         long version = changes.get();
         if (version == saved) {
             return;

@@ -48,11 +48,6 @@ public final class MarkerMerge {
     private MarkerMerge() {
     }
 
-    /** The entries without duplicates for a viewer without a player of their own. */
-    public static List<Candidate> dedupe(List<Candidate> in) {
-        return dedupe(in, null);
-    }
-
     /** The entries without duplicates, in the order they were given. viewer may be null. */
     public static List<Candidate> dedupe(List<Candidate> in, UUID viewer) {
         String me = viewer == null ? null : viewer.toString();

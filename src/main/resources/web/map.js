@@ -39,19 +39,19 @@
   terrain.on("tileload", (e) => { e.tile.style.visibility = ""; });
   const blank = L.layerGroup();
 
-  // Applies the tile geometry from api/worlds. Older servers send no levels and start at Atlas zoom 0.
+  // Applies the tile geometry from api/worlds. The Leaflet zoom of each level comes from its pixels per block,
+  // which matches -1 - z for every level the server lists.
   A.initGeometry = (tile) => {
     tile = tile || {};
-    const levels = tile.levels && typeof tile.levels === "object" ? tile.levels : null;
-    const zs = levels ? Object.keys(levels).map(Number).filter((n) => !Number.isNaN(n)) : [];
-    let minZ = zs.length ? Math.min.apply(null, zs) : (tile.minZoom != null ? Number(tile.minZoom) : 0);
-    let maxZ = zs.length ? Math.max.apply(null, zs) : (tile.maxZoom != null ? Number(tile.maxZoom) : 4);
-    if (!(minZ <= maxZ)) { minZ = 0; maxZ = 4; }
-    // With levels the Leaflet zoom comes from pixels per block, which matches -1 - z for every level the contract lists.
+    const levels = tile.levels && typeof tile.levels === "object" ? tile.levels : {};
+    const zs = Object.keys(levels).map(Number).filter((n) => !Number.isNaN(n));
+    let minZ = zs.length ? Math.min.apply(null, zs) : Number(tile.minZoom);
+    let maxZ = zs.length ? Math.max.apply(null, zs) : Number(tile.maxZoom);
+    if (!(minZ <= maxZ)) { minZ = -2; maxZ = 4; }
     const lOf = {};
     const zOf = {};
     for (let z = minZ; z <= maxZ; z++) {
-      const lv = levels && levels[String(z)];
+      const lv = levels[String(z)];
       const l = lv && lv.pxPerBlock > 0 ? Math.round(Math.log2(lv.pxPerBlock)) : -1 - z;
       lOf[z] = l;
       zOf[l] = z;
@@ -89,11 +89,11 @@
     { key: "zones", label: "Zone names", vis: () => A.layerOn("zones"), def: true },
     { key: "players", label: "Players", vis: () => A.layerOn("players") && !state.playersHidden, def: true },
     { key: "paths", label: "Player paths", vis: () => A.layerOn("paths"), def: false },
-    { key: "markers", label: "Spawn and places", vis: () => A.layerOn("markers") && !state.missing.markers, def: true },
-    { key: "engine", label: "Engine markers", vis: () => A.layerOn("markers") && !state.missing.markers, def: true },
+    { key: "markers", label: "Spawn and places", vis: () => A.layerOn("markers"), def: true },
+    { key: "engine", label: "Engine markers", vis: () => A.layerOn("markers"), def: true },
     // Player made markers are switched by kind with the chips below the layer list, so they have no checkbox.
-    { key: "usermarks", label: "Player markers", vis: () => A.layerOn("markers") && !state.missing.markers, def: true, list: false },
-    { key: "worldevents", label: "World events", vis: () => A.layerOn("worldevents") && !state.missing.worldevents, def: true },
+    { key: "usermarks", label: "Player markers", vis: () => A.layerOn("markers"), def: true, list: false },
+    { key: "worldevents", label: "World events", vis: () => A.layerOn("worldevents"), def: true },
     { key: "points", label: "Points", vis: () => A.layerOn("points") || A.layerOn("events"), def: true },
     { key: "heat", label: "Activity heat", vis: () => A.layerOn("heat"), def: false }
   ];
@@ -120,7 +120,6 @@
     A.setNight();
     if (!$("layers-pop").hidden) renderLayersPop();
   };
-  A.on("missing", () => A.applyOverlays());
 
   // ---- day and night ------------------------------------------------------
   // A very light dimming of the terrain from the world clock in api/worlds.
@@ -181,6 +180,19 @@
   const tip = (m, html, o) => m.bindTooltip(html, Object.assign({ className: "card", direction: "top", offset: [0, -14] }, o || {}));
   const kindHidden = (k) => state.hiddenKinds.has(k);
 
+  // Every marker carries an accessible name, its label and kind, on the element Leaflet creates for it. Leaflet
+  // makes a new element on setIcon, so the label is set again each time. A marker that is not a tab stop is an image.
+  const Marker = L.Marker.extend({
+    _initIcon: function () {
+      L.Marker.prototype._initIcon.call(this);
+      const el = this._icon;
+      if (!el) return;
+      if (this.options.label) el.setAttribute("aria-label", this.options.label);
+      if (!this.options.keyboard) el.setAttribute("role", "img");
+    }
+  });
+  const marker = A.marker = (ll, opts) => new Marker(ll, opts);
+
   // ---- tooltip cards --------------------------------------------------------
   // Every map tooltip is a small card. A title line, a muted subtitle, then the block position on its own line
   // in tabular figures. title and sub are html that the caller has already escaped.
@@ -192,7 +204,7 @@
 
   // ---- game marker images ---------------------------------------------------
   // api/marker-icons serves the game's own map marker images. Each name is asked for once. A name the server
-  // does not have, or an older server without the route, keeps the built in symbol. The user marker images are
+  // does not have keeps the built in symbol. The user marker images are
   // white glyphs with a dark outline, so they sit untinted on a badge in the marker's tint, like every other symbol.
   const gameIcons = new Map();
   let iconsQueued = false;
@@ -242,6 +254,8 @@
     return card(title, sub, { x: p.x, y: p.y, z: p.z }, extra);
   }
   const iconKey = (p) => [p.name, p.color, !!p.self, state.follow === p.uuid].join("|");
+  // Players are reached by keyboard through the Players tab, so their markers are labelled images, not tab stops.
+  const playerLabel = (p) => (p.name || "Player") + ", player" + (p.faction ? " of " + p.faction : "") + (p.self ? ", you" : "");
 
   const placed = (p) => p.x != null && p.z != null && !Number.isNaN(Number(p.x)) && !Number.isNaN(Number(p.z));
   function ensureMarker(s, now) {
@@ -252,7 +266,7 @@
       return;
     }
     if (!s.marker) {
-      const m = L.marker(toLatLng(p.x, p.z), { icon: playerIcon(p), keyboard: false, riseOnHover: true, zIndexOffset: p.self ? 1000 : 0 });
+      const m = marker(toLatLng(p.x, p.z), { icon: playerIcon(p), keyboard: false, riseOnHover: true, zIndexOffset: p.self ? 1000 : 0, label: playerLabel(p) });
       tip(m, playerCard(p), { offset: [0, -10] });
       m.on("click", () => { if (s.data.faction && A.layerOn("factions")) A.emit("openFaction", s.data.faction); else m.openTooltip(); });
       groups.players.addLayer(m);
@@ -286,7 +300,7 @@
       if (s.marker) {
         if (worldChanged) s.marker.setLatLng(toLatLng(p.x, p.z));
         const k = iconKey(p);
-        if (k !== s.icon) { s.marker.setIcon(playerIcon(p)); s.icon = k; }
+        if (k !== s.icon) { s.marker.options.label = playerLabel(p); s.marker.setIcon(playerIcon(p)); s.icon = k; }
       }
     }
     if (s.marker) s.marker.setTooltipContent(playerCard(p));
@@ -572,7 +586,7 @@
     for (const s of list) {
       if (!Array.isArray(s.chunk) || s.chunk.length < 2) continue;
       const x = s.chunk[0] * CHUNK + CHUNK / 2, z = s.chunk[1] * CHUNK + CHUNK / 2;
-      const m = L.marker(toLatLng(x, z), { icon: symIcon("swords", "#b0352c", { size: "big", count: true, endsAt: s.endsAt, pulse: true }) });
+      const m = marker(toLatLng(x, z), { icon: symIcon("swords", "#b0352c", { size: "big", count: true, endsAt: s.endsAt, pulse: true }), label: (s.attacker || "Someone") + " besieging " + (s.defender || "a faction") + ", siege" });
       tip(m, card(esc(s.attacker) + " <span class='tc-thin'>is besieging</span> " + esc(s.defender), "Siege, phase " + esc(String(s.phase || "").toLowerCase()), { x: x, z: z }), { offset: [0, -18] });
       m.on("click", () => { if (s.defender && A.layerOn("factions")) A.emit("openFaction", s.defender); });
       groups.sieges.addLayer(m);
@@ -612,8 +626,8 @@
 
   // ---- points and zone names ----------------------------------------------
   function eventPoint(p, e) {
-    const ends = p.endsAt || p.expiresAt || 0;
-    const m = L.marker(toLatLng(p.x, p.z), { icon: symIcon(e[0], col(p.color, e[1]), { size: "big", count: true, endsAt: ends }) });
+    const ends = p.expiresAt || 0;
+    const m = marker(toLatLng(p.x, p.z), { icon: symIcon(e[0], col(p.color, e[1]), { size: "big", count: true, endsAt: ends }), label: (p.label || e[2]) + ", " + e[2].toLowerCase() });
     let sub = e[2];
     if (p.holder) sub += ", held by " + A.facChip(p.holder, null, true);
     else if (String(p.kind).toLowerCase() !== "envoy") sub += ", nobody holds it";
@@ -647,7 +661,7 @@
       const ek = EVENT_KIND[kind];
       if (ek) { groups.points.addLayer(eventPoint(p, ek)); continue; }
       const k = POINT_KIND[kind] || ["pin", "#6d7680", A.pretty(p.kind || "Point")];
-      const m = L.marker(toLatLng(p.x, p.z), { icon: symIcon(k[0], col(p.color, k[1]), { count: !!p.expiresAt, endsAt: p.expiresAt }) });
+      const m = marker(toLatLng(p.x, p.z), { icon: symIcon(k[0], col(p.color, k[1]), { count: !!p.expiresAt, endsAt: p.expiresAt }), label: (p.label || k[2]) + ", " + String(k[2]).toLowerCase() + (p.faction ? " of " + p.faction : "") });
       const title = esc(p.label || k[2]) + (p.faction ? " " + A.facChip(p.faction, p.color, true) : "");
       const exp = p.expiresAt ? "<div class='tc-sub'>Expires in <span data-ends='" + Number(p.expiresAt) + "'>" + A.fmtLeft(p.expiresAt - Date.now()) + "</span></div>" : "";
       tip(m, card(title, esc(k[2]), { x: p.x, z: p.z }, exp));
@@ -711,10 +725,10 @@
   let markersSeq = 0;
   A.loadMarkers = () => {
     const seq = ++markersSeq;
-    if (!state.world || !A.layerOn("markers") || state.missing.markers) {
+    if (!state.world || !A.layerOn("markers")) {
       groups.markers.clearLayers(); groups.engine.clearLayers(); groups.usermarks.clearLayers(); markerRefs.clear(); state.markers = []; A.emit("markers"); return Promise.resolve();
     }
-    return A.apiOptional("markers", "api/markers/" + A.W()).then((d) => {
+    return A.api("api/markers/" + A.W()).then((d) => {
       if (seq !== markersSeq) return;
       state.markers = d && Array.isArray(d.markers) ? d.markers.filter((mk) => mk && mk.x != null && mk.z != null) : [];
       drawMarkers();
@@ -722,6 +736,22 @@
     }).catch(() => { /* keep what is drawn */ });
   };
   const markerRefs = new Map();
+  // A world with more than this many markers only keeps the ones near the view on the map, refreshed after each move.
+  const CULL_OVER = 300;
+  function cullMarkers() {
+    if (markerRefs.size <= CULL_OVER) {
+      for (const m of markerRefs.values()) if (!m._grp.hasLayer(m)) m._grp.addLayer(m);
+      return;
+    }
+    const b = map.getBounds().pad(0.5);
+    for (const m of markerRefs.values()) {
+      const inside = b.contains(m.getLatLng());
+      const on = m._grp.hasLayer(m);
+      if (inside && !on) m._grp.addLayer(m);
+      else if (!inside && on && !(m.isTooltipOpen && m.isTooltipOpen())) m._grp.removeLayer(m);
+    }
+  }
+  map.on("moveend", () => { if (markerRefs.size > CULL_OVER) cullMarkers(); });
   function drawMarkers() {
     // A redraw keeps the tooltip that was open, so a live refresh does not snatch it from under the pointer.
     let openKey = null;
@@ -734,11 +764,13 @@
       const lk = A.markerLook(mk);
       if (kindHidden("marker:" + lk.kind)) continue;
       const pulseColor = lk.alert ? alpha(col(lk.alert.tint, "#dc4632"), "99") : null;
-      const m = L.marker(toLatLng(mk.x, mk.z), { icon: symIcon(lk.sym, lk.color, { size: lk.size, img: lk.img, own: lk.own, ring: lk.ring, pulse: !!lk.alert, pulseColor }), zIndexOffset: lk.z, title: "" });
+      const label = lk.title + ", " + (lk.kind === "shared" && lk.by ? "shared marker by " + lk.by : MARKER_KIND[lk.kind].sub.toLowerCase());
+      const m = marker(toLatLng(mk.x, mk.z), { icon: symIcon(lk.sym, lk.color, { size: lk.size, img: lk.img, own: lk.own, ring: lk.ring, pulse: !!lk.alert, pulseColor }), zIndexOffset: lk.z, title: "", label });
       tip(m, markerCard(mk, lk), { offset: [0, lk.size === "big" ? -18 : -14] });
-      lk.group.addLayer(m);
+      m._grp = lk.group;
       markerRefs.set(A.markerKey(mk), m);
     }
+    cullMarkers();
     if (openKey && markerRefs.has(openKey) && map.hasLayer(markerRefs.get(openKey))) markerRefs.get(openKey).openTooltip();
   }
   // Pans to a marker and opens its card. A marker hidden by a filter still gets its card, as a loose tooltip.
@@ -763,8 +795,8 @@
 
   // ---- world events -------------------------------------------------------
   A.loadWorldEvents = () => {
-    if (!A.layerOn("worldevents") || state.missing.worldevents) { state.worldEvents = []; drawWorldEvents(); return Promise.resolve(); }
-    return A.apiOptional("worldevents", "api/worldevents").then((d) => {
+    if (!A.layerOn("worldevents")) { state.worldEvents = []; drawWorldEvents(); return Promise.resolve(); }
+    return A.api("api/worldevents").then((d) => {
       state.worldEvents = d && Array.isArray(d.events) ? d.events : [];
       drawWorldEvents();
       A.emit("worldevents");
@@ -783,27 +815,20 @@
     groups.worldevents.clearLayers();
     for (const e of state.worldEvents) {
       if (e.world !== state.world || !located(e)) continue;
-      const m = L.marker(toLatLng(e.x, e.z), { icon: symIcon(A.engineIcon(e.name) === "pin" ? "bolt" : A.engineIcon(e.name), "#b4532a", { size: "big", pulse: true, pulseColor: "rgba(233,150,70,.6)" }), zIndexOffset: 800 });
+      const m = marker(toLatLng(e.x, e.z), { icon: symIcon(A.engineIcon(e.name) === "pin" ? "bolt" : A.engineIcon(e.name), "#b4532a", { size: "big", pulse: true, pulseColor: "rgba(233,150,70,.6)" }), zIndexOffset: 800, label: (e.displayName || A.pretty(e.name)) + ", world event" });
       tip(m, card(esc(e.displayName || A.pretty(e.name)), "World event" + (e.startedAt ? ", open since " + esc(A.clock(e.startedAt)) : ""), { x: e.x, z: e.z }), { offset: [0, -18] });
       groups.worldevents.addLayer(m);
     }
     A.renderBanners();
   }
 
-  // ---- banners for bosses and active events --------------------------------
+  // ---- banner for active events ---------------------------------------------
   // Active events share one compact pill. Hiding it lasts for this browser session, and a new event shows it again.
   let pillOpen = false;
   const dismissed = new Set((() => { try { return JSON.parse(sessionStorage.getItem("atlas.eventsHidden") || "[]"); } catch (e) { return []; } })());
   A.renderBanners = () => {
-    const box = $("banners");
+    const box = $("event-banners");
     let h = "";
-    if (A.layerOn("events")) {
-      for (const b of state.bosses || []) {
-        const hp = b.health != null ? Math.max(0, Math.min(1, Number(b.health))) : null;
-        h += "<div class='banner boss'>" + A.icon("boss") + "<div class='grow'><b>" + esc(b.name || "A boss") + "</b>" + (b.hardMode ? " <span class='badge bad'>hard mode</span>" : "") +
-          " <span class='muted'>in " + esc(A.worldLabel(b.world)) + "</span>" + (hp != null ? "<div class='hp' aria-label='Health'><i style='width:" + (hp * 100).toFixed(1) + "%'></i></div>" : "") + "</div></div>";
-      }
-    }
     const evs = (state.worldEvents || []).filter((e) => e.world === state.world && located(e)).sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
     const fresh = evs.filter((e) => !dismissed.has(e.id));
     if (fresh.length) {
@@ -817,7 +842,7 @@
     }
     box.innerHTML = h;
     const main = box.querySelector(".pill-main");
-    if (main) main.addEventListener("click", () => { pillOpen = !pillOpen; A.renderBanners(); const m = $("banners").querySelector(".pill-main"); if (m) m.focus(); });
+    if (main) main.addEventListener("click", () => { pillOpen = !pillOpen; A.renderBanners(); const m = box.querySelector(".pill-main"); if (m) m.focus(); });
     const x = box.querySelector("[data-dismiss]");
     if (x) x.addEventListener("click", () => {
       for (const e of evs) dismissed.add(e.id);
@@ -835,10 +860,9 @@
   A.heatWindow = A.store.get("heatWindow", 86400000);
   A.loadHeat = () => {
     if (!map.hasLayer(groups.heat) || !state.world) return;
-    A.api("api/changes/" + A.W() + "?since=" + (Date.now() - A.heatWindow)).then((d) => {
+    A.api("api/heat/" + A.W() + "?since=" + (Date.now() - A.heatWindow)).then((d) => {
       groups.heat.clearLayers();
-      if (!d.heat) return;
-      const rows = d.heat.chunks || [];
+      const rows = Array.isArray(d.chunks) ? d.chunks : [];
       let max = 1;
       for (const r of rows) max = Math.max(max, r[2] + r[3]);
       for (const r of rows) {
@@ -849,7 +873,7 @@
         rect.bindTooltip(card(num(r[2]) + " broken and " + num(r[3]) + " placed", "Chunk " + r[0] + " " + r[1]), { className: "card", sticky: true });
         groups.heat.addLayer(rect);
       }
-    }).catch(() => A.toast("Activity heat could not be loaded", "bad"));
+    }).catch((e) => { groups.heat.clearLayers(); if (e.status !== 403 && e.status !== 404 && e.status !== 429) A.toast("Activity heat could not be loaded", "bad"); });
   };
   setInterval(() => A.loadHeat(), 60000);
   A.loadPaths = () => {
@@ -865,16 +889,23 @@
   setInterval(() => A.loadPaths(), 10000);
 
   // ---- tiles --------------------------------------------------------------
+  // Versions are kept for the tiles on screen plus the most recent TILE_KEEP others, oldest dropped first.
+  // The map keeps insertion order, so a version that changes is moved to the end.
+  const TILE_KEEP = 2000;
   A.onTiles = (d) => {
     if (!d || d.world !== state.world || !Array.isArray(d.tiles)) return;
-    for (const t of d.tiles) state.tileVersions.set(t[0] + "/" + t[1] + "/" + t[2], d.at);
+    const tv = state.tileVersions;
+    for (const t of d.tiles) { const k = t[0] + "/" + t[1] + "/" + t[2]; tv.delete(k); tv.set(k, d.at); }
+    const shown = new Set();
     for (const key in terrain._tiles) {
       const tile = terrain._tiles[key];
       const c = tile.coords;
-      if (state.tileVersions.get(geo.lToZ(c.z) + "/" + c.x + "/" + c.y) === d.at) {
-        tile.el.src = terrain.getTileUrl(c);
-      }
+      const k = geo.lToZ(c.z) + "/" + c.x + "/" + c.y;
+      shown.add(k);
+      if (tv.get(k) === d.at) tile.el.src = terrain.getTileUrl(c);
     }
+    let extra = tv.size - TILE_KEEP - shown.size;
+    if (extra > 0) for (const k of tv.keys()) { if (extra <= 0) break; if (!shown.has(k)) { tv.delete(k); extra--; } }
   };
   A.resetTiles = () => { state.tileVersions.clear(); terrain.redraw(); };
 
@@ -1031,7 +1062,7 @@
     }
     // Player markers always have a chip while markers are shown, and a linked viewer always gets chips for
     // their own kinds, so the choice can be made before the first marker of that kind exists.
-    if (A.layerOn("markers") && !state.missing.markers) {
+    if (A.layerOn("markers")) {
       add("marker:shared", mk.shared.label, mk.shared.color);
       if (A.hasOwnKinds()) for (const k of OWN_KINDS) add("marker:" + k, mk[k].label, mk[k].color);
     }

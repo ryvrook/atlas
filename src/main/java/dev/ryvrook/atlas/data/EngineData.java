@@ -133,6 +133,12 @@ public final class EngineData {
      * fresh read made for a request can never swallow a change before the poll announces it.
      */
     private final Map<String, Long> sharedAnnounced = new ConcurrentHashMap<>();
+    /** The hash of the engine markers (warps, block markers, portal markers and the rest) each world was last announced with. */
+    private final Map<String, Long> markersAnnounced = new ConcurrentHashMap<>();
+    /** Worlds with a marker poll queued on their thread, so a slow world never piles up polls. */
+    private final Set<String> markerPollInFlight = ConcurrentHashMap.newKeySet();
+    /** Worlds with an event poll queued on their thread. */
+    private final Set<String> eventPollInFlight = ConcurrentHashMap.newKeySet();
     private volatile EventListener listener = new EventListener() {
         @Override
         public void started(ActiveEvent e) {
@@ -430,8 +436,8 @@ public final class EngineData {
         }
         JsonObject o = new JsonObject();
         o.addProperty("icon", Text.imageName(a.image));
-        o.addProperty("durationS", a.durationSeconds);
-        o.addProperty("timeoutS", a.timeoutSeconds);
+        o.addProperty("durationSeconds", a.durationSeconds);
+        o.addProperty("timeoutSeconds", a.timeoutSeconds);
         o.addProperty("tint", a.tint == null ? null
                 : String.format(Locale.ROOT, "#%02x%02x%02x", a.tint.red & 0xFF, a.tint.green & 0xFF, a.tint.blue & 0xFF));
         return o;
@@ -499,9 +505,10 @@ public final class EngineData {
     }
 
     /**
-     * Reads the shared markers of every world on its own thread and hands the name of each world whose
-     * set changed since the previous read to the listener, on the given executor. The first read of a
-     * world only records it.
+     * Reads the shared markers and the engine markers of every world on its own thread and hands the name
+     * of each world whose markers changed since the previous read to the listener, on the given executor.
+     * Shared markers, warps, block markers and portal markers all count. The first read of a world only
+     * records it. A world whose previous poll has not run yet is skipped.
      */
     public void pollShared(java.util.concurrent.Executor executor, java.util.function.Consumer<String> changed) {
         Universe u = Universe.get();
@@ -510,32 +517,51 @@ public final class EngineData {
         }
         for (World w : u.getWorlds().values()) {
             String name = w.getName();
-            CompletableFuture<List<SharedMarker>> read = new CompletableFuture<>();
+            if (!markerPollInFlight.add(name)) {
+                continue;
+            }
+            CompletableFuture<MarkerSet> read = new CompletableFuture<>();
             try {
                 w.execute(() -> {
                     try {
-                        read.complete(readShared(w));
+                        List<SharedMarker> own = readShared(w);
+                        read.complete(new MarkerSet(System.currentTimeMillis(), collect(w, own), own));
                     } catch (Throwable t) {
                         read.complete(null);
+                    } finally {
+                        markerPollInFlight.remove(name);
                     }
                 });
             } catch (RuntimeException e) {
+                markerPollInFlight.remove(name);
                 continue;
             }
-            read.thenAcceptAsync(list -> {
-                if (list == null) {
+            read.thenAcceptAsync(set -> {
+                if (set == null || !u.getWorlds().containsKey(name)) {
                     return;
                 }
-                SharedSet next = new SharedSet(System.currentTimeMillis(), list, sharedHash(list));
+                SharedSet next = new SharedSet(set.at(), set.shared(), sharedHash(set.shared()));
                 shared.put(name, next);
-                Long prev = sharedAnnounced.put(name, next.hash());
-                if (prev != null && prev != next.hash()) {
-                    // The cached provider markers may still hold the old shared set.
-                    markers.remove(name);
+                markers.put(name, set);
+                long engineHash = markersHash(set.markers());
+                Long prevShared = sharedAnnounced.put(name, next.hash());
+                Long prevEngine = markersAnnounced.put(name, engineHash);
+                boolean sharedChanged = prevShared != null && prevShared != next.hash();
+                boolean engineChanged = prevEngine != null && prevEngine != engineHash;
+                if (sharedChanged || engineChanged) {
                     changed.accept(name);
                 }
             }, executor);
         }
+    }
+
+    /** Hash of the JSON of every engine marker, in collection order. */
+    static long markersHash(List<Found> list) {
+        long h = 1125899906842597L;
+        for (Found f : list) {
+            h = 31 * h + f.json().toString().hashCode();
+        }
+        return h;
     }
 
     // ---- world events --------------------------------------------------------
@@ -547,10 +573,21 @@ public final class EngineData {
             return;
         }
         for (World w : u.getWorlds().values()) {
+            String name = w.getName();
+            if (!eventPollInFlight.add(name)) {
+                continue;
+            }
             try {
-                w.execute(() -> pollWorld(w));
+                w.execute(() -> {
+                    try {
+                        pollWorld(w);
+                    } finally {
+                        eventPollInFlight.remove(name);
+                    }
+                });
             } catch (RuntimeException ignored) {
                 // World is shutting down.
+                eventPollInFlight.remove(name);
             }
         }
     }
@@ -637,18 +674,25 @@ public final class EngineData {
 
     /** Forgets a removed world and returns the events that were active in it. */
     public List<ActiveEvent> dropWorld(String world) {
-        markers.remove(world);
-        shared.remove(world);
-        sharedAnnounced.remove(world);
+        forgetMarkers(world);
         Map<UUID, ActiveEvent> gone = events.remove(world);
+        eventPollInFlight.remove(world);
         return gone == null ? List.of() : new ArrayList<>(gone.values());
     }
 
-    /** Names of worlds with cached data, for removal checks. */
-    public Set<String> knownWorlds() {
-        Set<String> out = ConcurrentHashMap.newKeySet();
-        out.addAll(markers.keySet());
-        out.addAll(events.keySet());
-        return out;
+    /**
+     * Forgets the cached markers of a removed world. A marker read still queued on its thread is completed
+     * with an empty set so no request waits for a world that is gone.
+     */
+    public void forgetMarkers(String world) {
+        markers.remove(world);
+        shared.remove(world);
+        sharedAnnounced.remove(world);
+        markersAnnounced.remove(world);
+        markerPollInFlight.remove(world);
+        CompletableFuture<MarkerSet> job = markerJobs.remove(world);
+        if (job != null) {
+            job.complete(new MarkerSet(System.currentTimeMillis(), List.of(), List.of()));
+        }
     }
 }

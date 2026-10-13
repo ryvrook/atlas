@@ -13,6 +13,19 @@ public enum Visibility {
     /** Admin viewers only. */
     ADMIN;
 
+    /** The level named by raw, ignoring case and spaces, or null when raw names no level. */
+    public static Visibility parseStrict(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return valueOf(raw.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /** The level named by raw, or ADMIN when raw names no level. */
     public static Visibility parse(String raw) {
         if (raw == null) {
             return ADMIN;

@@ -14,13 +14,12 @@ import dev.ryvrook.atlas.util.Text;
 /**
  * Tells portal and instance worlds apart from ordinary worlds. Runs on the world thread.
  *
- * <p>What javap of 0.7.0 shows. PortalWorld is an entity store resource whose exists() is true when
- * its portal type id resolves to a PortalType asset. getRemainingSeconds returns -1 without a time
- * limit. getActiveVoidEventStage(store) reads the VoidEvent component of the void event entity and
- * has no side effects, unlike computeLatestStage which may start the void event resource. Stages
- * carry no index, so the stage number is counted with VoidEventConfig.forEachStage from the start
- * up to the active stage. InstanceWorldConfig.get(worldConfig) reads the plugin config map and
- * returns null for ordinary worlds.
+ * <p>Engine facts for 0.7.0. PortalWorld is an entity store resource whose exists() is true when its
+ * portal type id resolves to a PortalType asset. getRemainingSeconds returns -1 without a time limit.
+ * getActiveVoidEventStage(store) reads the VoidEvent component of the void event entity and has no side
+ * effects, unlike computeLatestStage which may start the void event resource. Stages carry no index, so
+ * the stage number is counted with VoidEventConfig.forEachStage from the start up to the active stage.
+ * InstanceWorldConfig.get(worldConfig) reads the plugin config map and returns null for ordinary worlds.
  */
 final class WorldKinds {
     private WorldKinds() {

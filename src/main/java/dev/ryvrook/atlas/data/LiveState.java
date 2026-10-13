@@ -55,7 +55,8 @@ public final class LiveState {
     private static final long TRAIL_STEP_MS = 5_000;
 
     private volatile List<PlayerSample> players = List.of();
-    private volatile long sampledAt;
+    /** Worlds with a world info read queued on their thread. */
+    private final java.util.Set<String> readInFlight = ConcurrentHashMap.newKeySet();
     private final Map<String, WorldInfo> worldInfo = new ConcurrentHashMap<>();
     private final Map<UUID, float[]> health = new ConcurrentHashMap<>();
     private final Map<UUID, Deque<double[]>> trails = new ConcurrentHashMap<>();
@@ -72,6 +73,12 @@ public final class LiveState {
         }
         for (World world : universe.getWorlds().values()) {
             String wname = world.getName();
+            WorldInfo info = worldInfo.get(wname);
+            if (info == null || info.kind() == null) {
+                // The world kind is not known yet, so it may be a portal world some viewers must not see.
+                // Its players are listed once the first read on the world thread has told the kind.
+                continue;
+            }
             for (PlayerRef ref : world.getPlayerRefs()) {
                 try {
                     Transform t = ref.getTransform();
@@ -89,7 +96,6 @@ public final class LiveState {
         }
         long now = System.currentTimeMillis();
         players = Collections.unmodifiableList(out);
-        sampledAt = now;
         if (now - lastTrailAt >= TRAIL_STEP_MS) {
             lastTrailAt = now;
             recordTrails(out, now);
@@ -145,10 +151,6 @@ public final class LiveState {
         return null;
     }
 
-    public long sampledAt() {
-        return sampledAt;
-    }
-
     public Map<String, WorldInfo> worlds() {
         return worldInfo;
     }
@@ -166,19 +168,41 @@ public final class LiveState {
         for (World world : universe.getWorlds().values()) {
             String name = world.getName();
             alive.add(name);
-            WorldInfo prev = worldInfo.get(name);
             int count = world.getPlayerCount();
-            worldInfo.put(name, new WorldInfo(name, count,
+            boolean map = mapEnabled(world);
+            long now = System.currentTimeMillis();
+            // The kind stays null until the world thread has read it. updatedAt moves only when the world
+            // thread answers, so a world whose thread stopped answering shows up as stalled. compute keeps
+            // a read that lands at the same moment from being overwritten with older values.
+            worldInfo.compute(name, (k, prev) -> new WorldInfo(name, count,
                     prev == null ? null : prev.spawn(), prev == null ? null : prev.hour(),
-                    prev == null ? null : prev.dayProgress(), mapEnabled(world), System.currentTimeMillis(),
-                    prev == null ? WorldKind.plain(name) : prev.kind()));
+                    prev == null ? null : prev.dayProgress(), map, prev == null ? now : prev.updatedAt(),
+                    prev == null ? null : prev.kind()));
+            if (!readInFlight.add(name)) {
+                // The previous read has not run yet. A busy world gets one queued read at a time.
+                continue;
+            }
             try {
-                world.execute(() -> readOnWorldThread(world, wantHealth));
+                world.execute(() -> {
+                    try {
+                        readOnWorldThread(world, wantHealth);
+                    } finally {
+                        readInFlight.remove(name);
+                    }
+                });
             } catch (RuntimeException ignored) {
                 // World is shutting down.
+                readInFlight.remove(name);
             }
         }
         worldInfo.keySet().removeIf(n -> !alive.contains(n));
+        readInFlight.removeIf(n -> !alive.contains(n));
+    }
+
+    /** Forgets a removed world. */
+    public void forget(String world) {
+        worldInfo.remove(world);
+        readInFlight.remove(world);
     }
 
     private static boolean mapEnabled(World world) {
@@ -219,9 +243,16 @@ public final class LiveState {
             // Time resource missing on this world.
         }
         WorldKind kind = WorldKinds.read(world, store);
-        WorldInfo prev = worldInfo.get(name);
-        worldInfo.put(name, new WorldInfo(name, world.getPlayerCount(), spawn, hour, progress,
-                prev != null && prev.mapEnabled(), System.currentTimeMillis(), kind));
+        int count = world.getPlayerCount();
+        double[] spawnAt = spawn;
+        Integer hourNow = hour;
+        Float progressNow = progress;
+        // A world removed while this read waited on its thread stays removed.
+        WorldInfo next = worldInfo.computeIfPresent(name, (k, prev) -> new WorldInfo(name, count, spawnAt, hourNow,
+                progressNow, prev.mapEnabled(), System.currentTimeMillis(), kind));
+        if (next == null) {
+            return;
+        }
         if (!wantHealth || store == null) {
             return;
         }

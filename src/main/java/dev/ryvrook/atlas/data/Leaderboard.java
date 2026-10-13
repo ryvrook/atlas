@@ -21,6 +21,8 @@ public final class Leaderboard {
     private FileTime lastModified;
     private long lastSize = -1;
     private volatile String lastError;
+    /** True while a read failure has been logged and no good read has followed. */
+    private boolean errorLogged;
 
     public Leaderboard(Path path) {
         this.path = path;
@@ -72,7 +74,10 @@ public final class Leaderboard {
             }
             JsonElement parsed = JsonParser.parseString(Files.readString(p, StandardCharsets.UTF_8));
             if (!parsed.isJsonObject()) {
-                lastError = "the root is not a JSON object";
+                fail(p, "the root is not a JSON object");
+                // The same broken file is not parsed again until it changes.
+                lastModified = mod;
+                lastSize = size;
                 return false;
             }
             lastModified = mod;
@@ -81,11 +86,28 @@ public final class Leaderboard {
             root = o;
             updatedAt = (long) Json.num(o, "updatedAt", mod.toMillis());
             lastError = null;
+            errorLogged = false;
             return true;
         } catch (Exception e) {
             // Feats writes through a temporary file, so this is rare. Try again on the next poll.
-            lastError = e.getClass().getSimpleName() + " " + e.getMessage();
+            fail(p, e.getClass().getSimpleName() + " " + e.getMessage());
             return false;
+        }
+    }
+
+    /** Records a read failure and logs it once until a good read follows. */
+    private void fail(Path p, String reason) {
+        lastError = reason;
+        if (errorLogged) {
+            return;
+        }
+        errorLogged = true;
+        try {
+            com.hypixel.hytale.logger.HytaleLogger.get("Atlas").at(java.util.logging.Level.WARNING)
+                    .log("Atlas could not read the Feats leaderboard at " + p + " because " + reason
+                            + ". The last good copy stays in use and this is logged once until the file reads again.");
+        } catch (RuntimeException | LinkageError ignored) {
+            // No logging backend, as in unit tests.
         }
     }
 }

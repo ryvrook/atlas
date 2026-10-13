@@ -12,9 +12,9 @@
  *   panel.js            The side panel and bottom sheet, its tabs and every tab view including the faction page.
  *   app.js              This file. Boot, the world picker, the event stream, search, linking, theme and keys.
  *
- * All URLs are relative (api/worlds, never /api/worlds) so the map also works under a sub path. Endpoints
- * that an older server lacks go through Atlas.apiOptional, which marks the feature missing on a 404 so the
- * matching layer, tab or timeline source hides itself. Modules talk through Atlas.emit and Atlas.on.
+ * All URLs are relative (api/worlds, never /api/worlds) so the map also works under a sub path. The client
+ * speaks API version 1 as described in the README. A 403 or 404 answer has a JSON body with an error text and
+ * each panel shows its own empty state for it. Modules talk through Atlas.emit and Atlas.on.
  */
 (function () {
   "use strict";
@@ -55,14 +55,13 @@
   $("panel-btn").addEventListener("click", () => A.togglePanel());
 
   // ---- worlds -------------------------------------------------------------
-  const visibleWorlds = () => state.worlds.filter((w) => !w.hidden || A.isAdmin());
+  const visibleWorlds = () => state.worlds.filter((w) => !w.hiddenWorld || A.isAdmin());
   A.worldShown = (name) => visibleWorlds().some((w) => w.name === name);
   function applyWorlds(d) {
     const server = d.server && typeof d.server === "object" ? d.server : null;
-    // A server without the server object predates 0.2.0, so its newer endpoints are skipped without asking.
-    if (!server && !state.worldsAt) for (const k of ["markers", "kills", "worldevents", "bosses", "leaderboard"]) state.missing[k] = true;
     state.server = server;
     state.serverAt = Date.now();
+    checkVersion(server);
     state.title = (server && server.title) || d.title || state.title || "Atlas";
     document.title = state.title;
     $("title").textContent = state.title;
@@ -80,6 +79,22 @@
     // A standalone server has no factions, so the search never offers them.
     $("search").placeholder = state.standalone ? "Player, place or x z" : "Player, faction, place or x z";
   }
+  // ---- version change -------------------------------------------------------
+  // A server that runs a newer jar than the one this page came from gets a one line bar with a Reload button.
+  // A tab nobody looks at reloads on its own, so it never keeps talking to the new server with old code.
+  let updatePending = false;
+  function checkVersion(server) {
+    const v = server && typeof server.version === "string" ? server.version : "";
+    if (!v || !A.clientVersion || v === A.clientVersion || updatePending) return;
+    updatePending = true;
+    if (document.visibilityState === "hidden") { location.reload(); return; }
+    const bar = $("update-bar");
+    bar.innerHTML = A.icon("alert", "sm") + "<span class='grow'>Atlas was updated, reload to continue</span><button class='btn small primary' id='update-reload'>Reload</button>";
+    bar.hidden = false;
+    $("update-reload").addEventListener("click", () => location.reload());
+  }
+  document.addEventListener("visibilitychange", () => { if (updatePending && document.visibilityState === "hidden") location.reload(); });
+
   function refetchWorlds() {
     return A.api("api/worlds").then((d) => {
       applyWorlds(d);
@@ -120,8 +135,8 @@
     if (!list.length) { menu.innerHTML = "<div class='menu-note'>No worlds are loaded.</div>"; return; }
     menu.innerHTML = list.map((w) => "<button class='menu-item" + (w.name === state.world ? " current" : "") + "' role='menuitemradio' aria-checked='" + (w.name === state.world) + "' data-world='" + esc(w.name) + "'>" +
       A.icon(w.kind === "portal" ? "portal" : w.kind === "instance" ? "pin" : "globe", "sm") +
-      "<span class='grow'>" + esc(w.displayName || w.name) + " " + kindBadge(w) + (w.hidden ? " <span class='badge'>hidden</span>" : "") +
-      "<small>" + (A.layerOn("players") ? A.plural(w.players || 0, "player") : "") + (w.displayName && w.displayName !== w.name ? " " + esc(w.name) : "") + "</small>" +
+      "<span class='grow'>" + esc(w.displayName || w.name) + " " + kindBadge(w) + (w.hiddenWorld ? " <span class='badge'>hidden</span>" : "") +
+      "<small>" + (w.players != null ? A.plural(w.players, "player") : "") + (w.displayName && w.displayName !== w.name ? " " + esc(w.name) : "") + "</small>" +
       (w.portal ? "<small>" + portalLine(w) + "</small>" : "") + "</span></button>").join("");
     menu.querySelectorAll("[data-world]").forEach((b) => b.addEventListener("click", () => { closeWorldMenu(); if (b.dataset.world !== state.world) setWorld(b.dataset.world, null); }));
     A.tickCountdowns();
@@ -230,9 +245,9 @@
     const v = state.viewer || {};
     const btn = $("account-btn");
     if (v.viewingAs) {
-      $("account-label").textContent = "As " + (v.faction || "");
+      $("account-label").textContent = "As " + v.faction;
       btn.querySelector("use").setAttribute("href", "#i-eye");
-      btn.setAttribute("aria-label", "Viewing as " + (v.faction || "") + ". Open the account menu");
+      btn.setAttribute("aria-label", "Viewing as " + v.faction + ". Open the account menu");
     } else if (v.linked) {
       $("account-label").textContent = v.name || "Linked";
       btn.querySelector("use").setAttribute("href", "#i-user");
@@ -343,7 +358,8 @@
       const wasDown = everOpen && state.conn !== "live";
       retry = 0; lostAt = 0; everOpen = true;
       setConn("live");
-      if (wasDown) { refetchWorlds(); loadWorldData(); }
+      // Every browser comes back at about the same moment after a restart, so the refetches are spread over a second.
+      if (wasDown) { spread(refetchWorlds); spread(loadWorldData); }
     };
     src.onerror = () => {
       if (es !== src) return;
@@ -354,7 +370,8 @@
         retry++;
         // The browser cannot read the status, but a closed stream means the server answered with an error such
         // as 429 or 503 with Retry-After 30. The first retry waits about 30 seconds and later ones back off further.
-        const wait = Math.min(120000, 30000 * Math.pow(1.5, Math.min(retry - 1, 4))) * (0.85 + Math.random() * 0.3);
+        // Up to two seconds of random delay on top keep a crowd of browsers from reconnecting in step.
+        const wait = Math.min(120000, 30000 * Math.pow(1.5, Math.min(retry - 1, 4))) * (0.85 + Math.random() * 0.3) + Math.random() * 2000;
         setConn(retry > 4 ? "offline" : "reconnecting");
         retryTimer = setTimeout(connect, wait);
       } else {
@@ -364,30 +381,30 @@
     const on = (name, fn) => src.addEventListener(name, (e) => { if (es !== src) return; const d = parse(e); if (d != null) fn(d); });
     // The server sends hello again when the viewer's access, faction or layers change.
     on("hello", (d) => {
-      // Merged, so a field that only api/worlds carries is not lost when hello repeats the server block.
-      if (d.server) { state.server = Object.assign({}, state.server, d.server); state.serverAt = Date.now(); }
-      if (d.viewer && JSON.stringify(d.viewer) !== JSON.stringify(state.viewer)) { applyViewer(d.viewer); reloadAll(); }
+      if (d.server) { state.server = Object.assign({}, state.server, d.server); state.serverAt = Date.now(); checkVersion(d.server); }
+      if (d.viewer && JSON.stringify(d.viewer) !== JSON.stringify(state.viewer)) { applyViewer(d.viewer); spread(reloadAll); }
     });
     on("players", (d) => { A.onPlayers(d); });
     on("snapshot", onSnapshot);
     on("tiles", (d) => A.onTiles(d));
-    on("feedlog", (d) => { if (Array.isArray(d)) { state.feed = d.slice(-200); A.emit("activity"); } });
+    const items = (d) => d && Array.isArray(d.items) ? d.items : [];
+    on("feedlog", (d) => { state.feed = items(d).slice(-200); A.emit("activity"); });
     on("feed", (d) => { state.feed.push(d); state.feed = state.feed.slice(-200); A.emit("activity"); });
-    on("chatlog", (d) => { if (Array.isArray(d)) { state.chat = d.slice(-150); A.emit("chat"); } });
+    on("chatlog", (d) => { state.chat = items(d).slice(-150); A.emit("chat"); });
     on("chat", (d) => { state.chat.push(d); state.chat = state.chat.slice(-150); A.emit("chat"); });
-    on("killlog", (d) => { if (Array.isArray(d)) addKills(d); });
+    on("killlog", (d) => addKills(items(d)));
     on("kill", (d) => addKills([d]));
     on("worldevent", (d) => {
       A.onWorldEvent(d);
       addEventLog([{ at: d.at || Date.now(), id: d.id, world: d.world, name: d.name, displayName: d.displayName, state: d.state === "end" ? "end" : "start", x: d.x, z: d.z }]);
       if (d.state !== "end" && d.world === state.world) A.toast((d.displayName || A.pretty(d.name)) + " opened");
     });
-    on("boss", (d) => onBosses(d.bosses));
     on("leaderboard", () => { state.leaderboard = null; if (state.tab === "leaderboard" && !state.detail) A.render(); });
     on("worlds", () => refetchWorlds());
     // The shared marker set of a world changed, or with own set the viewer's own markers did.
     on("markers", (d) => { if (!d.world || d.world === state.world) markersSoon(); });
   }
+  const spread = (fn) => setTimeout(fn, Math.random() * 1000);
   let markersTimer = null;
   function markersSoon() {
     clearTimeout(markersTimer);
@@ -396,14 +413,13 @@
   setInterval(() => { if (state.conn === "reconnecting" && lostAt && Date.now() - lostAt > 20000) setConn("offline"); }, 5000);
   window.addEventListener("online", () => { if (state.conn !== "live") connect(); });
 
-  // Snapshot announcements name the sections that changed. Older servers send none, which means all of them.
-  const ALL_SECTIONS = ["territories", "points", "factions", "nations", "events", "feed", "chat"];
+  // Snapshot announcements name the sections that changed.
   let pendingSections = new Set();
   let snapTimer = null;
   let lastSnap = 0;
   function onSnapshot(d) {
-    const secs = d && Array.isArray(d.sections) && d.sections.length ? d.sections : ALL_SECTIONS;
-    for (const s of secs) pendingSections.add(s);
+    for (const s of (d && Array.isArray(d.sections) ? d.sections : [])) pendingSections.add(s);
+    if (!pendingSections.size) return;
     if (snapTimer) return;
     snapTimer = setTimeout(flushSnapshot, Math.max(300, 2000 - (Date.now() - lastSnap)));
   }
@@ -440,37 +456,16 @@
     state.eventLog = state.eventLog.slice(-200);
     A.emit("activity");
   }
-  function onBosses(list) {
-    list = Array.isArray(list) ? list : [];
-    state.bossLog = state.bossLog || [];
-    const key = (b) => b.world + "|" + b.name + "|" + b.startedAt;
-    const seen = new Set(state.bossLog.map(key));
-    const before = new Set((state.bosses || []).map(key));
-    for (const b of list) {
-      if (!seen.has(key(b))) { seen.add(key(b)); state.bossLog.push({ at: b.startedAt || Date.now(), world: b.world, name: b.name, hardMode: b.hardMode, startedAt: b.startedAt }); }
-      if (state.everBoss && !before.has(key(b)) && A.layerOn("events")) A.toast((b.name || "A boss") + " appeared in " + A.worldLabel(b.world));
-    }
-    state.everBoss = true;
-    state.bosses = list;
-    state.bossLog = state.bossLog.slice(-100);
-    A.renderBanners();
-    A.emit("activity");
-  }
   function loadActivity() {
-    if (A.layerOn("kills") && !state.missing.kills) {
-      A.apiOptional("kills", "api/kills?limit=50").then((d) => { if (d && Array.isArray(d.kills)) addKills(d.kills); else A.buildTabs(); }).catch(() => { /* the stream fills it */ });
+    if (A.layerOn("kills")) {
+      A.api("api/kills?limit=50").then((d) => { if (d && Array.isArray(d.kills)) addKills(d.kills); }).catch(() => { /* the stream fills it */ });
     }
-    if (A.layerOn("worldevents") && !state.missing.worldevents) {
-      A.apiOptional("worldevents", "api/worldevents").then((d) => {
-        if (!d) { A.buildTabs(); return; }
-        addEventLog((d.events || []).map((e) => ({ at: e.startedAt, id: e.id, world: e.world, name: e.name, displayName: e.displayName, state: "start", x: e.x, z: e.z })));
+    if (A.layerOn("worldevents")) {
+      A.api("api/worldevents").then((d) => {
+        addEventLog((d.events || []).map((e) => ({ at: e.startedAt, id: e.id, world: e.world, name: e.name, displayName: e.displayName, state: "start", x: e.x, z: e.z, located: e.located })));
       }).catch(() => { /* the stream fills it */ });
     }
-    if (A.layerOn("events") && !state.missing.bosses) {
-      A.apiOptional("bosses", "api/bosses").then((d) => { if (d) onBosses(d.bosses); else A.buildTabs(); }).catch(() => { /* the stream fills it */ });
-    } else { state.bosses = []; A.renderBanners(); }
   }
-  A.on("missing", () => A.buildTabs());
 
   // ---- search -------------------------------------------------------------
   const input = $("search");
@@ -490,7 +485,7 @@
     for (const p of live) if (String(p.name || "").toLowerCase().includes(ql)) out.push({ icon: "user", label: p.name, kind: "Player in " + A.worldLabel(p.world), go: () => A.locatePlayer(p.uuid) });
     for (const o of state.offline || []) {
       if (!String(o.name || "").toLowerCase().includes(ql) || o.x == null) continue;
-      out.push({ icon: "clock", label: o.name, kind: "Last seen " + A.rel(o.lastSeen), go: () => A.emit("switchWorld", { name: o.world || state.world, view: { x: o.x, z: o.z, zoom: Math.max(map.getZoom(), A.geo.maxNative - 2) } }) });
+      out.push({ icon: "clock", label: o.name, kind: "Last seen " + A.rel(o.at), go: () => A.emit("switchWorld", { name: o.world || state.world, view: { x: o.x, z: o.z, zoom: Math.max(map.getZoom(), A.geo.maxNative - 2) } }) });
     }
     if (A.layerOn("factions")) {
       for (const f of state.factions || []) {

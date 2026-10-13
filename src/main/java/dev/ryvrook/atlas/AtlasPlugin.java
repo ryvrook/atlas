@@ -18,7 +18,6 @@ import dev.ryvrook.atlas.data.DominionSnapshot;
 import dev.ryvrook.atlas.data.EngineData;
 import dev.ryvrook.atlas.data.LiveState;
 import dev.ryvrook.atlas.http.ApiServer;
-import dev.ryvrook.atlas.http.AtlasVersion;
 import dev.ryvrook.atlas.systems.BlockActivitySystem;
 import dev.ryvrook.atlas.systems.ChunkSaveSystem;
 import dev.ryvrook.atlas.systems.DeathSystem;
@@ -63,6 +62,10 @@ public final class AtlasPlugin extends JavaPlugin {
     private final Map<String, long[]> failures = new ConcurrentHashMap<>();
     private long lastSnapshotWarn;
     private long warnedErrorAt;
+    /** Why atlas.json was rejected, or null while it is valid. The web server stays down while set. */
+    private volatile String configError;
+    /** Disk writes that failed, as name to {time, message}. Cleared by the next success. */
+    private final Map<String, String[]> diskFailures = new ConcurrentHashMap<>();
 
     // Player stream state, touched only by the players task.
     private final Map<String, String> lastSignature = new HashMap<>();
@@ -87,26 +90,28 @@ public final class AtlasPlugin extends JavaPlugin {
 
     @Override
     protected void setup() {
-        try {
-            AtlasVersion.VERSION = String.valueOf(getManifest().getVersion());
-        } catch (RuntimeException ignored) {
-            // Keep the built in version string.
-        }
         AtlasConfig cfg;
         try {
             cfg = AtlasConfig.load(getDataDirectory());
+            configError = null;
         } catch (Exception e) {
-            getLogger().at(Level.WARNING).withCause(e).log("Atlas could not read atlas.json, using defaults");
+            // Fail closed. The rest of the plugin runs on built in defaults, but nothing is served.
+            configError = String.valueOf(e.getMessage());
+            logConfigError();
             cfg = new AtlasConfig();
         }
-        warnReplacedToken(cfg);
+        warnConfig(cfg);
         atlas = new Atlas(cfg, getDataDirectory());
+        // The tile service logs and reads the live settings from here on, before anything renders.
+        atlas.tiles().attach(getLogger(), atlas::config);
         atlas.heat().load();
         atlas.links().load();
         atlas.kills().load();
         atlas.lastSeen().load();
         loadTransientWorlds();
         server = new ApiServer(atlas, getLogger());
+        server.setHealthExtras(this::healthExtras);
+        server.setOtherMapMods(this::otherMapMods);
 
         getCommandRegistry().registerCommand(new AtlasCommand(this));
         getEntityStoreRegistry().registerSystem(BlockActivitySystem.breaks(atlas.heat()));
@@ -134,7 +139,9 @@ public final class AtlasPlugin extends JavaPlugin {
                     && (c.world() == null || c.world().equals(world)));
         });
         warnRejectedProxies();
-        getLogger().at(Level.INFO).log("Atlas set up, web server will listen on %s:%d", cfg.bind, cfg.port);
+        if (configError == null) {
+            getLogger().at(Level.INFO).log("Atlas set up, web server will listen on %s:%d", cfg.bind, cfg.port);
+        }
     }
 
     @Override
@@ -147,6 +154,7 @@ public final class AtlasPlugin extends JavaPlugin {
         ex.setRemoveOnCancelPolicy(true);
         ex.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
         scheduler = ex;
+        atlas.useExecutor(r -> runAsync(r));
 
         Path snap = atlas.snapshot().path();
         if (!Files.isRegularFile(snap)) {
@@ -157,14 +165,10 @@ public final class AtlasPlugin extends JavaPlugin {
         pollMapMod();
         atlas.seedFeed();
         atlas.leaderboard().poll();
-        try {
-            server.start();
-            getLogger().at(Level.INFO).log("Atlas web map listening on http://%s/", server.boundAddress());
-        } catch (Exception e) {
-            getLogger().at(Level.SEVERE).withCause(e).log("Atlas could not start its web server on %s:%d",
-                    atlas.config().bind, atlas.config().port);
+        if (configError == null) {
+            server.startWithRetry(ex);
+            warnPublicUrl();
         }
-        warnPublicUrl();
         tasks.add(ex.scheduleWithFixedDelay(guard("snapshot", this::pollSnapshot), 1, 1, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("world info",
                 () -> atlas.live().refreshOnWorldThreads(atlas.config().showPlayerHealth || atlas.sse().size() > 0)),
@@ -187,6 +191,7 @@ public final class AtlasPlugin extends JavaPlugin {
             atlas.personal().prune();
             atlas.links().prune();
             atlas.pruneAdminCache();
+            server.pruneRateLimits();
         }), 10, 600, TimeUnit.SECONDS));
         schedulePlayers();
     }
@@ -262,7 +267,9 @@ public final class AtlasPlugin extends JavaPlugin {
         }
         Map<String, Set<String>> before = lastVisible;
         Map<String, Set<String>> next = new ConcurrentHashMap<>();
-        atlas.sse().broadcast("players", c -> true, c -> {
+        // Ended streams kept for a resume get no players frames. The next full frame, at most ten
+        // seconds after a resume, brings them up to date.
+        atlas.sse().broadcast("players", c -> !c.ended(), c -> {
             JsonObject p = atlas.playersPayload(c.viewer(), c.world(), false);
             String key = c.shareKey();
             JsonArray rows = p.has("players") ? p.getAsJsonArray("players") : new JsonArray();
@@ -447,6 +454,7 @@ public final class AtlasPlugin extends JavaPlugin {
 
     private void dropWorld(String name) {
         boolean transientWorld = transientWorlds.contains(name);
+        atlas.worldRemoved(name, transientWorld);
         atlas.live().worlds().remove(name);
         atlas.personal().dropWorld(name);
         long at = System.currentTimeMillis();
@@ -612,20 +620,84 @@ public final class AtlasPlugin extends JavaPlugin {
     public void saveQuietly() {
         try {
             atlas.heat().save();
+            diskFailures.remove("heat");
         } catch (Exception e) {
+            diskFailed("heat", e);
             getLogger().at(Level.WARNING).withCause(e).log("Atlas could not save heat data");
         }
         try {
             atlas.links().save();
+            diskFailures.remove("sessions");
         } catch (Exception e) {
+            diskFailed("sessions", e);
             getLogger().at(Level.WARNING).withCause(e).log("Atlas could not save sessions");
         }
         try {
             atlas.kills().save();
             atlas.lastSeen().save();
+            diskFailures.remove("kills");
         } catch (Exception e) {
+            diskFailed("kills", e);
             getLogger().at(Level.WARNING).withCause(e).log("Atlas could not save the kill feed and last seen list");
         }
+    }
+
+    private void diskFailed(String name, Exception e) {
+        diskFailures.put(name, new String[]{Long.toString(System.currentTimeMillis()), String.valueOf(e.getMessage())});
+    }
+
+    /** Failing tasks and disk writes for the admin health answer. */
+    private void healthExtras(JsonObject o) {
+        JsonArray degraded = new JsonArray();
+        JsonArray tasks = new JsonArray();
+        for (Map.Entry<String, long[]> e : failures.entrySet()) {
+            JsonObject row = new JsonObject();
+            row.addProperty("task", e.getKey());
+            row.addProperty("since", e.getValue()[0]);
+            tasks.add(row);
+        }
+        o.add("failingTasks", tasks);
+        if (!tasks.isEmpty()) {
+            degraded.add("taskFailing");
+        }
+        JsonArray disk = new JsonArray();
+        for (Map.Entry<String, String[]> e : diskFailures.entrySet()) {
+            JsonObject row = new JsonObject();
+            row.addProperty("file", e.getKey());
+            row.addProperty("at", Long.parseLong(e.getValue()[0]));
+            row.addProperty("error", e.getValue()[1]);
+            disk.add(row);
+        }
+        o.add("diskWriteFailures", disk);
+        if (!disk.isEmpty()) {
+            degraded.add("diskWriteFailing");
+        }
+        o.add("degraded", degraded);
+    }
+
+    /**
+     * Folders and jars in the mods folder whose names suggest another map mod, which may want the
+     * same port. BetterMap draws the in game map only and serves no web page, so it is left out.
+     */
+    private String otherMapMods() {
+        Path mods = getDataDirectory().toAbsolutePath().getParent();
+        if (mods == null || !Files.isDirectory(mods)) {
+            return "";
+        }
+        List<String> found = new ArrayList<>();
+        try (var stream = Files.list(mods)) {
+            stream.map(p -> p.getFileName().toString())
+                    .filter(n -> {
+                        String l = n.toLowerCase(Locale.ROOT);
+                        return l.contains("map") && !l.contains("atlas") && !l.contains("bettermap");
+                    })
+                    .sorted()
+                    .limit(5)
+                    .forEach(found::add);
+        } catch (Exception ignored) {
+            // An unreadable mods folder only leaves the hint out.
+        }
+        return String.join(", ", found);
     }
 
     /** Reloads atlas.json and moves the web server when the address changed. Returns a problem or null. */
@@ -634,9 +706,14 @@ public final class AtlasPlugin extends JavaPlugin {
         try {
             next = AtlasConfig.load(getDataDirectory());
         } catch (Exception e) {
-            return "atlas.json has an error. " + e.getMessage();
+            // Fail closed. Settings the owner meant to tighten must not stay loose, so the map goes down.
+            configError = String.valueOf(e.getMessage());
+            logConfigError();
+            server.stop();
+            return "atlas.json has an error, so the web map is down until it is fixed. " + configError;
         }
-        warnReplacedToken(next);
+        configError = null;
+        warnConfig(next);
         atlas.setConfig(next);
         warnRejectedProxies();
         pollSnapshot();
@@ -647,21 +724,34 @@ public final class AtlasPlugin extends JavaPlugin {
         if (server.running()) {
             problem = server.reconfigure();
         } else {
-            try {
-                server.start();
-                problem = null;
-            } catch (Exception e) {
-                problem = "The web server could not bind to " + next.bind + ":" + next.port + ". " + e.getMessage();
-            }
+            problem = server.startWithRetry(scheduler);
         }
         warnPublicUrl();
         return problem;
     }
 
-    private void warnReplacedToken(AtlasConfig cfg) {
+    /** True while atlas.json is rejected and the web server is kept down. */
+    public String configError() {
+        return configError;
+    }
+
+    private void logConfigError() {
+        getLogger().at(Level.SEVERE).log("Atlas keeps its web server down because atlas.json is invalid, %s. "
+                + "Fix the file and run /atlas reload.", configError);
+    }
+
+    private void warnConfig(AtlasConfig cfg) {
         if (cfg.adminTokenReplaced) {
             getLogger().at(Level.WARNING).log("Atlas replaced the adminToken in atlas.json because it was shorter than %d "
                     + "characters. The new random token is in the file and the old one no longer works.", AtlasConfig.MIN_ADMIN_TOKEN);
+        }
+        if (!cfg.unknownKeys.isEmpty()) {
+            getLogger().at(Level.WARNING).log("Atlas ignores unknown keys in atlas.json, %s", String.join(", ", cfg.unknownKeys));
+        }
+        if (cfg.created) {
+            getLogger().at(Level.INFO).log("Atlas wrote a new atlas.json with every option at its default");
+        } else if (!cfg.addedKeys.isEmpty()) {
+            getLogger().at(Level.INFO).log("Atlas added missing keys to atlas.json, %s", String.join(", ", cfg.addedKeys));
         }
     }
 

@@ -6,6 +6,10 @@
   const $ = A.$ = (id) => document.getElementById(id);
 
   A.CHUNK = 32;
+  // The version this page was loaded with. The server stamps every script address with ?v=(version).
+  A.clientVersion = (() => {
+    try { return new URL(document.currentScript.src).searchParams.get("v") || ""; } catch (e) { return ""; }
+  })();
 
   // ---- text and numbers ---------------------------------------------------
   const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" };
@@ -111,12 +115,10 @@
     title: "", server: null, standalone: true, worlds: [], worldsAt: 0, tile: null,
     viewer: null, layers: {}, asTag: "", world: null,
     players: new Map(), offline: [], playersHidden: false, interval: 1000, lastPlayersAt: 0,
-    factions: [], nations: null, territories: null, points: null, markers: [], worldEvents: [], bosses: [],
+    factions: [], nations: null, territories: null, points: null, markers: [], worldEvents: [],
     feed: [], chat: [], kills: [], timeline: [], leaderboard: null, health: null,
     follow: null, tileVersions: new Map(), conn: "connecting",
-    hiddenKinds: new Set(A.store.get("hiddenKinds", [])),
-    // Endpoints an older server does not have. A 404 marks them missing and the feature hides itself.
-    missing: {}
+    hiddenKinds: new Set(A.store.get("hiddenKinds", []))
   };
 
   A.layerOn = (k) => !!(A.state.layers && A.state.layers[k]);
@@ -129,17 +131,48 @@
   // ---- api ----------------------------------------------------------------
   // Every path is relative so the map also works under a sub path behind a reverse proxy.
   // Errors carry network (no answer) or status (an HTTP error or a body that is not JSON), so callers can tell
-  // a server problem from a bug in the page. Identical GET requests that are still running share one fetch.
+  // a server problem from a bug in the page. A 403 or 404 body has an error text, kept as message. Identical
+  // GET requests that are still running share one fetch.
+  // A 429 answer pauses every request until its Retry-After has passed, then the request is sent again once.
   const inflight = new Map();
+  let busyUntil = 0;
+  let busyToast = 0;
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const retryAfter = (r) => {
+    const v = r.headers.get("Retry-After");
+    const n = Number(v);
+    if (v && isFinite(n)) return Math.max(1, Math.min(300, n)) * 1000;
+    const t = v ? Date.parse(v) : NaN;
+    return isFinite(t) ? Math.max(1000, Math.min(300000, t - Date.now())) : 10000;
+  };
+  A.busyFor = () => Math.max(0, busyUntil - Date.now());
+  function send(url, opts, again) {
+    const pause = A.busyFor();
+    const go = () => fetch(url, Object.assign({ credentials: "same-origin", headers: { Accept: "application/json" } }, opts || {})).then((r) => {
+      if (r.status === 429) {
+        busyUntil = Math.max(busyUntil, Date.now() + retryAfter(r));
+        if (Date.now() - busyToast > 60000) { busyToast = Date.now(); A.toast("The map server is busy. Trying again in " + Math.ceil(A.busyFor() / 1000) + " seconds.", "bad"); }
+        if (!again) return send(url, opts, true);
+        const e = new Error("HTTP 429"); e.status = 429; e.retryMs = A.busyFor(); throw e;
+      }
+      if (!r.ok) {
+        return r.json().catch(() => null).then((b) => {
+          const e = new Error(b && typeof b.error === "string" ? b.error : "HTTP " + r.status);
+          e.status = r.status;
+          e.serverText = b && typeof b.error === "string" ? b.error : "";
+          throw e;
+        });
+      }
+      return r.json().catch(() => { const e = new Error("Not JSON"); e.status = r.status; throw e; });
+    }, (err) => { const e = new Error("Network " + (err && err.message)); e.network = true; throw e; });
+    return pause ? wait(pause).then(go) : go();
+  }
   A.api = (path, opts) => {
     const sep = path.includes("?") ? "&" : "?";
     const url = A.state.asTag ? path + sep + "as=" + encodeURIComponent(A.state.asTag) : path;
     const get = !opts || !opts.method || opts.method === "GET";
     if (get && inflight.has(url)) return inflight.get(url);
-    const p = fetch(url, Object.assign({ credentials: "same-origin", headers: { Accept: "application/json" } }, opts || {})).then((r) => {
-      if (!r.ok) { const e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
-      return r.json().catch(() => { const e = new Error("Not JSON"); e.status = r.status; throw e; });
-    }, (err) => { const e = new Error("Network " + (err && err.message)); e.network = true; throw e; });
+    const p = send(url, opts, false);
     if (!get) return p;
     inflight.set(url, p);
     const done = () => { if (inflight.get(url) === p) inflight.delete(url); };
@@ -154,14 +187,6 @@
     if (bugShown) return;
     bugShown = true;
     A.toast("Something on this page went wrong. The browser console has the details.", "bad");
-  };
-  // For endpoints newer than some servers. A 404 or 405 marks the feature missing and resolves to null.
-  A.apiOptional = (feature, path) => {
-    if (A.state.missing[feature]) return Promise.resolve(null);
-    return A.api(path).catch((e) => {
-      if (e.status === 404 || e.status === 405 || e.status === 501) { A.state.missing[feature] = true; A.emit("missing", feature); return null; }
-      throw e;
-    });
   };
   A.W = () => encodeURIComponent(A.state.world || "");
 

@@ -363,6 +363,10 @@ public final class DominionSnapshot {
     private long lastChatAt;
     private volatile String lastError;
     private volatile long lastErrorAt;
+    /** The snapshot schema version Atlas is written against. */
+    public static final int SCHEMA_VERSION = 1;
+    /** The unexpected version last logged, so each one is logged once. */
+    private String versionLogged;
 
     public DominionSnapshot(Path path) {
         this.path = path;
@@ -435,6 +439,7 @@ public final class DominionSnapshot {
                 lastErrorAt = System.currentTimeMillis();
                 return false;
             }
+            checkVersion(parsed.getAsJsonObject());
             View next = new View(parsed.getAsJsonObject(), System.currentTimeMillis());
             boolean firstLoad = !present;
             lastModified = mod;
@@ -484,6 +489,37 @@ public final class DominionSnapshot {
             lastErrorAt = System.currentTimeMillis();
             return false;
         }
+    }
+
+    /**
+     * Logs once when the snapshot carries a schema version other than the one Atlas knows. Atlas still
+     * reads the file, since Dominion only adds keys within a version.
+     */
+    private void checkVersion(JsonObject root) {
+        String version = versionOf(root);
+        if (version == null || version.equals(versionLogged)) {
+            return;
+        }
+        versionLogged = version;
+        try {
+            com.hypixel.hytale.logger.HytaleLogger.get("Atlas").at(java.util.logging.Level.WARNING)
+                    .log("Atlas expects Dominion snapshot version " + SCHEMA_VERSION + " and found " + version
+                            + ". The map reads what it can. Update Atlas or Dominion so they match.");
+        } catch (RuntimeException | LinkageError ignored) {
+            // No logging backend, as in unit tests.
+        }
+    }
+
+    /** The snapshot version as text when it is not the expected one, or null when it matches. */
+    static String versionOf(JsonObject root) {
+        JsonElement v = root.get("version");
+        if (v == null || v.isJsonNull()) {
+            return "none";
+        }
+        if (v.isJsonPrimitive() && v.getAsJsonPrimitive().isNumber() && v.getAsDouble() == SCHEMA_VERSION) {
+            return null;
+        }
+        return v.toString();
     }
 
     /** A 64 bit FNV-1a hash of the JSON text of an element. */
