@@ -1,0 +1,19 @@
+{
+  "Group": "Ryvrook",
+  "Name": "Atlas",
+  "Version": "0.2.2",
+  "Description": "A live web map for Hytale servers. Terrain tiles, players, faction territories, points, activity heat and a live feed in the browser. Link your browser with /atlas link.",
+  "Main": "dev.ryvrook.atlas.AtlasPlugin",
+  "Authors": [
+    {
+      "Name": "ryvrook"
+    }
+  ],
+  "Website": "https://github.com/ryvrook/atlas",
+  "ServerVersion": ">=0.7.0",
+  "Dependencies": {},
+  "OptionalDependencies": {},
+  "LoadBefore": {},
+  "DisabledByDefault": false,
+  "IncludesAssetPack": false
+}
