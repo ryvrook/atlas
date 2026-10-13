@@ -20,10 +20,12 @@
   };
   const canRecord = () => !!(window.MediaRecorder && window.HTMLCanvasElement && HTMLCanvasElement.prototype.captureStream);
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-  const parseIso = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || "")); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : NaN; };
+  // Steps are slots, a date with an hour such as 2026-10-13T16, or a plain date.
+  const parseIso = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})(?:T\d{2})?$/.exec(String(s || "")); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : NaN; };
   const isoOf = (t) => new Date(t).toISOString().slice(0, 10);
-  const longDate = (s) => { const t = parseIso(s); return isNaN(t) ? String(s || "") : new Date(t).toLocaleDateString([], { timeZone: "UTC", weekday: "short", year: "numeric", month: "short", day: "numeric" }); };
-  const shortDate = (s) => A.dayName ? A.dayName(s) : s;
+  const longDate = (s) => { const t = parseIso(s); const h = A.slotHour ? A.slotHour(s) : ""; return isNaN(t) ? String(s || "") : new Date(t).toLocaleDateString([], { timeZone: "UTC", weekday: "short", year: "numeric", month: "short", day: "numeric" }) + (h ? ", " + h : ""); };
+  const shortDate = (s) => A.slotName ? A.slotName(s) : A.dayName ? A.dayName(s) : s;
+  const dayOnly = (s) => A.dayName ? A.dayName(String(s || "").slice(0, 10)) : String(s || "").slice(0, 10);
   const safe = (s) => String(s == null ? "" : s).replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "map";
   const cssVar = (n, d) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || d;
 
@@ -282,16 +284,16 @@
     if (admin) {
       const toT = parseIso(job.to);
       const fromD = isoOf(Math.max(parseIso(job.from), toT - (MAX_DATA_DAYS - 1) * DAY));
-      const href = "api/timeline/" + A.W() + "/export?from=" + fromD + "&to=" + job.to;
+      const href = "api/timeline/" + A.W() + "/export?from=" + fromD + "&to=" + String(job.to).slice(0, 10);
       if (data.getAttribute("href") !== href) data.setAttribute("href", href);
       data.setAttribute("download", "");
-      data.title = "A zip of the snapshots, stats, events and 3D views from " + shortDate(fromD) + " to " + shortDate(job.to) + ", at most 90 days";
-      data.setAttribute("aria-label", "Export the timeline data from " + shortDate(fromD) + " to " + shortDate(job.to));
+      data.title = "A zip of the snapshots, stats, events and 3D views from " + dayOnly(fromD) + " to " + dayOnly(job.to) + ", at most 90 days";
+      data.setAttribute("aria-label", "Export the timeline data from " + dayOnly(fromD) + " to " + dayOnly(job.to));
     }
     const prog = $("tl-x-prog");
     prog.hidden = !busy;
     if (busy) {
-      const t = job.cancel ? "Stopping" : "Drawing " + shortDate(job.date) + ", day " + (job.i + 1) + " of " + job.n;
+      const t = job.cancel ? "Stopping" : "Drawing " + shortDate(job.date) + ", picture " + (job.i + 1) + " of " + job.n;
       if ($("tl-x-txt").textContent !== t) $("tl-x-txt").textContent = t;
       $("tl-x-bar").max = job.n;
       $("tl-x-bar").value = job.i + (job.cancel ? 0 : 0.5);

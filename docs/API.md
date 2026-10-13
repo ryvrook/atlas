@@ -451,54 +451,74 @@ Takes JSON. `{"code": "ABC123"}` links the browser and answers `{ok: true, viewe
 
 ## Timeline
 
-Daily snapshots of each world's tiles and stats plus an event log. Dates are server local ISO dates
-such as `"2026-10-13"`. Every timeline route answers 404 when `timeline.enabled` is false, for an
-unknown, disabled or hidden world, and for a day that holds nothing. Day tiles and the changed list
-follow `terrain`, every other timeline route follows `timeline`. A malformed date answers 400.
+Snapshots of each world's tiles and stats, `timeline.perDay` a day, plus an event log. Dates are
+server local ISO dates such as `"2026-10-13"`. Each snapshot is a slot, a date and an hour such as
+`"2026-10-13T16"`. A plain date is a slot too. Days kept by Atlas 1.1 and older are plain dates, one slot
+each, and wherever a route takes `{slot}` a plain date means the last slot held that day, so addresses
+from before 1.2 keep working. Every timeline route answers 404 when `timeline.enabled` is false, for an
+unknown, disabled or hidden world, and for a slot that holds nothing. Slot tiles and the changed list
+follow `terrain`, every other timeline route follows `timeline`. A malformed slot answers 400.
 
 ### GET /api/timeline/{world}
 
 ```
-{world: string, enabled: bool, hour: int, nextRunAt: ms|null, retainDays: int, today: string, days: [Day]}
+{world: string, enabled: bool, hour: int, perDay: int, hours: [int], nextRunAt: ms|null, retainDays: int,
+ today: string, currentSlot: string, days: [Slot]}
 
-Day     {date: string, snapshot: bool, pruned: bool, takenAt: ms|null, tiles: int, changed: int, partial: bool,
-         events: int, stats: bool, isoViews: [IsoDay]}
+Slot    {slot: string, date: string, hour: int|null, window: [int, int], snapshot: bool, pruned: bool,
+         takenAt: ms|null, tiles: int, changed: int, partial: bool, events: int, stats: bool, isoViews: [IsoDay]}
 IsoDay  {label: string, x: int, z: int, radius: int, file: string}
+IsoKey  IsoDay and {name: string, azimuth: int, scale: int, keyPlace: true, unchanged: bool, sameAs: string|null}
 ```
 
-Days are oldest first and include days that only have events, such as today before its snapshot,
-with `snapshot: false`. A pruned day stays listed with `pruned: true` so a slider can show a gap.
-`nextRunAt` is null while the timeline is off. `partial` means some tiles were being redrawn during
-the snapshot and kept their image from the day before. `events` counts stored lines.
+`days` holds one row per slot, oldest first, `hour` null for a plain date slot. `hours` are the slot
+hours of a day and `currentSlot` the slot a snapshot taken now belongs to. Days that only have events,
+such as today before its first snapshot, are one row with `slot` set to the date and `snapshot: false`.
+A pruned slot stays listed with `pruned: true` so a slider can show a gap. `nextRunAt` is null while the
+timeline is off. `partial` means some tiles were being redrawn during the snapshot and kept their image
+from the slot before. `window` is the hours of the day whose events belong to the slot, from its own
+hour (midnight for the first slot of a day) to the hour of the next slot that day (24 for the last), and
+`events` counts the stored lines in it.
 
-`isoViews` lists the 3D views drawn with that day's snapshot, empty when there are none or the day
-was pruned. `file` is the relative address of the image,
-`api/timeline/{world}/{date}/iso/{label}.png`. Labels are lower case letters, digits, dashes and
-underscores. Views of server markers are labelled `marker-<id>`.
+`isoViews` lists the 3D views of the slot's day, empty when there are none or the slot was pruned. They
+are drawn once a day with the first slot, and every slot of the day lists them. `file` is the relative
+address of the image, `api/timeline/{world}/{slot}/iso/{label}.png`, with the slot that holds it. Labels
+are lower case letters, digits, dashes and underscores. Views of server markers are labelled
+`marker-<id>`.
 
-### GET /api/timeline/{world}/{date}/tiles/{zoom}/{x}/{z}.png
+Up to 1.1 the list held one row per day. It still does with `timeline.perDay` at 1, apart from days
+kept before the change of a setting.
 
-The tile as it was that day, with the same coordinates as `/api/tiles`. PNG with a strong `ETag` and
-304. Past days are cached for a year as immutable, today for five minutes. A tile that did not exist
-that day, or a day without a snapshot, answers 404 without a body. Counts against the tile rate limit.
+Key places have four `IsoKey` entries each, one per direction, with `keyPlace: true`, the `name` to show (the
+label when the place has none), `azimuth` 0, 90, 180 or 270 and `scale`, and the file
+`api/timeline/{world}/{slot}/iso/{label}-{azimuth}.png`. `unchanged: true` means the place did not
+change since the render it reuses, and `sameAs` names the slot that render was drawn in, null otherwise. While that slot
+is held, `file` points into it, so a browser loads the picture once.
 
-### GET /api/timeline/{world}/{date}/changed
+### GET /api/timeline/{world}/{slot}/tiles/{zoom}/{x}/{z}.png
 
-404 when the day has no snapshot.
+The tile as it was in that slot, with the same coordinates as `/api/tiles`. PNG with a strong `ETag`
+and 304. Slots of past days are cached for a year as immutable, today's for five minutes. A tile that did
+not exist then, or a slot without a snapshot, answers 404 without a body. Counts against the tile rate
+limit.
+
+### GET /api/timeline/{world}/{slot}/changed
+
+404 when the slot has no snapshot.
 
 ```
-{world: string, date: string, previous: string|null, first: bool, tiles: [[zoom, x, z]]}
+{world: string, date: string, slot: string, previous: string|null, first: bool, tiles: [[zoom, x, z]]}
 ```
 
-The tiles whose image differs from the previous snapshot of the world, at every zoom. On the first
-day held, `first` is true, `previous` is null and every tile is listed.
+The tiles whose image differs from the previous snapshot slot of the world, at every zoom. In the first
+slot held, `first` is true, `previous` is null and every tile is listed.
 
-### GET /api/timeline/{world}/{date}/stats
+### GET /api/timeline/{world}/{slot}/stats
 
-404 when the day has no stats.
+404 when the slot has no stats.
 
 ```
-{world: string, date: string, takenAt: ms, windowSeconds: int, exploredChunks: int, tiles: int, changed: int,
+{world: string, date: string, slot: string, takenAt: ms, windowSeconds: int, exploredChunks: int, tiles: int, changed: int,
  playersSeen: int, peakOnline: int, onlineNow: int, kills: int, deaths: int, blocksBroken: int,
  blocksPlaced: int, worldEvents: int, events: int, feats: FeatsSummary|null}
 
@@ -512,10 +532,10 @@ and `deaths` deaths of players, both in this world. `blocksBroken` and `blocksPl
 heat data. `feats` is null without a Feats export or when `leaderboard` is hidden from the viewer.
 `top` holds at most ten rows in Feats rank order.
 
-### GET /api/timeline/{world}/{date}/events
+### GET /api/timeline/{world}/{slot}/events
 
 ```
-{world: string, date: string, dropped: bool, items: [TimelineEvent]}
+{world: string, date: string, slot: string, window: [int, int], dropped: bool, items: [TimelineEvent]}
 
 TimelineEvent {at: ms, kind: string, world: string, x: int|null, z: int|null, who: string|null, text: string}
 ```
@@ -523,8 +543,9 @@ TimelineEvent {at: ms, kind: string, world: string, x: int|null, z: int|null, wh
 Oldest first. `kind` is one of `join`, `leave`, `death`, `kill`, `worldevent.start`,
 `worldevent.end`, `feats.unlock`, `feats.milestone`, `feats.first`, `dominion`, `marker.add`,
 `marker.remove`, `snapshot` and `dropped`, or another lowercase dotted kind, which clients show as a
-plain line. A day holds at most 5,000 events, then one `dropped` event with `dropped: true` and
-nothing after it.
+plain line. Events are kept per day, and a slot answers the events of its `window`, the same hours
+as in the day list. A plain date that has no slot folder of its own answers the whole day. A day holds
+at most 5,000 events, then one `dropped` event with `dropped: true` and nothing after it.
 
 ### GET /api/timeline/{world}/events
 
@@ -540,18 +561,20 @@ it, so `worldevent` matches `worldevent.start`. `limit` is 1 to 5000, 1000 by de
 and when more match, the newest `limit` are kept with `truncated: true`. Values that are not whole
 numbers, or `from` after `to`, answer 400.
 
-### GET /api/timeline/{world}/{date}/iso/{label}.png
+### GET /api/timeline/{world}/{slot}/iso/{label}.png
 
-A daily 3D view. PNG with a strong `ETag` and 304. Past days are cached for a year as immutable,
-today for five minutes. 404 for an unknown label or day, 403 when `terrain` or `iso` is hidden, 400
-for a malformed date, and the timeline 404 rules. Counts against the API rate limit.
+A daily 3D view, `{label}-{azimuth}.png` for a key place. A slot without views of its own answers with
+the views of its day. PNG with a strong `ETag` and 304. Past days are cached for a year as immutable,
+today for five minutes. 404 for an unknown label or slot, 403 when `terrain` or `iso` is hidden, 400 for
+a malformed slot, and the timeline 404 rules. Counts against the API rate limit.
 
 ### GET /api/timeline/{world}/export
 
 Admins only. Takes `from` and `to`, both dates, inclusive, at most 90 days apart. Streams a zip as it
 is built, with `Content-Type: application/zip` and `Content-Disposition: attachment`. The zip holds
-`README.txt`, then per day `days/{date}/tiles.json`, `stats.json`, `events.jsonl` and `iso/` (its views
-and `index.json`) when present, then every tile image those days name, once, as `blobs/{hash}.png`.
+`README.txt`, then per day `days/{date}/events.jsonl` and per slot of that day `days/{slot}/tiles.json`,
+`stats.json` and `iso/` (its views and `index.json`) when present, then every tile image those slots
+name, once, as `blobs/{hash}.png`.
 
 - 403 for non admins.
 - 400 for missing or malformed dates, `from` after `to`, or a longer range.
@@ -614,7 +637,11 @@ The answers.
    view: {world: string, x: int, z: int, radius: int, azimuth: int, scale: int}}
   ```
 - `429` with `Retry-After` when this address started more than `isoRequestsPerMinute` new renders in
-  the last minute, or when the render queue is full. Cached views do not count.
+  the last minute (20 by default), or when the render queue is full. Cached views do not count. One
+  address holds at most `isoViewsPerAddress` views in the queue (4 by default) and at most
+  `isoLargeViewsPerAddress` large ones waiting (2 by default, radius 9 and up). A new view from an
+  address at its allowance replaces the oldest of its views that has not started rather than answering
+  429. The queue holds 8 browser views and admits 2 large ones at a time.
 - `503` with `Retry-After` for a view whose render just failed. It is tried again after 30 seconds.
 - `400` for bad parameters, `403` when `terrain` or `iso` is hidden, and `404` when `isoEnabled` is
   false, for an unknown, disabled or hidden world, and for a square with no explored chunk inside the
@@ -631,6 +658,43 @@ markers and the viewer's own personal markers, homes and deaths, then in the mar
 `/api/layers/{world}`. `layer`, a layer id such as `atlas:admin`, limits the lookup to that layer.
 Without `r`, a polygon, polyline or circle gets a radius that covers it and a point gets radius 4. 404
 when no visible marker has that id.
+
+## Key places, admins only
+
+The curated places drawn from all four directions with the first snapshot of every day, kept in
+`iso.keyPlaces` of `atlas.json`. Admins only, by the admin token or a linked session with the admin
+permission. `as` is ignored here. Everyone else gets 403. A `POST` or `DELETE` sent with a session
+cookie must come from the map itself, so one whose `Origin` names another host gets 403. Every answer
+holds the whole list.
+
+```
+{ok: true, limit: int, maxRadius: int, defaultRadius: int, keyPlaces: [KeyPlace]}
+
+after a change also  changed: "added"|"moved"|"removed"
+after a POST also    keyPlace: KeyPlace
+
+KeyPlace {label: string, name: string, world: string, x: int, z: int, radius: int}
+```
+
+`limit` is `isoKeyPlaceLimit`, `maxRadius` the largest radius a place may have, the smaller of 16 and
+`isoMaxRadius`, and `name` is empty when the place has none.
+
+### GET /api/admin/keyplaces
+
+The list.
+
+### POST /api/admin/keyplaces
+
+Takes JSON, `{world, x, z, label, radius?, name?}`, at most 4 KB. Adds the place, or moves the one
+with the same label where it stands, writes the list into `atlas.json` and applies it at once.
+`radius` is 1 to 16 and 6 by default, `label` 1 to 40 lower case letters, digits, dashes and
+underscores, `name` at most 60 characters. 415 for another content type, 400 for a bad value or a world
+that is not loaded and enabled, 409 when `isoKeyPlaceLimit` places are already there or when
+`atlas.json` does not parse or would not be valid with the change, which then stays as it was.
+
+### DELETE /api/admin/keyplaces/{label}
+
+Removes the place. Its pictures stay in the timeline. 404 when there is no place with that label.
 
 ## Event stream, GET /api/events
 
@@ -658,7 +722,7 @@ snapshot     {sections: [string], at: ms|null, present: bool}
 leaderboard  {updatedAt: ms|null}
 chronicle    {available: bool, updatedAt: ms|null}
 worlds       {updatedAt: ms}
-timeline     {world: string, date: string}
+timeline     {world: string, date: string, slot: string}
 ```
 
 - `players` rows follow the Player shape with `trail` null. `full: false` frames list only players

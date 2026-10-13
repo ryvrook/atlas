@@ -136,7 +136,7 @@
     azBox.addEventListener("click", (e) => { const b = e.target.closest("[data-az]"); if (b) turnTo(Number(b.dataset.az)); });
     rBox.addEventListener("click", (e) => { const b = e.target.closest("[data-r]"); if (b) setRadius(Number(b.dataset.r)); });
     cmpSel.addEventListener("change", () => setCompare(cmpSel.value || null));
-    liveBtn.addEventListener("click", () => { const v = view; if (v && v.mode === "day") A.openIso({ world: v.world, x: v.x, z: v.z, r: v.radius, title: v.title }); });
+    liveBtn.addEventListener("click", () => { const v = view; if (v && v.mode === "day") A.openIso({ world: v.world, x: v.x, z: v.z, r: v.radius, exactR: true, az: v.az, title: v.title }); });
     $("iso-out").addEventListener("click", () => zoomAt(1 / 1.5));
     $("iso-in").addEventListener("click", () => zoomAt(1.5));
     $("iso-fit").addEventListener("click", fit);
@@ -182,7 +182,7 @@
     const marker = o.marker != null ? String(o.marker) : null;
     view = {
       mode: "live", world: o.world || state.world, x: Number(o.x) || 0, z: Number(o.z) || 0,
-      r: fitR(o.r != null && isFinite(Number(o.r)) ? Number(o.r) : 4), az: azOf(o.az)[0],
+      r: o.exactR && o.r >= 1 && isFinite(Number(o.r)) ? Math.min(maxR(), Math.round(Number(o.r))) : fitR(o.r != null && isFinite(Number(o.r)) ? Number(o.r) : 4), az: azOf(o.az)[0],
       s: o.s >= 1 && o.s <= 3 ? Number(o.s) : wantScale(), marker, layer: marker != null && o.layer ? String(o.layer) : null,
       autoR: !!o.autoR && marker != null, title: o.title ? String(o.title) : ""
     };
@@ -193,16 +193,17 @@
     load();
   };
   // A daily view from the timeline. o has world, label, date, file, x, z, radius and days, the other days that
-  // hold a view with the same label, for the compare slider.
+  // hold a view with the same label, for the compare slider. cmp names one of those days to compare with at once.
   A.openIsoDay = (o) => {
     if (!o || !o.file) return;
     build();
-    view = Object.assign({ mode: "day", cmp: null, days: [] }, o);
+    const cmp = o.cmp || null;
+    view = Object.assign({ mode: "day", days: [] }, o, { cmp: null });
     drawn = null;
     resetImages();
     show();
     syncControls();
-    setCompare(null);
+    setCompare(cmp);
   };
 
   // ---- loading a live view -----------------------------------------------------------
@@ -622,4 +623,46 @@
 
   // Lists and cards draw their action again when the server's answer changes what is allowed.
   A.on("world", () => { if (dlg && dlg.open && view && view.mode === "day") dlg.close(); });
+
+  // ---- key places ------------------------------------------------------------------------------
+  // The curated places the server draws from all four directions every day. Admins get the list from
+  // api/admin/keyplaces, for the Admin tab and the Key places overlay. Everyone else sees the pictures in the
+  // timeline only.
+  const KP = A.kp = { list: [], limit: 3, maxRadius: 16, defaultRadius: 6, loaded: false, error: null };
+  let kpSeq = 0;
+  A.keyPlacesHere = () => KP.list.filter((p) => p.world === state.world);
+  A.setKeyPlaces = (d) => {
+    KP.list = d && Array.isArray(d.keyPlaces) ? d.keyPlaces.filter((p) => p && p.label) : [];
+    if (d && d.limit) KP.limit = Number(d.limit) || KP.limit;
+    if (d && d.maxRadius) KP.maxRadius = Number(d.maxRadius) || KP.maxRadius;
+    if (d && d.defaultRadius) KP.defaultRadius = Number(d.defaultRadius) || KP.defaultRadius;
+    KP.loaded = true;
+    KP.error = null;
+    drawKeyPlaces();
+    A.applyOverlays();
+    A.emit("keyPlaces");
+  };
+  A.loadKeyPlaces = () => {
+    const seq = ++kpSeq;
+    if (!A.isAdmin()) { KP.list = []; KP.loaded = false; drawKeyPlaces(); A.applyOverlays(); return Promise.resolve(); }
+    return A.api("api/admin/keyplaces").then((d) => { if (seq === kpSeq) A.setKeyPlaces(d); })
+      .catch((e) => { if (seq !== kpSeq) return; KP.error = e; KP.loaded = true; A.emit("keyPlaces"); });
+  };
+  A.keyName = (p) => { const t = p && p.name ? String(p.name) : A.pretty(String(p && p.label || "")).replace(/[-_]/g, " "); return t ? t.charAt(0).toUpperCase() + t.slice(1) : "Key place"; };
+  function kpCard(p) {
+    return A.card(esc(A.keyName(p)), "Key place, " + esc(A.plural(p.radius, "chunk")) + " each way, drawn daily from four directions", { x: p.x, z: p.z });
+  }
+  function drawKeyPlaces() {
+    const g = A.groups && A.groups.keyplaces;
+    if (!g) return;
+    g.clearLayers();
+    for (const p of A.keyPlacesHere()) {
+      const m = A.marker(A.toLatLng(Number(p.x), Number(p.z)), { icon: A.symIcon("camera", "#7a4fb0", { size: "small" }), title: "", label: A.keyName(p) + ", key place", zIndexOffset: 400 });
+      A.tip(m, kpCard(p), { offset: [0, -12] });
+      m.on("click", () => A.openActions(m.getLatLng(), kpCard(p), [A.isoAct({ x: p.x, z: p.z, r: p.radius, exactR: true, title: A.keyName(p) }, A.keyName(p))], m));
+      g.addLayer(m);
+    }
+  }
+  A.on("isoCaps", () => A.loadKeyPlaces());
+  A.on("world", () => { drawKeyPlaces(); A.applyOverlays(); });
 })();

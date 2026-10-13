@@ -20,7 +20,10 @@ import static dev.ryvrook.atlas.command.AtlasCommand.bad;
 import static dev.ryvrook.atlas.command.AtlasCommand.good;
 import static dev.ryvrook.atlas.command.AtlasCommand.say;
 
-/** Staff commands added in Atlas 1.0, hide and show for other players, admin markers, the timeline and isometric views. */
+/**
+ * Staff commands added in Atlas 1.0, hide and show for other players, admin markers, the timeline and
+ * isometric views, and the key places of 1.2.
+ */
 final class StaffCommands {
     private StaffCommands() {
     }
@@ -490,6 +493,210 @@ final class StaffCommands {
             for (String line : plugin.iso().status()) {
                 say(context, line);
             }
+        }
+    }
+    // ---- key places -------------------------------------------------------------
+
+    /** /atlas key add, remove, list and render. */
+    static final class Key extends CommandBase {
+        Key(AtlasPlugin plugin) {
+            super("key", "Pick the key places drawn from all four directions with the first snapshot of every day.");
+            requirePermission(Atlas.ADMIN_PERMISSION);
+            addSubCommand(new KeyAdd(plugin));
+            addSubCommand(new KeyRemove(plugin));
+            addSubCommand(new KeyList(plugin));
+            addSubCommand(new KeyRender(plugin));
+        }
+
+        @Override
+        protected void executeSync(CommandContext context) {
+            say(context, "Use /atlas key add <world> <x> <z> <label> [radius] [name], remove <label>, list or render <label>.");
+        }
+    }
+
+    /**
+     * /atlas key add with world, x, z, label and then the radius and the name as one trailing text,
+     * since a name may hold spaces. Its variant takes no radius and no name.
+     */
+    static final class KeyAdd extends CommandBase {
+        private final AtlasPlugin plugin;
+        private final RequiredArg<String> world;
+        private final RequiredArg<Integer> x;
+        private final RequiredArg<Integer> z;
+        private final RequiredArg<String> label;
+        private final RequiredArg<String> rest;
+
+        KeyAdd(AtlasPlugin plugin) {
+            super("add", "Add a key place, or move the one with the same label.");
+            this.plugin = plugin;
+            requirePermission(Atlas.ADMIN_PERMISSION);
+            this.world = withRequiredArg("world", "The world name", ArgTypes.STRING);
+            this.x = withRequiredArg("x", "Block x of the centre", ArgTypes.INTEGER);
+            this.z = withRequiredArg("z", "Block z of the centre", ArgTypes.INTEGER);
+            this.label = withRequiredArg("label", "A short label such as town_hall", ArgTypes.STRING);
+            this.rest = withRequiredArg("radius and name", "The radius in chunks, 1 to 16, then the name shown on the map",
+                    ArgTypes.GREEDY_STRING);
+            addUsageVariant(new KeyAddPlain(plugin));
+        }
+
+        @Override
+        protected void executeSync(CommandContext context) {
+            String text = context.get(rest).trim();
+            int space = text.indexOf(' ');
+            String first = space < 0 ? text : text.substring(0, space);
+            int r;
+            try {
+                r = Integer.parseInt(first);
+            } catch (NumberFormatException e) {
+                bad(context, "Give the radius in chunks before the name, as in /atlas key add default 1280 416 town_hall 6 Town Hall.");
+                return;
+            }
+            addKeyPlace(plugin, context, context.get(world), context.get(x), context.get(z), context.get(label), r,
+                    space < 0 ? "" : text.substring(space + 1).trim());
+        }
+    }
+
+    static final class KeyAddPlain extends CommandBase {
+        private final AtlasPlugin plugin;
+        private final RequiredArg<String> world;
+        private final RequiredArg<Integer> x;
+        private final RequiredArg<Integer> z;
+        private final RequiredArg<String> label;
+
+        KeyAddPlain(AtlasPlugin plugin) {
+            super("Add a key place with the default radius of 6 and no name.");
+            this.plugin = plugin;
+            requirePermission(Atlas.ADMIN_PERMISSION);
+            this.world = withRequiredArg("world", "The world name", ArgTypes.STRING);
+            this.x = withRequiredArg("x", "Block x of the centre", ArgTypes.INTEGER);
+            this.z = withRequiredArg("z", "Block z of the centre", ArgTypes.INTEGER);
+            this.label = withRequiredArg("label", "A short label such as town_hall", ArgTypes.STRING);
+        }
+
+        @Override
+        protected void executeSync(CommandContext context) {
+            addKeyPlace(plugin, context, context.get(world), context.get(x), context.get(z), context.get(label),
+                    dev.ryvrook.atlas.config.AtlasConfig.KeyPlace.DEFAULT_RADIUS, "");
+        }
+    }
+
+    private static void addKeyPlace(AtlasPlugin plugin, CommandContext context, String w, int x, int z, String l, int r, String n) {
+        if (!staff(plugin, context) || !knownWorld(plugin, context, w)) {
+            return;
+        }
+        if (!dev.ryvrook.atlas.config.AtlasConfig.validIsoLabel(l)) {
+            bad(context, "The label must be 1 to 40 lower case letters, digits, dashes or underscores, such as town_hall.");
+            return;
+        }
+        dev.ryvrook.atlas.config.AtlasConfig.KeyPlace p = new dev.ryvrook.atlas.config.AtlasConfig.KeyPlace(w, x, z, r, l, n);
+        plugin.runAsync(() -> {
+            try {
+                boolean added = dev.ryvrook.atlas.iso.KeyPlaces.put(plugin.atlas(), p);
+                good(context, (added ? "Added the key place " : "Moved the key place ") + p.displayName() + " to " + p.x + " "
+                        + p.z + " in " + w + " with radius " + p.radius + ". It is drawn from all four directions with "
+                        + "the first snapshot of every day. Run /atlas key render " + l + " to draw it now.");
+            } catch (dev.ryvrook.atlas.iso.KeyPlaces.Problem e) {
+                bad(context, e.getMessage());
+            }
+        });
+    }
+
+    static final class KeyRemove extends CommandBase {
+        private final AtlasPlugin plugin;
+        private final RequiredArg<String> label;
+
+        KeyRemove(AtlasPlugin plugin) {
+            super("remove", "Remove a key place. Its earlier pictures stay in the timeline.");
+            this.plugin = plugin;
+            requirePermission(Atlas.ADMIN_PERMISSION);
+            this.label = withRequiredArg("label", "The label of the key place", ArgTypes.STRING);
+        }
+
+        @Override
+        protected void executeSync(CommandContext context) {
+            if (!staff(plugin, context)) {
+                return;
+            }
+            String l = context.get(label);
+            plugin.runAsync(() -> {
+                try {
+                    if (dev.ryvrook.atlas.iso.KeyPlaces.remove(plugin.atlas(), l)) {
+                        good(context, "Removed the key place " + l + ". Its earlier pictures stay in the timeline.");
+                    } else {
+                        bad(context, "There is no key place " + l + ". /atlas key list shows them.");
+                    }
+                } catch (dev.ryvrook.atlas.iso.KeyPlaces.Problem e) {
+                    bad(context, e.getMessage());
+                }
+            });
+        }
+    }
+
+    static final class KeyList extends CommandBase {
+        private final AtlasPlugin plugin;
+
+        KeyList(AtlasPlugin plugin) {
+            super("list", "List the key places.");
+            this.plugin = plugin;
+            requirePermission(Atlas.ADMIN_PERMISSION);
+        }
+
+        @Override
+        protected void executeSync(CommandContext context) {
+            dev.ryvrook.atlas.config.AtlasConfig c = plugin.atlas().config();
+            List<String> lines = dev.ryvrook.atlas.iso.KeyPlaces.lines(c);
+            if (lines.isEmpty()) {
+                say(context, "There are no key places yet, up to " + c.isoKeyPlaceLimit() + " are allowed. Add one with "
+                        + "/atlas key add <world> <x> <z> <label> [radius] [name].");
+                return;
+            }
+            good(context, lines.size() + " of " + c.isoKeyPlaceLimit() + " key places.");
+            for (String line : lines) {
+                say(context, line);
+            }
+        }
+    }
+
+    static final class KeyRender extends CommandBase {
+        private final AtlasPlugin plugin;
+        private final RequiredArg<String> label;
+
+        KeyRender(AtlasPlugin plugin) {
+            super("render", "Draw a key place from all four directions now.");
+            this.plugin = plugin;
+            requirePermission(Atlas.ADMIN_PERMISSION);
+            this.label = withRequiredArg("label", "The label of the key place", ArgTypes.STRING);
+        }
+
+        @Override
+        protected void executeSync(CommandContext context) {
+            if (!staff(plugin, context)) {
+                return;
+            }
+            dev.ryvrook.atlas.config.AtlasConfig c = plugin.atlas().config();
+            String l = context.get(label);
+            dev.ryvrook.atlas.config.AtlasConfig.KeyPlace p = dev.ryvrook.atlas.iso.KeyPlaces.find(c, l);
+            if (p == null) {
+                bad(context, "There is no key place " + l + ". /atlas key list shows them.");
+                return;
+            }
+            if (!c.isoEnabled()) {
+                bad(context, "3D views are switched off with isoEnabled in atlas.json.");
+                return;
+            }
+            if (!plugin.atlas().worldExists(p.world) || !c.worldEnabled(p.world)) {
+                bad(context, "The world " + p.world + " of that key place is not loaded or is disabled.");
+                return;
+            }
+            say(context, "Drawing " + p.displayName() + " from all four directions. It runs in the background.");
+            plugin.isoSnapshots().renderNow(p).whenComplete((msg, err) -> {
+                if (err != null || msg == null) {
+                    bad(context, "The key place could not be drawn" + (err == null || err.getMessage() == null ? "."
+                            : ", " + err.getMessage() + "."));
+                } else {
+                    good(context, msg);
+                }
+            });
         }
     }
 }

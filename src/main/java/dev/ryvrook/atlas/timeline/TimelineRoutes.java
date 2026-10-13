@@ -55,6 +55,8 @@ public final class TimelineRoutes {
         return atlas.config();
     }
 
+    static final String SLOT_FORMAT = "The slot must look like 2026-01-31T16, or a date such as 2026-01-31 for the last slot of that day.";
+
     private static Atlas.ApiResult error(int status, String message) {
         return new Atlas.ApiResult(status, Payloads.error(message));
     }
@@ -109,8 +111,8 @@ public final class TimelineRoutes {
             return error(404, "Not found.");
         }
         String date = parts.get(2);
-        if (!TimelineStore.validDate(date)) {
-            return error(400, "The date must look like 2026-01-31.");
+        if (!TimelineStore.validSlot(date)) {
+            return error(400, SLOT_FORMAT);
         }
         String what = parts.get(3);
         Atlas.ApiResult g = gate(v, world, "changed".equals(what) ? "terrain" : "timeline");
@@ -126,7 +128,8 @@ public final class TimelineRoutes {
                 }
                 JsonObject o = new JsonObject();
                 o.addProperty("world", world);
-                o.addProperty("date", date);
+                o.addProperty("date", Slots.date(m.date() == null ? date : m.date()));
+                o.addProperty("slot", t.store().resolve(world, date));
                 o.addProperty("previous", m.previous());
                 o.addProperty("first", m.previous() == null);
                 JsonArray rows = new JsonArray();
@@ -148,19 +151,33 @@ public final class TimelineRoutes {
                 yield s == null ? error(404, "There are no stats for that day.") : new Atlas.ApiResult(200, stats(v, s, world, date));
             }
             case "events" -> {
-                if (!t.store().dates(world).contains(date)) {
+                String slot = t.store().resolve(world, date);
+                String day = Slots.date(slot);
+                if (!t.store().dates(world).contains(day)) {
                     yield error(404, "There are no events for that day.");
                 }
+                // Events are kept per day. A slot answers the hours of the day that belong to it.
+                int[] window = date.length() == 10 && slot.equals(date) ? new int[]{0, 24}
+                        : Slots.window(slot, t.store().slotsOf(world, day));
                 JsonObject o = new JsonObject();
                 o.addProperty("world", world);
-                o.addProperty("date", date);
-                List<EventLog.Line> lines = new ArrayList<>(t.events().read(world, date));
+                o.addProperty("date", day);
+                o.addProperty("slot", slot);
+                JsonArray w = new JsonArray();
+                w.add(window[0]);
+                w.add(window[1]);
+                o.add("window", w);
+                List<EventLog.Line> lines = new ArrayList<>(t.events().read(world, day));
                 lines.sort(java.util.Comparator.comparingLong(EventLog.Line::at));
                 boolean dropped = false;
                 JsonArray items = new JsonArray();
                 for (EventLog.Line l : lines) {
                     if (EventLog.DROPPED.equals(l.kind())) {
                         dropped = true;
+                    }
+                    int hour = java.time.Instant.ofEpochMilli(l.at()).atZone(t.zone()).getHour();
+                    if (hour < window[0] || hour >= window[1]) {
+                        continue;
                     }
                     JsonObject e = event(v, l);
                     if (e != null) {
@@ -183,8 +200,8 @@ public final class TimelineRoutes {
         if (g != null) {
             return g;
         }
-        if (!TimelineStore.validDate(date)) {
-            return error(400, "The date must look like 2026-01-31.");
+        if (!TimelineStore.validSlot(date)) {
+            return error(400, SLOT_FORMAT);
         }
         String last = parts.get(6);
         if (last.endsWith(".png")) {
@@ -201,7 +218,7 @@ public final class TimelineRoutes {
             return error(400, "Tile coordinates must be whole numbers.");
         }
         Timeline t = timeline.get();
-        boolean past = date.compareTo(t.today()) < 0;
+        boolean past = Slots.date(date).compareTo(t.today()) < 0;
         Manifest m = t.store().manifest(world, date);
         String h = m == null ? null : m.tiles().get(Manifest.key(zoom, x, z));
         if (h == null) {
@@ -224,30 +241,113 @@ public final class TimelineRoutes {
         o.addProperty("world", world);
         o.addProperty("enabled", cfg().timelineEnabled());
         o.addProperty("hour", cfg().timelineHour());
+        o.addProperty("perDay", cfg().timelinePerDay());
+        JsonArray hours = new JsonArray();
+        for (int h : t.slotHours()) {
+            hours.add(h);
+        }
+        o.add("hours", hours);
         long next = t.nextRunAt();
         o.addProperty("nextRunAt", next > 0 ? (Long) next : null);
         o.addProperty("retainDays", cfg().timelineRetainDays());
         o.addProperty("today", t.today());
+        o.addProperty("currentSlot", t.currentSlot());
         JsonArray days = new JsonArray();
         for (String date : store.dates(world)) {
-            JsonObject d = new JsonObject();
-            boolean snap = store.hasSnapshot(world, date);
-            JsonObject sum = snap ? store.summary(world, date) : null;
-            d.addProperty("date", date);
-            d.addProperty("snapshot", snap);
-            d.addProperty("pruned", store.tombstone(world, date));
-            long takenAt = sum == null ? 0 : (long) Json.num(sum, "takenAt", 0);
-            d.addProperty("takenAt", takenAt > 0 ? (Long) takenAt : null);
-            d.addProperty("tiles", sum == null ? 0 : (int) Json.num(sum, "tiles", 0));
-            d.addProperty("changed", sum == null ? 0 : (int) Json.num(sum, "changed", 0));
-            d.addProperty("partial", sum != null && Json.bool(sum, "partial"));
-            d.addProperty("events", t.events().count(world, date));
-            d.addProperty("stats", store.hasStats(world, date));
-            d.add("isoViews", dev.ryvrook.atlas.iso.IsoSnapshots.views(world, date, store.dayDir(world, date)));
-            days.add(d);
+            List<String> held = new ArrayList<>();
+            for (String slot : store.slotsOf(world, date)) {
+                if (store.slotHasSnapshot(world, slot) || store.slotPruned(world, slot)) {
+                    held.add(slot);
+                }
+            }
+            if (held.isEmpty()) {
+                // A day with events only.
+                JsonObject d = slotRow(world, date, date, null, store, t);
+                d.addProperty("events", t.events().count(world, date));
+                days.add(d);
+                continue;
+            }
+            int[] counts = held.size() > 1 || Slots.hour(held.get(0)) >= 0 ? hourCounts(t, world, date) : null;
+            for (String slot : held) {
+                int[] window = Slots.window(slot, held);
+                JsonObject d = slotRow(world, date, slot, window, store, t);
+                int n = 0;
+                if (counts == null) {
+                    n = t.events().count(world, date);
+                } else {
+                    for (int h = window[0]; h < window[1]; h++) {
+                        n += counts[h];
+                    }
+                }
+                d.addProperty("events", n);
+                days.add(d);
+            }
         }
         o.add("days", days);
         return o;
+    }
+
+    /** One slot of the day list. events is added by the caller. */
+    private JsonObject slotRow(String world, String date, String slot, int[] window, TimelineStore store, Timeline t) {
+        JsonObject d = new JsonObject();
+        boolean snap = store.slotHasSnapshot(world, slot);
+        JsonObject sum = snap ? store.slotSummary(world, slot) : null;
+        d.addProperty("slot", slot);
+        d.addProperty("date", date);
+        int hour = Slots.hour(slot);
+        d.addProperty("hour", hour >= 0 ? (Integer) hour : null);
+        int[] w = window == null ? new int[]{0, 24} : window;
+        JsonArray wa = new JsonArray();
+        wa.add(w[0]);
+        wa.add(w[1]);
+        d.add("window", wa);
+        d.addProperty("snapshot", snap);
+        d.addProperty("pruned", store.slotPruned(world, slot));
+        long takenAt = sum == null ? 0 : (long) Json.num(sum, "takenAt", 0);
+        d.addProperty("takenAt", takenAt > 0 ? (Long) takenAt : null);
+        d.addProperty("tiles", sum == null ? 0 : (int) Json.num(sum, "tiles", 0));
+        d.addProperty("changed", sum == null ? 0 : (int) Json.num(sum, "changed", 0));
+        d.addProperty("partial", sum != null && Json.bool(sum, "partial"));
+        java.nio.file.Path dir = store.worldDir(world).resolve(slot);
+        d.addProperty("stats", snap && java.nio.file.Files.isRegularFile(dir.resolve(TimelineStore.STATS)));
+        d.add("isoViews", snap ? dev.ryvrook.atlas.iso.IsoSnapshots.views(world, slot, dir) : new JsonArray());
+        return d;
+    }
+
+    private record Counts(long modified, long size, int[] hours) {
+    }
+
+    private final Map<String, Counts> hourCounts = java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<>(64, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Counts> e) {
+            return size() > 512;
+        }
+    });
+
+    /** Events of a day per server local hour, cached while the events file is unchanged. */
+    private int[] hourCounts(Timeline t, String world, String date) {
+        java.nio.file.Path f = t.store().eventsFile(world, date);
+        long modified = -1;
+        long size = -1;
+        try {
+            if (java.nio.file.Files.isRegularFile(f)) {
+                modified = java.nio.file.Files.getLastModifiedTime(f).toMillis();
+                size = java.nio.file.Files.size(f);
+            }
+        } catch (IOException ignored) {
+            // Counted again.
+        }
+        String key = world + "|" + date;
+        Counts c = hourCounts.get(key);
+        if (c != null && c.modified() == modified && c.size() == size && !date.equals(t.today())) {
+            return c.hours();
+        }
+        int[] out = new int[24];
+        for (EventLog.Line l : t.events().read(world, date)) {
+            out[java.time.Instant.ofEpochMilli(l.at()).atZone(t.zone()).getHour()]++;
+        }
+        hourCounts.put(key, new Counts(modified, size, out));
+        return out;
     }
 
     // ---- stats -------------------------------------------------------------
@@ -594,33 +694,36 @@ public final class TimelineRoutes {
         try (java.util.zip.ZipOutputStream zip = new java.util.zip.ZipOutputStream(counted)) {
             zip.setLevel(java.util.zip.Deflater.BEST_SPEED);
             entry(zip, "README.txt", ("Atlas timeline export of " + world + " from " + from + " to " + to + ". Each folder "
-                    + "days/<date> holds that day's tiles.json (tile key to image hash), stats.json, events.jsonl and its "
-                    + "isometric views under iso, and every image a tiles.json names is stored once as blobs/<hash>.png.\n")
+                    + "days/<date> holds that day's events.jsonl, and each folder days/<slot> (a date and hour such as "
+                    + "2026-10-13T16, or a plain date for a day taken by Atlas 1.1 or older) holds that snapshot's tiles.json "
+                    + "(tile key to image hash), stats.json and its isometric views under iso. Every image a tiles.json names "
+                    + "is stored once as blobs/<hash>.png.\n")
                     .getBytes(java.nio.charset.StandardCharsets.UTF_8));
             for (LocalDate d = from; !d.isAfter(to); d = d.plusDays(1)) {
                 String date = d.toString();
-                java.nio.file.Path day = store.dayDir(world, date);
-                boolean any = false;
-                any |= copy(zip, day.resolve(TimelineStore.TILES), "days/" + date + "/tiles.json");
-                any |= copy(zip, day.resolve(TimelineStore.STATS), "days/" + date + "/stats.json");
-                any |= copy(zip, store.eventsFile(world, date), "days/" + date + "/events.jsonl");
-                java.nio.file.Path iso = day.resolve("iso");
-                if (store.hasSnapshot(world, date) && java.nio.file.Files.isDirectory(iso)) {
-                    try (java.nio.file.DirectoryStream<java.nio.file.Path> s = java.nio.file.Files.newDirectoryStream(iso)) {
-                        List<java.nio.file.Path> files = new ArrayList<>();
-                        s.forEach(files::add);
-                        files.sort(null);
-                        for (java.nio.file.Path f : files) {
-                            String n = f.getFileName().toString();
-                            if (n.endsWith(".png") || n.equals("index.json")) {
-                                any |= copy(zip, f, "days/" + date + "/iso/" + n);
+                boolean any = copy(zip, store.eventsFile(world, date), "days/" + date + "/events.jsonl");
+                for (String slot : store.slotsOf(world, date)) {
+                    java.nio.file.Path day = store.worldDir(world).resolve(slot);
+                    any |= copy(zip, day.resolve(TimelineStore.TILES), "days/" + slot + "/tiles.json");
+                    any |= copy(zip, day.resolve(TimelineStore.STATS), "days/" + slot + "/stats.json");
+                    java.nio.file.Path iso = day.resolve("iso");
+                    if (java.nio.file.Files.isRegularFile(day.resolve(TimelineStore.TILES)) && java.nio.file.Files.isDirectory(iso)) {
+                        try (java.nio.file.DirectoryStream<java.nio.file.Path> s = java.nio.file.Files.newDirectoryStream(iso)) {
+                            List<java.nio.file.Path> files = new ArrayList<>();
+                            s.forEach(files::add);
+                            files.sort(null);
+                            for (java.nio.file.Path f : files) {
+                                String n = f.getFileName().toString();
+                                if (n.endsWith(".png") || n.equals("index.json")) {
+                                    any |= copy(zip, f, "days/" + slot + "/iso/" + n);
+                                }
                             }
                         }
                     }
-                }
-                Manifest m = store.manifest(world, date);
-                if (m != null) {
-                    hashes.addAll(m.tiles().values());
+                    Manifest m = Manifest.read(day.resolve(TimelineStore.TILES));
+                    if (m != null) {
+                        hashes.addAll(m.tiles().values());
+                    }
                 }
                 if (any) {
                     days++;

@@ -6,6 +6,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.IntSupplier;
 import java.util.function.LongSupplier;
 
 /**
@@ -13,7 +14,8 @@ import java.util.function.LongSupplier;
  * tested on its own. Every method holds the lock of the queue.
  *
  * <p>Browser views are counted per address under the key of the rate limiter. One address holds at
- * most PER_ADDRESS views, at most LARGE_PER_ADDRESS of them large and not yet started. A new view
+ * most isoViewsPerAddress views (never more than the whole queue), at most isoLargeViewsPerAddress
+ * of them large and not yet started. Both are read on every offer, so a reload applies at once. A new view
  * from an address at its cap replaces the oldest view of that address that has not started, so a
  * person turning the view around never fills the queue with views nobody looks at any more. The
  * whole queue holds at most queueLimit browser views, and BUSY is only answered once that many are
@@ -24,8 +26,8 @@ import java.util.function.LongSupplier;
  * snapshots, each in the order they were asked for.
  */
 final class IsoQueue {
-    static final int PER_ADDRESS = 2;
-    static final int LARGE_PER_ADDRESS = 1;
+    static final int DEFAULT_PER_ADDRESS = 4;
+    static final int DEFAULT_LARGE_PER_ADDRESS = 2;
 
     private static final AtomicLong SEQ = new AtomicLong();
 
@@ -83,12 +85,30 @@ final class IsoQueue {
 
     private final int queueLimit;
     private final int largeLimit;
+    private final IntSupplier perAddress;
+    private final IntSupplier largePerAddress;
     private final Map<String, Entry> entries = new LinkedHashMap<>();
     private long cancelledTotal;
 
     IsoQueue(int queueLimit, int largeLimit) {
+        this(queueLimit, largeLimit, () -> DEFAULT_PER_ADDRESS, () -> DEFAULT_LARGE_PER_ADDRESS);
+    }
+
+    IsoQueue(int queueLimit, int largeLimit, IntSupplier perAddress, IntSupplier largePerAddress) {
         this.queueLimit = queueLimit;
         this.largeLimit = largeLimit;
+        this.perAddress = perAddress;
+        this.largePerAddress = largePerAddress;
+    }
+
+    /** Views one address may hold now, at least 1 and never more than the whole queue. */
+    int perAddressCap() {
+        return Math.max(1, Math.min(queueLimit, perAddress.getAsInt()));
+    }
+
+    /** Large views one address may hold waiting now, at least 1 and never more than its views. */
+    int largePerAddressCap() {
+        return Math.max(1, Math.min(perAddressCap(), largePerAddress.getAsInt()));
     }
 
     synchronized Entry get(String key) {
@@ -111,6 +131,8 @@ final class IsoQueue {
             }
         }
         mine.sort(Comparator.comparingLong(o -> o.seq));
+        int cap = perAddressCap();
+        int largeCap = largePerAddressCap();
         List<Entry> cancel = new ArrayList<>();
         if (e.large()) {
             int waitingLarge = 0;
@@ -120,7 +142,7 @@ final class IsoQueue {
                 }
             }
             for (Entry o : mine) {
-                if (waitingLarge < LARGE_PER_ADDRESS) {
+                if (waitingLarge < largeCap) {
                     break;
                 }
                 if (o.large() && o.startedAt == 0) {
@@ -130,14 +152,14 @@ final class IsoQueue {
             }
         }
         for (Entry o : mine) {
-            if (mine.size() - cancel.size() < PER_ADDRESS) {
+            if (mine.size() - cancel.size() < cap) {
                 break;
             }
             if (o.startedAt == 0 && !cancel.contains(o)) {
                 cancel.add(o);
             }
         }
-        if (browserCount() - cancel.size() >= queueLimit || mine.size() - cancel.size() >= PER_ADDRESS) {
+        if (browserCount() - cancel.size() >= queueLimit || mine.size() - cancel.size() >= cap) {
             return new Offer(Outcome.BUSY, List.of(), List.of(), 0);
         }
         long wait = admit.getAsLong();

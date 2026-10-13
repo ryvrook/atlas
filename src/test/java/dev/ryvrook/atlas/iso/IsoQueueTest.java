@@ -22,9 +22,64 @@ class IsoQueueTest {
         return q.offer(e, () -> 0);
     }
 
+    /** The caps of 1.1, two views per address and one large, which the older tests below were written for. */
+    private static IsoQueue old() {
+        return new IsoQueue(8, 2, () -> 2, () -> 1);
+    }
+
+    @Test
+    void theDefaultAllowsFourViewsAndTwoWaitingLargeOnesPerAddress() {
+        IsoQueue q = new IsoQueue(8, 2);
+        assertEquals(4, q.perAddressCap());
+        assertEquals(2, q.largePerAddressCap());
+        IsoQueue.Entry[] e = new IsoQueue.Entry[4];
+        for (int i = 0; i < 4; i++) {
+            e[i] = view("me", 4);
+            IsoQueue.Offer o = offer(q, e[i]);
+            assertEquals(IsoQueue.Outcome.QUEUED, o.outcome());
+            assertTrue(o.cancelled().isEmpty());
+        }
+        assertEquals(4, q.perAddress("me"));
+        IsoQueue.Offer fifth = offer(q, view("me", 4));
+        assertEquals(List.of(e[0]), fifth.cancelled());
+        assertEquals(4, q.perAddress("me"));
+    }
+
+    @Test
+    void twoLargeViewsWaitPerAddressAndAThirdReplacesTheOldest() {
+        IsoQueue q = new IsoQueue(8, 2);
+        IsoQueue.Entry a = view("me", 12);
+        IsoQueue.Entry b = view("me", 12);
+        assertTrue(offer(q, a).cancelled().isEmpty());
+        assertTrue(offer(q, b).cancelled().isEmpty());
+        assertEquals(2, q.largeCount());
+        IsoQueue.Offer o = offer(q, view("me", 16));
+        assertEquals(List.of(a), o.cancelled());
+        assertEquals(2, q.largeCount());
+    }
+
+    @Test
+    void theCapsAreReadOnEveryOfferAndHeldToTheQueue() {
+        int[] cap = {16};
+        IsoQueue q = new IsoQueue(8, 2, () -> cap[0], () -> 4);
+        assertEquals(8, q.perAddressCap());
+        for (int i = 0; i < 8; i++) {
+            assertEquals(IsoQueue.Outcome.QUEUED, offer(q, view("one", 4)).outcome());
+        }
+        // A whole queue from one address still turns over its own oldest view rather than answering busy.
+        IsoQueue.Offer o = offer(q, view("one", 4));
+        assertEquals(IsoQueue.Outcome.QUEUED, o.outcome());
+        assertEquals(1, o.cancelled().size());
+        cap[0] = 1;
+        assertEquals(1, q.perAddressCap());
+        assertEquals(1, q.largePerAddressCap());
+        IsoQueue.Offer later = offer(q, view("two", 4));
+        assertEquals(IsoQueue.Outcome.BUSY, later.outcome());
+    }
+
     @Test
     void aThirdViewReplacesTheOldestWaitingViewOfTheSameAddress() {
-        IsoQueue q = new IsoQueue(8, 2);
+        IsoQueue q = old();
         IsoQueue.Entry a = view("1.2.3.4", 4);
         IsoQueue.Entry b = view("1.2.3.4", 4);
         IsoQueue.Entry c = view("1.2.3.4", 4);
@@ -43,7 +98,7 @@ class IsoQueueTest {
 
     @Test
     void theRunningViewIsNeverReplaced() {
-        IsoQueue q = new IsoQueue(8, 2);
+        IsoQueue q = old();
         IsoQueue.Entry a = view("x", 4);
         IsoQueue.Entry b = view("x", 4);
         offer(q, a);
@@ -57,7 +112,7 @@ class IsoQueueTest {
 
     @Test
     void twelveViewsInARowFromOneAddressNeverAnswerBusy() {
-        IsoQueue q = new IsoQueue(8, 2);
+        IsoQueue q = old();
         int[] radii = {4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 16, 16};
         IsoQueue.Entry first = null;
         for (int r : radii) {
@@ -67,7 +122,7 @@ class IsoQueueTest {
                 first = e;
                 q.start(e, 10);
             }
-            assertTrue(q.perAddress("me") <= IsoQueue.PER_ADDRESS);
+            assertTrue(q.perAddress("me") <= 2);
         }
         assertSame(first, q.get(first.key));
         assertEquals(10, q.cancelledTotal());
@@ -75,7 +130,7 @@ class IsoQueueTest {
 
     @Test
     void busyOnlyOnceEveryAddressIsAtItsCap() {
-        IsoQueue q = new IsoQueue(8, 2);
+        IsoQueue q = old();
         for (int i = 0; i < 4; i++) {
             offer(q, view("a" + i, 4));
             offer(q, view("a" + i, 4));
@@ -90,7 +145,7 @@ class IsoQueueTest {
 
     @Test
     void aLimitedOfferChangesNothing() {
-        IsoQueue q = new IsoQueue(8, 2);
+        IsoQueue q = old();
         IsoQueue.Entry a = view("x", 4);
         offer(q, a);
         offer(q, view("x", 4));
@@ -104,7 +159,7 @@ class IsoQueueTest {
 
     @Test
     void oneWaitingLargeViewPerAddress() {
-        IsoQueue q = new IsoQueue(8, 2);
+        IsoQueue q = old();
         IsoQueue.Entry small = view("x", 4);
         IsoQueue.Entry big = view("x", 12);
         offer(q, small);
@@ -117,7 +172,7 @@ class IsoQueueTest {
 
     @Test
     void aLargeViewPastTheLargeLimitWaitsAndIsPromoted() {
-        IsoQueue q = new IsoQueue(8, 2);
+        IsoQueue q = old();
         IsoQueue.Entry a = view("a", 12);
         IsoQueue.Entry b = view("b", 12);
         IsoQueue.Entry c = view("c", 16);
@@ -136,7 +191,7 @@ class IsoQueueTest {
 
     @Test
     void replacingAnAdmittedLargeViewPromotesTheNextOne() {
-        IsoQueue q = new IsoQueue(8, 2);
+        IsoQueue q = old();
         IsoQueue.Entry a = view("a", 12);
         IsoQueue.Entry b = view("b", 12);
         IsoQueue.Entry c = view("c", 12);
@@ -154,7 +209,7 @@ class IsoQueueTest {
 
     @Test
     void browserViewsComeBeforeCommandsAndACancelledViewCanBeAskedAgain() {
-        IsoQueue q = new IsoQueue(8, 2);
+        IsoQueue q = old();
         IsoQueue.Entry snapshot = view(null, 4);
         q.addDirect(snapshot);
         IsoQueue.Entry a = view("x", 4);

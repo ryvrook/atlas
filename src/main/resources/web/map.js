@@ -131,7 +131,8 @@
   // ---- overlay groups -----------------------------------------------------
   const groups = A.groups = {
     border: L.layerGroup(), territories: L.layerGroup(), sieges: L.layerGroup(), zones: L.layerGroup(), players: L.layerGroup(), paths: L.layerGroup(),
-    markers: L.layerGroup(), engine: L.layerGroup(), usermarks: L.layerGroup(), worldevents: L.layerGroup(), points: L.layerGroup(), heat: L.layerGroup()
+    markers: L.layerGroup(), engine: L.layerGroup(), usermarks: L.layerGroup(), worldevents: L.layerGroup(), points: L.layerGroup(), heat: L.layerGroup(),
+    keyplaces: L.layerGroup()
   };
   const measureGroup = L.layerGroup().addTo(map);
   const OVERLAYS = [
@@ -148,7 +149,9 @@
     { key: "usermarks", label: "Player markers", vis: () => A.layerOn("markers"), def: true, list: false },
     { key: "worldevents", label: "World events", vis: () => A.layerOn("worldevents"), def: true },
     { key: "points", label: "Points", vis: () => A.layerOn("points") || A.layerOn("events"), def: true },
-    { key: "heat", label: "Activity heat", vis: () => A.layerOn("heat"), def: false }
+    { key: "heat", label: "Activity heat", vis: () => A.layerOn("heat"), def: false },
+    // The key places drawn daily from all four directions. Their list comes from an admin route, so only admins have it.
+    { key: "keyplaces", label: "Key places", vis: () => A.isAdmin() && !!A.keyPlacesHere && A.keyPlacesHere().length > 0, def: true }
   ];
   const userOverlays = A.store.get("overlays", {});
   const wantOverlay = (o) => userOverlays[o.key] != null ? !!userOverlays[o.key] : o.def;
@@ -1263,13 +1266,16 @@
   map.on("contextmenu", (e) => {
     if (measuring) return;
     const p = fromLatLng(e.latlng);
+    // The Key places form of the Admin tab starts from the last spot right clicked in this world.
+    A.lastCtx = { world: state.world, x: p.x, z: p.z };
     const cx = Math.floor(p.x / CHUNK), cz = Math.floor(p.z / CHUNK);
     ctx.innerHTML = "<div class='head'><b>X " + p.x + "  Z " + p.z + "</b><br><span class='muted'>Chunk " + cx + " " + cz + "</span></div>" +
       "<div class='menu-sep'></div>" +
       "<button class='menu-item' data-act='copy'>" + A.icon("copy", "sm") + "<span class='grow'>Copy coordinates</span></button>" +
       "<button class='menu-item' data-act='link'>" + A.icon("link", "sm") + "<span class='grow'>Copy a link to this spot</span></button>" +
       "<button class='menu-item' data-act='measure'>" + A.icon("ruler", "sm") + "<span class='grow'>Measure from here</span></button>" +
-      (A.isoOk && A.isoOk() ? "<button class='menu-item' data-act='iso'>" + A.icon("cube", "sm") + "<span class='grow'>View this area in 3D</span></button>" : "");
+      (A.isoOk && A.isoOk() ? "<button class='menu-item' data-act='iso'>" + A.icon("cube", "sm") + "<span class='grow'>View this area in 3D</span></button>" : "") +
+      (A.isAdmin() && A.isoOk && A.isoOk() && A.canTab("admin") ? "<button class='menu-item' data-act='key'>" + A.icon("camera", "sm") + "<span class='grow'>Make this a key place</span></button>" : "");
     ctx.hidden = false;
     const size = map.getSize();
     const w = ctx.offsetWidth, h = ctx.offsetHeight;
@@ -1280,6 +1286,8 @@
     ctx.querySelector("[data-act='measure']").addEventListener("click", () => { closeCtx(); A.setMeasure(true); addMeasurePoint(e.latlng); });
     const iso = ctx.querySelector("[data-act='iso']");
     if (iso) iso.addEventListener("click", () => { closeCtx(); A.openIso({ x: p.x, z: p.z, title: "X " + p.x + "  Z " + p.z }); });
+    const key = ctx.querySelector("[data-act='key']");
+    if (key) key.addEventListener("click", () => { closeCtx(); A.wantKeyForm = true; A.setPanel(true); A.showTab("admin"); });
     ctx.querySelector("button").focus({ preventScroll: true });
   });
   map.on("click movestart zoomstart", closeCtx);

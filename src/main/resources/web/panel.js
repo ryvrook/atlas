@@ -1013,8 +1013,10 @@
     const layers = v.layers || {};
     const keys = Object.keys(layers).filter((k) => !(state.standalone && FACTION_LAYERS.has(k))).sort((a, b) => A.layerName(a).localeCompare(A.layerName(b)));
     if (keys.length) h += "<h3 class='sub'>Layers for this view</h3><div class='chips' style='padding:0'>" + keys.map((k) => "<span class='badge " + (layers[k] ? "good" : "") + "' title='" + esc(k) + "'>" + esc(A.layerName(k)) + (layers[k] ? "" : " hidden") + "</span>").join("") + "</div>";
+    if (A.isAdmin() && A.kp) h += "<div id='admin-keys'></div>";
     h += "<div id='admin-health'></div>";
     body.innerHTML = h;
+    if ($("admin-keys")) drawAdminKeys(live);
     const sel = $("view-as");
     if (sel) A.api("api/factions").then((d) => {
       if (!live()) return;
@@ -1026,6 +1028,97 @@
     if (sel) sel.addEventListener("change", () => A.emit("viewAs", sel.value));
     if (A.isAdmin()) A.api("api/health").then((hd) => { if (live() && $("admin-health")) $("admin-health").innerHTML = healthHtml(hd); }).catch(() => { /* health is optional */ });
   }
+
+  // ---- key places in the Admin tab -------------------------------------------
+  // The list of key places with a form to add one. The form starts from the last spot right clicked in this world,
+  // or the middle of the map, and the server checks every value again.
+  const slug = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
+  const kpForm = { name: "", label: "", labelTouched: false, x: "", z: "", radius: "" };
+  function kpSpot() {
+    const c = A.lastCtx;
+    if (c && c.world === state.world) return { x: c.x, z: c.z, from: "the last spot you right clicked" };
+    const m = A.map ? A.map.getCenter() : null;
+    return m ? { x: Math.round(m.lng), z: Math.round(-m.lat), from: "the middle of the map" } : { x: 0, z: 0, from: "the origin" };
+  }
+  function drawAdminKeys(live) {
+    const box = $("admin-keys");
+    if (!box) return;
+    const KP = A.kp;
+    const list = KP.list || [];
+    const here = list.filter((p) => p.world === state.world);
+    const full = list.length >= KP.limit;
+    if (!kpForm.x && !kpForm.z || A.wantKeyForm) { const sp = kpSpot(); kpForm.x = String(sp.x); kpForm.z = String(sp.z); kpForm.from = sp.from; }
+    let h = "<h3 class='sub'>Key places <span class='badge'>" + esc(list.length + " of " + KP.limit) + "</span></h3>" +
+      "<p class='muted kp-help'>Drawn from all four directions with the first snapshot of every day and kept in the timeline. A place where nothing changed reuses the pictures of the day before.</p>";
+    if (!KP.loaded) h += A.loading();
+    else if (KP.error) h += "<div class='note'>" + esc(KP.error.message || "The key places could not be loaded.") + "</div>";
+    else if (!list.length) h += "<p class='muted kp-help'>There are no key places yet.</p>";
+    else h += list.map((p) => "<div class='row kp-row'><span class='kp-ic' aria-hidden='true'>" + A.icon("camera", "sm") + "</span><div class='grow'><div class='title'><b>" + esc(A.keyName(p)) + "</b> <span class='faint'>" + esc(p.label) + "</span></div>" +
+      "<div class='sub'>" + esc((p.world !== state.world ? A.worldLabel(p.world) + ", " : "") + "X " + p.x + "  Z " + p.z + ", radius " + p.radius) + "</div></div>" +
+      "<div class='acts'>" + (p.world === state.world ? "<button class='icon-btn' data-kp-go='" + esc(p.label) + "' aria-label='" + esc("Show " + A.keyName(p) + " on the map") + "' title='Show on the map'>" + A.icon("locate", "sm") + "</button>" : "") +
+      "<button class='icon-btn' data-kp-del='" + esc(p.label) + "' aria-label='" + esc("Remove the key place " + A.keyName(p)) + "' title='Remove'>" + A.icon("close", "sm") + "</button></div></div>").join("");
+    if (KP.loaded && !KP.error) {
+      h += full ? "<p class='muted kp-help'>All " + esc(KP.limit) + " places are taken. Remove one to add another. isoKeyPlaceLimit in atlas.json sets how many there may be.</p>" :
+        "<form class='kp-form' id='kp-form' novalidate><div class='kp-grid'>" +
+        "<label>Name<input id='kp-name' maxlength='60' autocomplete='off' placeholder='Town hall' value='" + esc(kpForm.name) + "'></label>" +
+        "<label>Label<input id='kp-label' maxlength='40' autocomplete='off' spellcheck='false' placeholder='town_hall' pattern='[a-z0-9_-]{1,40}' value='" + esc(kpForm.label) + "'></label>" +
+        "<label>X<input id='kp-x' inputmode='numeric' value='" + esc(kpForm.x) + "'></label>" +
+        "<label>Z<input id='kp-z' inputmode='numeric' value='" + esc(kpForm.z) + "'></label>" +
+        "<label>Radius<input id='kp-r' type='number' min='1' max='" + esc(KP.maxRadius) + "' value='" + esc(kpForm.radius || KP.defaultRadius) + "'></label></div>" +
+        "<p class='faint kp-help' id='kp-from'>" + esc("In " + A.worldLabel(state.world) + ", from " + (kpForm.from || "the middle of the map") + ".") + " <button type='button' class='linkish' id='kp-centre'>Use the middle of the map</button></p>" +
+        "<div class='kp-err' id='kp-err' role='alert' hidden></div>" +
+        "<button class='btn small primary' type='submit' id='kp-add'>" + A.icon("camera", "sm") + "Add key place</button></form>";
+    }
+    box.innerHTML = h;
+    if (A.wantKeyForm) { A.wantKeyForm = false; const n = $("kp-name"); if (n) { n.focus({ preventScroll: true }); box.scrollIntoView({ block: "nearest" }); } }
+    box.querySelectorAll("[data-kp-go]").forEach((b) => b.addEventListener("click", () => {
+      const p = list.find((x) => x.label === b.dataset.kpGo);
+      if (p) { A.map.setView(A.toLatLng(p.x, p.z), Math.max(A.map.getZoom(), A.geo.maxNative - 1)); if (window.matchMedia("(max-width: 720px)").matches) A.setPanel(false); }
+    }));
+    box.querySelectorAll("[data-kp-del]").forEach((b) => b.addEventListener("click", () => {
+      const label = b.dataset.kpDel;
+      // A first click asks, a second one within a few seconds removes.
+      if (b.dataset.armed !== "1") { b.dataset.armed = "1"; b.classList.add("on"); b.setAttribute("aria-label", "Click again to remove " + label); b.title = "Click again to remove"; setTimeout(() => { if (b.isConnected) { b.dataset.armed = ""; b.classList.remove("on"); b.title = "Remove"; } }, 4000); return; }
+      b.disabled = true;
+      A.api("api/admin/keyplaces/" + encodeURIComponent(label), { method: "DELETE", headers: { Accept: "application/json" } }).then((d) => {
+        A.setKeyPlaces(d);
+        A.toast("Removed the key place " + label + ". Its earlier pictures stay in the timeline.", "good");
+      }).catch((e) => { b.disabled = false; A.toast(e.serverText || "The key place could not be removed.", "bad"); });
+    }));
+    const form = $("kp-form");
+    if (!form) return;
+    const name = $("kp-name"), label = $("kp-label"), err = $("kp-err");
+    name.addEventListener("input", () => { kpForm.name = name.value; if (!kpForm.labelTouched) { kpForm.label = slug(name.value); label.value = kpForm.label; } });
+    label.addEventListener("input", () => { kpForm.labelTouched = true; kpForm.label = label.value; });
+    for (const [id, k] of [["kp-x", "x"], ["kp-z", "z"], ["kp-r", "radius"]]) $(id).addEventListener("input", (e) => { kpForm[k] = e.target.value; });
+    $("kp-centre").addEventListener("click", () => {
+      const m = A.map.getCenter();
+      kpForm.x = String(Math.round(m.lng)); kpForm.z = String(Math.round(-m.lat)); kpForm.from = "the middle of the map";
+      $("kp-x").value = kpForm.x; $("kp-z").value = kpForm.z;
+      $("kp-from").firstChild.textContent = "In " + A.worldLabel(state.world) + ", from the middle of the map. ";
+    });
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const body = { world: state.world, name: name.value.trim(), label: label.value.trim() || slug(name.value), x: Number($("kp-x").value), z: Number($("kp-z").value), radius: Number($("kp-r").value || KP.defaultRadius) };
+      const bad = !/^[a-z0-9_-]{1,40}$/.test(body.label) ? "The label needs 1 to 40 lower case letters, digits, dashes or underscores."
+        : !Number.isInteger(body.x) || !Number.isInteger(body.z) ? "X and Z must be whole block numbers."
+        : !Number.isInteger(body.radius) || body.radius < 1 || body.radius > KP.maxRadius ? "The radius must be a whole number from 1 to " + KP.maxRadius + "." : "";
+      if (bad) { err.textContent = bad; err.hidden = false; return; }
+      err.hidden = true;
+      $("kp-add").disabled = true;
+      A.api("api/admin/keyplaces", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(body) }).then((d) => {
+        Object.assign(kpForm, { name: "", label: "", labelTouched: false, x: "", z: "", radius: "" });
+        A.setKeyPlaces(d);
+        A.toast((d.changed === "moved" ? "Moved the key place " : "Added the key place ") + (body.name || body.label) + ". It is drawn with the next snapshot.", "good");
+      }).catch((e2) => {
+        if (!live()) return;
+        $("kp-add").disabled = false;
+        err.textContent = e2.serverText || "The key place could not be saved.";
+        err.hidden = false;
+      });
+    });
+  }
+  A.on("keyPlaces", () => { if (state.tab === "admin" && !state.detail && $("admin-keys")) drawAdminKeys(() => state.tab === "admin"); });
 
   // Relative times refresh on their own.
   setInterval(() => {

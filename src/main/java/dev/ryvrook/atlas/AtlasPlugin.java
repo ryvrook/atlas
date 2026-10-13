@@ -105,6 +105,11 @@ public final class AtlasPlugin extends JavaPlugin {
         return iso;
     }
 
+    /** The daily isometric views and key places, or null before setup. */
+    public IsoSnapshots isoSnapshots() {
+        return isoSnapshots;
+    }
+
     /** The timeline, or null before setup. */
     public Timeline timeline() {
         return timeline;
@@ -138,7 +143,7 @@ public final class AtlasPlugin extends JavaPlugin {
         TimelineRoutes timelineRoutes = new TimelineRoutes(atlas, this::timeline);
         server.setTimeline(timelineRoutes);
         iso = new IsoService(atlas, getDataDirectory(), getLogger(), IsoService.budgetOf(atlas.tiles()));
-        isoSnapshots = new IsoSnapshots(atlas, iso, getLogger());
+        isoSnapshots = new IsoSnapshots(atlas, iso, getLogger(), this::timeline);
         IsoRoutes.install(new IsoRoutes(atlas, iso, this::timeline, timelineRoutes));
         IsoSnapshots.install(isoSnapshots);
 

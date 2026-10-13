@@ -17,9 +17,10 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * The tiles of one world on one day, as tile key to blob hash. A tile key is "zoom/x/z" in the
- * same tile coordinates as the live tile route. changed lists the keys whose hash differs from the
- * previous day held for the world, or every key on the first day.
+ * The tiles of one world in one snapshot slot, as tile key to blob hash. A tile key is "zoom/x/z" in
+ * the same tile coordinates as the live tile route. date holds the slot, such as 2026-10-13T16, or a
+ * plain date for a day folder of Atlas 1.0 and 1.1. previous is the slot before it that the world
+ * holds, and changed lists the keys whose hash differs from it, or every key in the first slot.
  */
 public record Manifest(String world, String date, long takenAt, String previous, boolean partial, int skipped,
                        int newBlobs, Map<String, String> tiles, List<String> changed) {
@@ -62,7 +63,8 @@ public record Manifest(String world, String date, long takenAt, String previous,
         JsonObject o = new JsonObject();
         o.addProperty("version", 1);
         o.addProperty("world", world);
-        o.addProperty("date", date);
+        o.addProperty("date", date == null ? null : Slots.date(date));
+        o.addProperty("slot", date);
         o.addProperty("takenAt", takenAt);
         o.addProperty("previous", previous);
         o.addProperty("partial", partial);
@@ -106,7 +108,8 @@ public record Manifest(String world, String date, long takenAt, String previous,
                 changed.add(e.getAsString());
             }
         }
-        return new Manifest(Json.str(o, "world"), Json.str(o, "date"), (long) Json.num(o, "takenAt", 0),
+        String slot = Json.str(o, "slot");
+        return new Manifest(Json.str(o, "world"), slot != null ? slot : Json.str(o, "date"), (long) Json.num(o, "takenAt", 0),
                 Json.str(o, "previous"), Json.bool(o, "partial"), (int) Json.num(o, "skipped", 0),
                 (int) Json.num(o, "newBlobs", 0), tiles, changed);
     }

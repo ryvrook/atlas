@@ -110,7 +110,13 @@ public final class AtlasConfig {
     /** Largest radius in chunks a viewer may ask for, 1 to 16. */
     public int isoMaxRadius = 16;
     /** Isometric renders a single address may start per minute. 0 means unlimited. */
-    public int isoRequestsPerMinute = 10;
+    public int isoRequestsPerMinute = 20;
+    /** Browser views one address may hold in the render queue at once, 1 to 16. */
+    public int isoViewsPerAddress = 4;
+    /** Large browser views one address may hold waiting in the render queue at once, 1 to 4. */
+    public int isoLargeViewsPerAddress = 2;
+    /** Key places iso.keyPlaces may hold, 1 to 10. */
+    public int isoKeyPlaceLimit = 3;
     /** Isometric views taken with the daily timeline snapshot. */
     public Iso iso = new Iso();
     /** True when load replaced a hand set adminToken that was too short. Never written to the file. */
@@ -128,8 +134,10 @@ public final class AtlasConfig {
     public static final class Timeline {
         /** Take daily snapshots and keep the event log. */
         public boolean enabled = true;
-        /** Server local hour of the daily snapshot, 0 to 23. */
+        /** Server local hour of the first snapshot of the day, 0 to 23. */
         public int hour = 4;
+        /** Snapshots per day at evenly spaced hours from hour, one of 1, 2, 3, 4, 6, 8, 12 or 24. */
+        public int perDay = 4;
         /** Days of snapshots kept. 0 keeps only the newest day. */
         public int retainDays = 90;
         /** Disk the timeline may use in MB. 0 means no cap. */
@@ -137,17 +145,109 @@ public final class AtlasConfig {
         /** Write the daily event log. */
         public boolean events = true;
 
-        static final List<String> KEYS = List.of("enabled", "hour", "retainDays", "maxDiskMb", "events");
+        static final List<String> KEYS = List.of("enabled", "hour", "perDay", "retainDays", "maxDiskMb", "events");
     }
 
     /** The iso object of atlas.json. */
     public static final class Iso {
-        /** Areas drawn into each day's timeline folder when the daily snapshot of their world is taken. */
+        /** Areas drawn into the timeline with the first snapshot of each day of their world. */
         public List<IsoArea> snapshots = new ArrayList<>();
         /** Also draw every admin marker of the world, when the admin marker layer is public. */
         public boolean snapshotAdminMarkers = false;
+        /**
+         * The curated places drawn from all four directions with the first snapshot of every day. Replaced as a
+         * whole when a command or the Admin tab changes it, never changed in place.
+         */
+        public volatile List<KeyPlace> keyPlaces = new ArrayList<>();
 
-        static final List<String> KEYS = List.of("snapshots", "snapshotAdminMarkers");
+        static final List<String> KEYS = List.of("snapshots", "snapshotAdminMarkers", "keyPlaces");
+    }
+
+    /** One entry of iso.keyPlaces. x and z are blocks, radius is in chunks, name is shown in the browser. */
+    public static final class KeyPlace {
+        public static final int DEFAULT_RADIUS = 6;
+        public static final int MAX_RADIUS = 16;
+        public static final int MAX_NAME = 60;
+
+        public String world;
+        public int x;
+        public int z;
+        public int radius = DEFAULT_RADIUS;
+        public String label;
+        public String name = "";
+
+        static final List<String> KEYS = List.of("world", "x", "z", "radius", "label", "name");
+
+        public KeyPlace() {
+        }
+
+        public KeyPlace(String world, int x, int z, int radius, String label, String name) {
+            this.world = world;
+            this.x = x;
+            this.z = z;
+            this.radius = radius;
+            this.label = label;
+            this.name = name == null ? "" : name;
+        }
+
+        /** The name shown in the browser, the label when no name was given. */
+        public String displayName() {
+            return name == null || name.isBlank() ? label : name;
+        }
+    }
+
+    /**
+     * Checks a list of key places and returns the first problem as one sentence, or null when the
+     * list is fine. Labels are unique across every world, since commands and routes name a place
+     * by its label alone.
+     */
+    public static String keyPlaceProblem(List<KeyPlace> places, int limit) {
+        if (places.size() > limit) {
+            return "iso.keyPlaces holds " + places.size() + " places but isoKeyPlaceLimit allows " + limit;
+        }
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (int i = 0; i < places.size(); i++) {
+            KeyPlace p = places.get(i);
+            String key = "iso.keyPlaces[" + i + "]";
+            if (p == null) {
+                return key + " must be an object";
+            }
+            if (p.world == null || p.world.isBlank()) {
+                return key + ".world must name a world";
+            }
+            if (!validIsoLabel(p.label)) {
+                return key + ".label must be 1 to 40 lower case letters, digits, dashes or underscores";
+            }
+            if (!seen.add(p.label)) {
+                return key + ".label " + p.label + " is used twice";
+            }
+            if (p.radius < 1 || p.radius > KeyPlace.MAX_RADIUS) {
+                return key + ".radius is " + p.radius + " but must be between 1 and " + KeyPlace.MAX_RADIUS;
+            }
+            if (Math.abs((long) p.x) > 30_000_000L || Math.abs((long) p.z) > 30_000_000L) {
+                return key + " lies outside the world";
+            }
+            if (p.name == null) {
+                p.name = "";
+            }
+            if (!validKeyPlaceName(p.name)) {
+                return key + ".name must be at most " + KeyPlace.MAX_NAME + " characters without control characters";
+            }
+        }
+        return null;
+    }
+
+    /** A display name of a key place, at most 60 characters and no control characters. Empty is allowed. */
+    public static boolean validKeyPlaceName(String s) {
+        if (s == null || s.length() > KeyPlace.MAX_NAME) {
+            return false;
+        }
+        for (int i = 0; i < s.length(); i++) {
+            if (Character.isISOControl(s.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** One area of iso.snapshots. x and z are blocks, radius is in chunks. */
@@ -223,9 +323,14 @@ public final class AtlasConfig {
         return timeline.enabled;
     }
 
-    /** Server local hour of the daily snapshot, 0 to 23. */
+    /** Server local hour of the first snapshot of the day, 0 to 23. */
     public int timelineHour() {
         return timeline.hour;
+    }
+
+    /** Snapshots per day, a divisor of 24. */
+    public int timelinePerDay() {
+        return timeline.perDay;
     }
 
     /** Days of snapshots kept, 0 or more. */
@@ -266,6 +371,27 @@ public final class AtlasConfig {
     /** Isometric renders an address may start per minute. 0 means unlimited. */
     public int isoRequestsPerMinute() {
         return isoRequestsPerMinute;
+    }
+
+    /** Browser views one address may hold in the render queue at once. */
+    public int isoViewsPerAddress() {
+        return isoViewsPerAddress;
+    }
+
+    /** Large browser views one address may hold waiting in the render queue at once. */
+    public int isoLargeViewsPerAddress() {
+        return isoLargeViewsPerAddress;
+    }
+
+    /** Key places iso.keyPlaces may hold. */
+    public int isoKeyPlaceLimit() {
+        return isoKeyPlaceLimit;
+    }
+
+    /** The key places, never null. The list is not changed in place, a change replaces it. */
+    public List<KeyPlace> isoKeyPlaces() {
+        List<KeyPlace> l = iso == null ? null : iso.keyPlaces;
+        return l == null ? List.of() : l;
     }
 
     /** The configured daily isometric areas, never null. */
@@ -438,6 +564,18 @@ public final class AtlasConfig {
                         n++;
                     }
                 }
+                JsonElement places = v.getAsJsonObject().get("keyPlaces");
+                if (places != null && places.isJsonArray()) {
+                    int n = 0;
+                    for (JsonElement a : places.getAsJsonArray()) {
+                        for (String k : a.getAsJsonObject().keySet()) {
+                            if (!KeyPlace.KEYS.contains(k)) {
+                                cfg.unknownKeys.add("iso.keyPlaces[" + n + "]." + k);
+                            }
+                        }
+                        n++;
+                    }
+                }
             } else if (f.getName().equals("worlds") && v.isJsonObject()) {
                 for (Map.Entry<String, JsonElement> e : v.getAsJsonObject().entrySet()) {
                     for (String k : e.getValue().getAsJsonObject().keySet()) {
@@ -578,6 +716,10 @@ public final class AtlasConfig {
         if (timeline.hour < 0 || timeline.hour > 23) {
             throw new InvalidConfigException("timeline.hour is " + timeline.hour + " but must be between 0 and 23");
         }
+        if (!dev.ryvrook.atlas.timeline.Slots.PER_DAY.contains(timeline.perDay)) {
+            throw new InvalidConfigException("timeline.perDay is " + timeline.perDay
+                    + " but must be one of 1, 2, 3, 4, 6, 8, 12 or 24");
+        }
         nonNegative("timeline.retainDays", timeline.retainDays);
         nonNegative("timeline.maxDiskMb", timeline.maxDiskMb);
         validateIso();
@@ -616,6 +758,16 @@ public final class AtlasConfig {
             throw new InvalidConfigException("isoMaxRadius is " + isoMaxRadius + " but must be between 1 and 16");
         }
         nonNegative("isoRequestsPerMinute", isoRequestsPerMinute);
+        if (isoViewsPerAddress < 1 || isoViewsPerAddress > 16) {
+            throw new InvalidConfigException("isoViewsPerAddress is " + isoViewsPerAddress + " but must be between 1 and 16");
+        }
+        if (isoLargeViewsPerAddress < 1 || isoLargeViewsPerAddress > 4) {
+            throw new InvalidConfigException("isoLargeViewsPerAddress is " + isoLargeViewsPerAddress
+                    + " but must be between 1 and 4");
+        }
+        if (isoKeyPlaceLimit < 1 || isoKeyPlaceLimit > 10) {
+            throw new InvalidConfigException("isoKeyPlaceLimit is " + isoKeyPlaceLimit + " but must be between 1 and 10");
+        }
         if (iso == null) {
             throw new InvalidConfigException("iso must be an object");
         }
@@ -646,6 +798,13 @@ public final class AtlasConfig {
                 throw new InvalidConfigException(key + " lies outside the world");
             }
         }
+        if (iso.keyPlaces == null) {
+            iso.keyPlaces = new ArrayList<>();
+        }
+        String problem = keyPlaceProblem(iso.keyPlaces, isoKeyPlaceLimit);
+        if (problem != null) {
+            throw new InvalidConfigException(problem);
+        }
     }
 
     private static void nonNegative(String key, int value) throws InvalidConfigException {
@@ -665,6 +824,7 @@ public final class AtlasConfig {
             JsonObject o = v.getAsJsonObject();
             checkValue(o, "enabled", "timeline.enabled", boolean.class, false);
             checkValue(o, "hour", "timeline.hour", int.class, false);
+            checkValue(o, "perDay", "timeline.perDay", int.class, false);
             checkValue(o, "retainDays", "timeline.retainDays", int.class, false);
             checkValue(o, "maxDiskMb", "timeline.maxDiskMb", int.class, false);
             checkValue(o, "events", "timeline.events", boolean.class, false);
@@ -677,14 +837,11 @@ public final class AtlasConfig {
             JsonObject o = v.getAsJsonObject();
             checkValue(o, "snapshotAdminMarkers", "iso.snapshotAdminMarkers", boolean.class, false);
             JsonElement areas = o.get("snapshots");
-            if (areas == null) {
-                return;
-            }
-            if (!areas.isJsonArray()) {
+            if (areas != null && !areas.isJsonArray()) {
                 throw wrongType("iso.snapshots", "a list of objects with world, x, z, radius and label");
             }
             int n = 0;
-            for (JsonElement a : areas.getAsJsonArray()) {
+            for (JsonElement a : areas == null ? new com.google.gson.JsonArray() : areas.getAsJsonArray()) {
                 String ak = "iso.snapshots[" + n++ + "]";
                 if (!a.isJsonObject()) {
                     throw wrongType(ak, "an object with world, x, z, radius and label");
@@ -697,6 +854,32 @@ public final class AtlasConfig {
                 }
                 checkValue(ao, "world", ak + ".world", String.class, false);
                 checkValue(ao, "label", ak + ".label", String.class, false);
+                checkValue(ao, "x", ak + ".x", int.class, false);
+                checkValue(ao, "z", ak + ".z", int.class, false);
+                checkValue(ao, "radius", ak + ".radius", int.class, false);
+            }
+            JsonElement places = o.get("keyPlaces");
+            if (places == null) {
+                return;
+            }
+            if (!places.isJsonArray()) {
+                throw wrongType("iso.keyPlaces", "a list of objects with world, x, z, radius, label and name");
+            }
+            n = 0;
+            for (JsonElement a : places.getAsJsonArray()) {
+                String ak = "iso.keyPlaces[" + n++ + "]";
+                if (!a.isJsonObject()) {
+                    throw wrongType(ak, "an object with world, x, z, radius, label and name");
+                }
+                JsonObject ao = a.getAsJsonObject();
+                for (String c : List.of("world", "x", "z", "label")) {
+                    if (!ao.has(c)) {
+                        throw new InvalidConfigException(ak + " needs world, x, z and label");
+                    }
+                }
+                checkValue(ao, "world", ak + ".world", String.class, false);
+                checkValue(ao, "label", ak + ".label", String.class, false);
+                checkValue(ao, "name", ak + ".name", String.class, true);
                 checkValue(ao, "x", ak + ".x", int.class, false);
                 checkValue(ao, "z", ak + ".z", int.class, false);
                 checkValue(ao, "radius", ak + ".radius", int.class, false);

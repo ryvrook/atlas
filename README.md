@@ -2,7 +2,7 @@
 
 Atlas is a live web map for Hytale servers. It runs a small HTTP server inside the Hytale server and
 shows terrain rendered from the in game world map, live players, map markers, world events, a kill
-feed, server activity, 3D views of any area and a day by day timeline of every world in any desktop
+feed, server activity, 3D views of any area and a timeline of every world in any desktop
 or phone browser.
 There is nothing else to host. Each layer has its own visibility setting, so a stranger who finds
 the map sees only what you choose to make public, players who link their browser see a little more,
@@ -11,9 +11,10 @@ and admins see everything.
 ## Features
 
 - Terrain tiles at seven zoom levels down to 2 pixels per block, built from explored chunks only and cached in memory and on disk.
-- A timeline of every world. Scrub back through daily snapshots of the map, play them as a timelapse, see what changed each day and what happened where.
+- A timeline of every world. Scrub back through snapshots of the map taken several times a day, play them as a timelapse, see what changed between them and what happened where.
 - View in 3D. Any marker, waypoint, admin marker or spot on the map opens an isometric picture of the area around it, block by block with trees, water and plants, from four directions and at four sizes, ready to download or share as a link.
 - Daily 3D views in the timeline, with a slider that compares the same place on two days.
+- Key places. Up to three places drawn every day from all four directions, kept in the timeline with a player that steps through the days, and reused when nothing was built.
 - Timeline exports. Save the map on screen as a dated image, record the days as a WebM video, and, for admins, download the timeline data as a zip.
 - One click linking. The link code message in game opens the map and links the browser at once.
 - Marker layers from other plugins through a Java API, from JSON files in a drop folder and from the `/atlas marker` commands, each with its own switch in the layers menu.
@@ -103,10 +104,14 @@ and also work from the server console.
 | `/atlas marker area add` | Adds a rectangle between two corners, or replaces the one with that id | `atlas.admin` |
 | `/atlas marker remove` | Removes a server marker or area | `atlas.admin` |
 | `/atlas marker list` | Lists the server markers of a world, at most 50 lines | `atlas.admin` |
-| `/atlas snapshot` | Takes a timeline snapshot of every world now, or of one world | `atlas.admin` |
-| `/atlas timeline status` | Prints the days held, the disk used and the next snapshot | `atlas.admin` |
+| `/atlas snapshot` | Takes a timeline snapshot of every world now, or of one world, into the slot of the moment | `atlas.admin` |
+| `/atlas timeline status` | Prints the schedule, the days and slots held, the disk used and the next snapshot | `atlas.admin` |
 | `/atlas iso` | Draws a 3D view of an area into `iso/exports` and prints the file | `atlas.admin` |
-| `/atlas iso status` | Shows the 3D view queue, the last render, the caches and the chunk budget | `atlas.admin` |
+| `/atlas iso status` | Shows the 3D view queue and its allowances, the last render, the caches and the chunk budget | `atlas.admin` |
+| `/atlas key add` | Adds a key place, or moves the one with that label | `atlas.admin` |
+| `/atlas key remove` | Removes a key place. Its earlier pictures stay in the timeline | `atlas.admin` |
+| `/atlas key list` | Lists the key places | `atlas.admin` |
+| `/atlas key render` | Draws a key place from all four directions now | `atlas.admin` |
 
 The full forms with their arguments.
 
@@ -122,6 +127,10 @@ The full forms with their arguments.
 /atlas marker list <world>
 /atlas snapshot [world]
 /atlas iso <world> <x> <z> [radius] [scale]
+/atlas key add <world> <x> <z> <label> [radius] [name]
+/atlas key remove <label>
+/atlas key list
+/atlas key render <label>
 ```
 
 `/atlas tiles purge` also works for a world that is no longer loaded but still has a tile folder.
@@ -182,7 +191,10 @@ map down the same way, so a setting you meant to tighten can never stay loose. F
 | `isoCacheMb` | `64` | Memory for rendered 3D views in MB, at least 4 |
 | `isoDiskMb` | `512` | Disk for rendered 3D views in MB. 0 keeps none on disk |
 | `isoMaxRadius` | `16` | Largest 3D view radius in chunks a viewer may ask for, 1 to 16 |
-| `isoRequestsPerMinute` | `10` | New 3D renders one address may start per minute. 0 means unlimited |
+| `isoRequestsPerMinute` | `20` | New 3D renders one address may start per minute. 0 means unlimited |
+| `isoViewsPerAddress` | `4` | 3D views one address may hold in the render queue, 1 to 16 |
+| `isoLargeViewsPerAddress` | `2` | Large 3D views one address may hold waiting in the queue, 1 to 4 |
+| `isoKeyPlaceLimit` | `3` | Key places `iso.keyPlaces` may hold, 1 to 10 |
 | `iso` | see below | Daily 3D views, see [3D views](#3d-views) |
 
 `hidePlayersInOwnTerritory` (default `true`) hides players standing in their own faction land from
@@ -242,51 +254,63 @@ viewer must meet both the `layers` setting and that tier.
 Atlas keeps a daily picture of each world so players can scrub back through time, watch builds
 appear and see when things happened.
 
-**Snapshots.** Once a day at `timeline.hour` (server local time, 4 by default) Atlas takes a snapshot
-of every plain world that has map tiles. Portal and instance worlds and disabled worlds are left out.
-If the server was down at that hour, the snapshot runs five minutes after the next start. Admins can
-take one at any time with `/atlas snapshot [world]`, and a second snapshot on the same day replaces
-that day. Snapshots are never started from a web page.
+**Snapshots.** `timeline.perDay` times a day (4 by default), at evenly spaced hours starting from
+`timeline.hour` (server local time, 4 by default), Atlas takes a snapshot of every plain world that has
+map tiles. With the defaults that is 04:00, 10:00, 16:00 and 22:00. Portal and instance worlds and
+disabled worlds are left out. Each snapshot fills a slot named by its date and hour, such as
+`2026-10-13T16`. If the server was down when a slot began, the latest slot it missed is taken five
+minutes after the next start. Admins can take one at any time with `/atlas snapshot [world]`. It goes
+into the slot of the moment and replaces what that slot held. Snapshots are never started from a web
+page. `/atlas timeline status` prints the schedule.
+
+**Upgrading from 1.1 or older.** Day folders written before 1.2 stay as they are and count as one slot
+of their day. A plain date such as `2026-10-13` still works in every address and share link and means the
+last slot of that day.
 
 **What a snapshot holds.** Every tile Atlas has on disk, at every zoom, recorded by the hash of its
-image. Each image is stored once and shared by every day it appears in, so a day where little
-changed costs a few kilobytes. Tiles that are being redrawn while the snapshot runs keep their image
-from the day before and the day is marked partial. Each day also gets stats for the 24 hours before
-the snapshot, which are explored chunks, tiles, players seen, peak and current online, kills, deaths,
-blocks broken and placed, world events, and a Feats summary with the top ten when a Feats export
-exists. Daily 3D views are drawn with it, see [3D views](#3d-views).
+image. Each image is stored once and shared by every slot it appears in, so a slot where little
+changed costs a few kilobytes. Changed tiles are counted against the slot before. Tiles that are being
+redrawn while the snapshot runs keep their image from the slot before and the slot is marked partial.
+Each slot also gets stats for the 24 hours before the snapshot, which are explored chunks, tiles,
+players seen, peak and current online, kills, deaths, blocks broken and placed, world events, and a
+Feats summary with the top ten when a Feats export exists. Daily 3D views are drawn once a day, with the
+first slot of the day, and the other slots of the day show them, see [3D views](#3d-views).
 
 **Events.** Through the day Atlas writes an event log per world with joins and leaves, deaths and
 kills, world events, Feats unlocks, milestones and firsts, factions events, markers placed and
 removed, and snapshots. A day holds at most 5,000 events, after that one line says the rest were
-dropped.
+dropped. The log stays one file per day. A slot shows the hours of its day from its own hour to the next
+slot, and the first slot of a day starts at midnight, so every event belongs to one slot.
 
 **Retention.** Days older than `timeline.retainDays` are pruned, and while the timeline uses more
-than `timeline.maxDiskMb` the oldest days go first. The newest snapshot of a world and today are
-always kept. A pruned day stays on the slider as a hatched gap.
+than `timeline.maxDiskMb` the oldest days go first. A day is pruned with all of its slots. The day of
+the newest snapshot of a world and today are always kept. A pruned slot stays on the slider as a
+hatched gap.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Take snapshots and keep the event log. Off answers 404 on every timeline route |
-| `hour` | `4` | Server local hour of the daily snapshot, 0 to 23 |
+| `hour` | `4` | Server local hour of the first snapshot of the day, 0 to 23 |
+| `perDay` | `4` | Snapshots a day at evenly spaced hours from `hour`, one of 1, 2, 3, 4, 6, 8, 12 or 24 |
 | `retainDays` | `90` | Days kept. 0 keeps only the newest day |
 | `maxDiskMb` | `2048` | Disk the timeline may use in MB. 0 means no cap |
 | `events` | `true` | Write the daily event log |
 
 **In the browser.** The Timeline tab and the clock button under the map controls open a slider bar.
-Each step is one day, from the oldest day held to today, and the far right end is the live map.
-Picking a day swaps the live tiles for the tiles of that day, dims the live overlays and shows a
-Viewing chip with a Return to live button. The events of the day appear as markers on the map and as
-a list with filters by kind and a Show button. The diamond button tints the tiles that changed that
-day. A day with events but no snapshot shows the map of the snapshot before it and says so. The play
-button steps through the days at half a second, one second or two seconds a day. The tab also shows
-the figures of the picked day and small charts over every day held, and clicking a chart jumps to
-that day. While the bar is open, the left and right arrows step a day, space plays and pauses, and
-Home or Esc return to the live map. When a snapshot finishes, open pages add the new day by
+Each step is one slot, from the oldest day held to today, with the hour under the date, and the far
+right end is the live map. A day with nothing kept is one step of its own.
+Picking a slot swaps the live tiles for the tiles of that slot, dims the live overlays and shows a
+Viewing chip with a Return to live button. The events of the slot's hours appear as markers on the map
+and as a list with filters by kind and a Show button. The diamond button tints the tiles that changed
+since the slot before. A day with events but no snapshot shows the map of the snapshot before it and
+says so. The play button steps through the slots at half a second, one second or two seconds a step.
+The tab also shows the figures of the picked slot and small charts over every slot held, and clicking a
+chart jumps to that slot. While the bar is open, the left and right arrows step a slot, space plays and
+pauses, and Home or Esc return to the live map. When a snapshot finishes, open pages add the new slot by
 themselves.
 
-**Share links.** A link copied while a day is shown carries `t=<date>`, such as `t=2026-10-13`, and
-opens on that day.
+**Share links.** A link copied while a slot is shown carries `t=<slot>`, such as `t=2026-10-13T16`, and
+opens on that slot. An older link with a plain date opens the last slot of that day.
 
 Day tiles follow the `terrain` visibility, everything else the `timeline` visibility. Events follow
 the layer they belong to as well, so kills need `kills`, world events `worldevents`, Feats lines
@@ -310,8 +334,11 @@ for it. Block colours come from the game's own block textures with the biome tin
 **Limits.** Views are drawn one at a time on their own thread. They have no budget of their own on
 purpose. Like tiles, every read of a chunk that is not already in memory takes a token from
 `chunkImagesPerMinute`, and views only use its upper half as background work, so a large view never
-slows the tiles people are looking at. Browsers may hold at most eight views in the queue, at most two
-of them wider than 17 by 17 chunks, and the thread rests two seconds after a large one. Views a
+slows the tiles people are looking at. Browsers may hold at most eight views in the queue, and at most
+two views wider than 17 by 17 chunks are drawn at a time, and the thread rests two seconds after a large
+one. One address may hold `isoViewsPerAddress` views (4 by default), at most `isoLargeViewsPerAddress`
+of them large and waiting (2 by default). A new view from an address at its allowance replaces the oldest
+of its views that has not started. Views a
 browser asked for are drawn first, then daily views and console renders in the order they came. A radius 4 view takes under
 a second, a radius 16 view up to a minute when nothing is cached. While a view is drawn the browser
 gets an estimate and asks again.
@@ -324,8 +351,8 @@ every six hours. A view drawn while chunks were missing stays in memory for a mi
 asking again about a queued view are free. Like the other limits it does not apply to local and
 private addresses while `trustedProxies` is empty.
 
-**Daily views.** List areas in `iso.snapshots` and each one is drawn into the timeline when the daily
-snapshot of its world is taken. The Timeline tab shows them for the picked day. Labels are lower case
+**Daily views.** List areas in `iso.snapshots` and each one is drawn into the timeline with the first
+snapshot of the day of its world. The Timeline tab shows them for the picked day. Labels are lower case
 letters, digits, dashes and underscores, unique per world, and the radius defaults to 4. With
 `iso.snapshotAdminMarkers` set, every server marker of the world is drawn too, as `marker-<id>`, but
 only while the server marker layer is public, so private marker positions never reach the timeline.
@@ -337,6 +364,35 @@ A world gets at most 64 daily views. They are kept and pruned with the day they 
   "snapshotAdminMarkers": false
 }
 ```
+
+**Key places.** Up to three places (`isoKeyPlaceLimit`, 1 to 10) are the curated set on top of
+`iso.snapshots`. With the first snapshot of each day every key place of the world is drawn from all four
+directions, at scale 2 (scale 1 above radius 8), into the timeline as `iso/<label>-<azimuth>.png`. The
+renders take the background path of the daily views. Before drawing a place that was drawn before, Atlas
+reads its chunks without drawing them and compares their fingerprint with the one kept with the last
+render. When nothing changed the pictures of that render are linked into the new day (copied where the
+file system has no links), so a quiet day costs no disk, and the day marks them unchanged. A key place
+has a `world`, `x` and `z` in blocks, a `radius` in chunks (6 by default, 1 to 16, held to
+`isoMaxRadius`), a `label` like the labels above that is unique across worlds, and a `name` of up to 60
+characters shown in the browser.
+
+```json
+"iso": {
+  "keyPlaces": [{"world": "default", "x": 1280, "z": 416, "radius": 6, "label": "town_hall", "name": "Town Hall"}]
+}
+```
+
+Admins add and remove key places with `/atlas key add`, `/atlas key remove` or the Admin tab. Both write
+the list into `atlas.json` with every other value kept as it is, check the whole file again and apply the
+change at once. A file that does not parse is left alone and the change is refused. `/atlas key render
+<label>` draws a place now, into today's timeline when today has a snapshot of its world, otherwise under
+`iso/exports`.
+
+**In the Admin tab.** The Key places section lists the places with a button that shows each on the map
+and a remove button that asks for a second click. Its form takes a name, a label made from the name, X,
+Z and a radius, and starts from the last spot right clicked on the map in this world, or the middle of the
+map. A right click on the map offers Make this a key place to admins, which opens the form there. The
+Key places layer shows each place on the map for admins as a camera symbol with View in 3D.
 
 **From the console.** `/atlas iso <world> <x> <z> [radius] [scale]` draws a view without the browser
 limits and saves it under `iso/exports` in the data folder.
@@ -355,7 +411,14 @@ chunks it reaches in every direction. A large radius is drawn at a smaller scale
 so. A partial view has a Try again button. Download saves the PNG, and Copy link copies an address
 with `iso=world,x,z,r,az,s` that opens the same view for anyone who may see it. Esc closes it.
 
-**Daily views in the timeline.** The Timeline tab shows the day's 3D views as thumbnails under its
+**Key places in the timeline.** The Timeline tab opens with a Key places block. Each place shows the
+picture of one direction for the day picked on the slider, or the newest day while the map is live, with
+the four directions as a strip under it. A day whose picture did not change says unchanged since the day
+it was drawn. Compare days opens the picture next to the day before with the divider, View live in 3D
+opens the current view of the place, and Play steps the place through every day held in the picked
+direction.
+
+**Daily views in the timeline.** The Timeline tab shows the day's other 3D views as thumbnails under its
 figures, or the newest day's while the map is live. A thumbnail opens the lightbox. Pick another day
 under Compare with a day to lay the two pictures over each other with a divider, the older day on the
 left. Drag the divider, or focus it and use the arrow keys, Home and End. Live view opens the current
@@ -370,8 +433,8 @@ the slider holds.
   corner. On a past day it shows that day's tiles, with the changed tint when it is on. Markers and
   other overlays are not part of the picture.
 - **Make a video** records every snapshot in the range as a WebM video at the current place and zoom,
-  at 0.25, 0.5 or 1 second a day, with the date stamped on each day and, if you tick it, the changed
-  tiles tinted. Progress shows day by day and Cancel stops it. A browser without video recording says
+  at 0.25, 0.5 or 1 second a snapshot, with the date and hour stamped on each and, if you tick it, the
+  changed tiles tinted. Progress shows picture by picture and Cancel stops it. A browser without video recording says
   so, and Save image still works there.
 - **Export data**, for admins, downloads the zip described below for the range. One file holds at most
   90 days, so a longer range exports the 90 days that end at To.
@@ -380,8 +443,8 @@ the slider holds.
 
 Admins can download a world's timeline as a zip from
 `/api/timeline/{world}/export?from=<date>&to=<date>`, at most 90 days at a time. It holds a
-`README.txt`, then per day its tile list, stats, events and 3D views, then every tile image those
-days name once. One export runs at a time per server. Files are copied as they are stored, so player
+`README.txt`, then per day its events and per slot its tile list, stats and 3D views, then every tile
+image those slots name once. One export runs at a time per server. Files are copied as they are stored, so player
 names are not hidden, which is why only admins may export.
 
 ## Marker layers
@@ -737,12 +800,13 @@ The endpoints are listed here. Shapes, events and the visibility rules are in
 - `GET /api/territories/{world}`, `/api/points/{world}`, `/api/factions`, `/api/factions/{tag}`, `/api/nations`
 - `GET /api/changes/{world}`, `/api/heat/{world}`
 - `GET /api/tiles/{world}/{zoom}/{x}/{z}.png`, `/api/marker-icons/{Name}.png`
-- `GET /api/timeline/{world}` and the day routes under it for tiles, changed tiles, stats, events and 3D views
+- `GET /api/timeline/{world}` and the slot routes under it for tiles, changed tiles, stats, events and 3D views
 - `GET /api/timeline/{world}/export`, a zip for admins
 - `GET /api/iso`, `/api/iso/{world}` and `/api/iso/{world}/marker/{id}` for 3D views
 - `GET /api/events`, the server sent events stream
 - `GET /api/health`, `ok` and `version` for everyone, and the full state with degraded checks for admins
 - `POST /api/link`
+- `GET`, `POST` and `DELETE /api/admin/keyplaces`, the key places, for admins
 
 Admin requests send the token as `X-Atlas-Token` or `Authorization: Bearer <token>`.
 
@@ -841,10 +905,10 @@ All files live in the plugin data directory, `mods/Ryvrook_Atlas`.
 | `iso/` | Cached 3D views, one folder per world, and `iso/exports` for views drawn by command |
 
 Inside `snapshots`, `blobs` holds the tile images by content hash and `worlds` holds one folder per
-world with a folder per day for its tile list, summary, stats and an `iso` folder of daily 3D views,
-and an `events` folder with one
-`<date>.jsonl` file per day. `activity.json` and `state.json` hold the counters for the daily stats
-and the time of the last run.
+world with a folder per slot, such as `2026-10-13T16`, for its tile list, summary, stats and, in the
+first slot of a day, an `iso` folder of daily 3D views and key places, and an `events` folder with one
+`<date>.jsonl` file per day. A folder named by a plain date is a day from Atlas 1.1 or older.
+`activity.json` and `state.json` hold the counters for the daily stats and the last slot taken.
 
 ## Building from source
 

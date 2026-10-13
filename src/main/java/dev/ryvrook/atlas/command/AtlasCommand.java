@@ -20,7 +20,7 @@ import dev.ryvrook.atlas.tiles.TileService;
 import java.util.Map;
 import java.util.UUID;
 
-/** /atlas with link, hide, show, admin, reload, unlink, tiles, render, marker, snapshot and timeline. */
+/** /atlas with link, hide, show, admin, reload, unlink, tiles, render, marker, snapshot, timeline, iso and key. */
 public final class AtlasCommand extends CommandBase {
     private static final String ACCENT = "#5fb3ff";
     private static final String TEXT = "#c9d4df";
@@ -45,6 +45,7 @@ public final class AtlasCommand extends CommandBase {
         addSubCommand(new StaffCommands.Snapshot(plugin));
         addSubCommand(new StaffCommands.Timeline(plugin));
         addSubCommand(new StaffCommands.Iso(plugin));
+        addSubCommand(new StaffCommands.Key(plugin));
     }
 
     @Override

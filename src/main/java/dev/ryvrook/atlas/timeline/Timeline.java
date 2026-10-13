@@ -34,8 +34,11 @@ import java.util.function.Consumer;
 import java.util.logging.Level;
 
 /**
- * The timeline. Takes one snapshot per world per day at timeline.hour server local time, or when an
- * admin asks, keeps the event log, collects the numbers for each day's stats and prunes old days.
+ * The timeline. Takes timeline.perDay snapshots per world and day at evenly spaced hours from
+ * timeline.hour server local time, one per slot (see Slots), or when an admin asks, keeps the event
+ * log, collects the numbers for each slot's stats and prunes old days. A slot missed while the server
+ * was down runs CATCH_UP_DELAY_MS after the start, only the latest one missed. An admin snapshot
+ * goes into the slot of the moment and replaces what that slot held.
  *
  * <p>Everything runs on the Atlas scheduler. A snapshot reads and hashes BATCH tiles per step with
  * STEP_DELAY_MS between steps, so the scheduler stays free for the live map. Nothing here touches a
@@ -45,7 +48,7 @@ public final class Timeline {
     static final int BATCH = 128;
     static final long STEP_DELAY_MS = 25;
     static final long FLUSH_SECONDS = 5;
-    /** A daily snapshot missed while the server was down runs this long after start. */
+    /** A slot missed while the server was down runs this long after start. */
     static final long CATCH_UP_DELAY_MS = 5 * 60 * 1000L;
     static final int FEATS_TOP = 10;
 
@@ -60,7 +63,7 @@ public final class Timeline {
     private final List<ScheduledFuture<?>> tasks = new ArrayList<>();
     private volatile ScheduledExecutorService scheduler;
 
-    private record Request(String world, Consumer<String> reply, boolean daily) {
+    private record Request(String world, Consumer<String> reply, boolean daily, String slot) {
     }
 
     /** Guarded by this. */
@@ -69,7 +72,8 @@ public final class Timeline {
     private Request jobRequest;
     /** True while a prune runs. No snapshot starts then, so a prune never collects a blob a new day is about to use. */
     private boolean pruning;
-    private String lastDaily;
+    /** The last slot the schedule ran, or a plain date as Atlas 1.0 and 1.1 saved it. */
+    private String lastSlot;
     private long lastFlushFailureLog;
 
     public Timeline(Atlas atlas, Path dataDir, HytaleLogger logger) {
@@ -110,6 +114,16 @@ public final class Timeline {
 
     public String today() {
         return LocalDate.now(zone).toString();
+    }
+
+    /** The slot of this moment, the one a snapshot taken now belongs to. */
+    public String currentSlot() {
+        return Slots.current(ZonedDateTime.now(zone), cfg().timelineHour(), cfg().timelinePerDay());
+    }
+
+    /** The hours of the slots of a day. */
+    public int[] slotHours() {
+        return Slots.hours(cfg().timelineHour(), cfg().timelinePerDay());
     }
 
     /** Starts the periodic work and installs the event log behind EventLog.record. */
@@ -184,7 +198,7 @@ public final class Timeline {
 
     // ---- schedule ----------------------------------------------------------
 
-    /** Every minute. Samples who is online and starts the daily snapshot when it is due. */
+    /** Every minute. Samples who is online and starts the snapshot of a slot when it is due. */
     private void tick() {
         long now = System.currentTimeMillis();
         Map<String, List<String>> online = new HashMap<>();
@@ -207,20 +221,19 @@ public final class Timeline {
             return false;
         }
         ZonedDateTime t = Instant.ofEpochMilli(now).atZone(zone);
-        String today = t.toLocalDate().toString();
-        return t.getHour() >= c.timelineHour() && !today.equals(lastDaily);
+        return !Slots.current(t, c.timelineHour(), c.timelinePerDay()).equals(lastSlot);
     }
 
     private void runDaily() {
-        String today = today();
+        String slot = currentSlot();
         synchronized (this) {
-            lastDaily = today;
+            lastSlot = slot;
         }
         saveState();
         List<String> worlds = dailyWorlds();
-        logger.at(Level.INFO).log("Atlas takes the daily timeline snapshot of %s", String.join(", ", worlds));
+        logger.at(Level.INFO).log("Atlas takes the timeline snapshot of %s for the slot %s", String.join(", ", worlds), slot);
         for (String w : worlds) {
-            enqueue(new Request(w, null, true));
+            enqueue(new Request(w, null, true, slot));
         }
     }
 
@@ -246,39 +259,36 @@ public final class Timeline {
         return out;
     }
 
-    /** When the next daily snapshot runs, in epoch ms, or -1 while the timeline is off. */
+    /** When the next scheduled snapshot runs, in epoch ms, or -1 while the timeline is off. */
     public synchronized long nextRunAt() {
         AtlasConfig c = cfg();
         if (!c.timelineEnabled()) {
             return -1;
         }
         ZonedDateTime now = ZonedDateTime.now(zone);
-        ZonedDateTime at = now.toLocalDate().atTime(c.timelineHour(), 0).atZone(zone);
-        String today = now.toLocalDate().toString();
-        if (today.equals(lastDaily)) {
-            at = at.plusDays(1);
-        } else if (!now.isBefore(at)) {
-            long soon = Math.max(System.currentTimeMillis(), startedAt + CATCH_UP_DELAY_MS);
-            return soon;
+        if (!Slots.current(now, c.timelineHour(), c.timelinePerDay()).equals(lastSlot)) {
+            return Math.max(System.currentTimeMillis(), startedAt + CATCH_UP_DELAY_MS);
         }
-        return at.toInstant().toEpochMilli();
+        return Slots.next(now, c.timelineHour(), c.timelinePerDay()).toInstant().toEpochMilli();
     }
 
     private void loadState() {
         try {
             JsonObject o = TimelineStore.readObject(stateFile);
             synchronized (this) {
-                lastDaily = o == null ? null : Json.str(o, "lastDaily");
+                String slot = o == null ? null : Json.str(o, "lastSlot");
+                // Atlas 1.0 and 1.1 kept the date of the last daily snapshot.
+                lastSlot = slot != null ? slot : o == null ? null : Json.str(o, "lastDaily");
             }
         } catch (IOException | RuntimeException ignored) {
-            // A missing state runs the daily snapshot once more, which only dedupes.
+            // A missing state runs the slot of the moment once more, which only dedupes.
         }
     }
 
     private void saveState() {
         JsonObject o = new JsonObject();
         synchronized (this) {
-            o.addProperty("lastDaily", lastDaily);
+            o.addProperty("lastSlot", lastSlot);
         }
         try {
             Json.writeAtomic(stateFile, Json.GSON.toJson(o));
@@ -315,17 +325,19 @@ public final class Timeline {
             }
             worlds = List.of(world);
         }
+        String slot = currentSlot();
         for (String w : worlds) {
-            enqueue(new Request(w, reply, false));
+            enqueue(new Request(w, reply, false, slot));
         }
-        return "Taking a timeline snapshot of " + String.join(", ", worlds) + ". It runs in the background.";
+        return "Taking a timeline snapshot of " + String.join(", ", worlds) + " for the slot " + slotText(slot)
+                + ". It runs in the background.";
     }
 
     private void enqueue(Request r) {
         boolean startNow;
         synchronized (this) {
             for (Request p : pending) {
-                if (p.world().equals(r.world()) && p.reply() == null && r.reply() == null) {
+                if (p.world().equals(r.world()) && p.slot().equals(r.slot()) && p.reply() == null && r.reply() == null) {
                     return;
                 }
             }
@@ -361,12 +373,12 @@ public final class Timeline {
             if (r == null) {
                 return;
             }
-            String date = today();
-            String prevDate = store.previousDate(r.world(), date);
-            Manifest previous = prevDate == null ? null : store.manifest(r.world(), prevDate);
-            Manifest sameDay = store.manifest(r.world(), date);
-            j = new SnapshotJob(r.world(), date, System.currentTimeMillis(), atlas.tiles().diskDir(r.world()),
-                    store.blobs(), prevDate, previous, sameDay, TileService.MIN_ZOOM, TileService.MAX_ZOOM);
+            String slot = r.slot();
+            String prevSlot = store.previousSlot(r.world(), slot);
+            Manifest previous = prevSlot == null ? null : store.manifest(r.world(), prevSlot);
+            Manifest sameSlot = store.manifest(r.world(), slot);
+            j = new SnapshotJob(r.world(), slot, System.currentTimeMillis(), atlas.tiles().diskDir(r.world()),
+                    store.blobs(), prevSlot, previous, sameSlot, TileService.MIN_ZOOM, TileService.MAX_ZOOM);
             job = j;
             jobRequest = r;
         }
@@ -415,17 +427,18 @@ public final class Timeline {
         JsonObject stats = stats(j.world, j.date, takenAt, m);
         store.write(m, stats);
         dev.ryvrook.atlas.iso.IsoSnapshots.dayTaken(j.world, j.date, store.dayDir(j.world, j.date));
-        String text = r.daily() ? "The daily snapshot of the map was taken." : "An admin took a snapshot of the map.";
+        String text = r.daily() ? "The scheduled snapshot of the map was taken." : "An admin took a snapshot of the map.";
         EventLog.record(j.world, takenAt, "snapshot", null, null, null, text);
         long seconds = Math.max(0, (takenAt - j.startedAt) / 1000);
         logger.at(Level.INFO).log("Atlas took the timeline snapshot of %s for %s with %d tiles, %d changed, %d new images, %d skipped in %d s",
                 j.world, j.date, m.tiles().size(), m.changed().size(), j.newBlobs(), j.skipped(), seconds);
-        reply(r, "Snapshot of " + j.world + " for " + j.date + " done with " + m.tiles().size() + " tiles, "
+        reply(r, "Snapshot of " + j.world + " for " + slotText(j.date) + " done with " + m.tiles().size() + " tiles, "
                 + m.changed().size() + " changed, " + j.newBlobs() + " new images" + (m.partial()
                 ? ", " + j.skipped() + " tiles were being redrawn and keep their earlier image." : "."));
         JsonObject o = new JsonObject();
         o.addProperty("world", j.world);
-        o.addProperty("date", j.date);
+        o.addProperty("date", Slots.date(j.date));
+        o.addProperty("slot", j.date);
         atlas.sse().broadcastAll("timeline", Json.GSON.toJson(o), c -> c.viewer().canSee(cfg(), "timeline"));
         done(j);
     }
@@ -444,6 +457,12 @@ public final class Timeline {
         } else {
             schedule(this::prune, 1000);
         }
+    }
+
+    /** A slot for people, such as 2026-10-13 16:00. */
+    static String slotText(String slot) {
+        int h = Slots.hour(slot);
+        return h < 0 ? slot : Slots.date(slot) + String.format(Locale.ROOT, " %02d:00", h);
     }
 
     private static void reply(Request r, String text) {
@@ -488,10 +507,12 @@ public final class Timeline {
 
     // ---- stats -------------------------------------------------------------
 
-    JsonObject stats(String world, String date, long takenAt, Manifest m) {
+    JsonObject stats(String world, String slot, long takenAt, Manifest m) {
+        String date = Slots.date(slot);
         JsonObject o = new JsonObject();
         o.addProperty("world", world);
         o.addProperty("date", date);
+        o.addProperty("slot", slot);
         o.addProperty("takenAt", takenAt);
         o.addProperty("windowSeconds", ActivityTracker.WINDOW_MS / 1000);
         Integer explored = atlas.tiles().exploredCounts().get(world);
@@ -570,12 +591,19 @@ public final class Timeline {
         if (!c.timelineEnabled()) {
             out.add("The timeline is turned off in atlas.json.");
         }
+        int[] hours = slotHours();
+        out.add(hours.length + (hours.length == 1 ? " snapshot" : " snapshots") + " a day at " + Slots.schedule(hours)
+                + " server time, timeline.perDay " + c.timelinePerDay() + " from timeline.hour " + c.timelineHour() + ".");
         Map<String, Integer> held = store.daysHeld();
+        Map<String, Integer> slots = store.slotsHeld();
         if (held.isEmpty()) {
             out.add("No snapshots are held yet.");
         } else {
             List<String> parts = new ArrayList<>();
-            held.forEach((w, n) -> parts.add(w + " " + n + (n == 1 ? " day" : " days")));
+            held.forEach((w, n) -> {
+                int k = slots.getOrDefault(w, n);
+                parts.add(w + " " + n + (n == 1 ? " day" : " days") + " in " + k + (k == 1 ? " slot" : " slots"));
+            });
             out.add("Snapshots held, " + String.join(", ", parts) + ".");
         }
         long bytes = store.diskBytes();
@@ -585,8 +613,8 @@ public final class Timeline {
         long next = nextRunAt();
         if (next > 0) {
             LocalDateTime t = LocalDateTime.ofInstant(Instant.ofEpochMilli(next), zone);
-            out.add(String.format(Locale.ROOT, "Next daily snapshot at %s %02d:%02d server time.", t.toLocalDate(),
-                    t.getHour(), t.getMinute()));
+            out.add(String.format(Locale.ROOT, "Next snapshot at %s %02d:%02d server time, last slot taken %s.", t.toLocalDate(),
+                    t.getHour(), t.getMinute(), lastSlotText()));
         }
         synchronized (this) {
             if (job != null) {
@@ -600,6 +628,10 @@ public final class Timeline {
             out.add("The event log dropped " + events.queueDrops() + " events because its queue was full.");
         }
         return out;
+    }
+
+    private synchronized String lastSlotText() {
+        return lastSlot == null ? "none yet" : slotText(lastSlot);
     }
 
     /** True while a snapshot runs or waits. */

@@ -30,15 +30,17 @@ import java.util.TreeSet;
  * <pre>
  * snapshots/blobs/ab/abcd....png                 tile images by content hash, shared by every day
  * snapshots/worlds/&lt;world&gt;/world.json            the real world name
- * snapshots/worlds/&lt;world&gt;/&lt;date&gt;/tiles.json     tile key to hash, plus changed
- * snapshots/worlds/&lt;world&gt;/&lt;date&gt;/summary.json   counts for the day list
- * snapshots/worlds/&lt;world&gt;/&lt;date&gt;/stats.json     numbers and short lists
- * snapshots/worlds/&lt;world&gt;/&lt;date&gt;/tombstone.json left when a day is pruned
- * snapshots/worlds/&lt;world&gt;/events/&lt;date&gt;.jsonl   one event per line
+ * snapshots/worlds/&lt;world&gt;/&lt;slot&gt;/tiles.json     tile key to hash, plus changed
+ * snapshots/worlds/&lt;world&gt;/&lt;slot&gt;/summary.json   counts for the day list
+ * snapshots/worlds/&lt;world&gt;/&lt;slot&gt;/stats.json     numbers and short lists
+ * snapshots/worlds/&lt;world&gt;/&lt;slot&gt;/tombstone.json left when a day is pruned
+ * snapshots/worlds/&lt;world&gt;/events/&lt;date&gt;.jsonl   one event per line, per day
  * </pre>
  *
- * Worlds live under worlds so that no world name can meet the blobs folder. Dates are server
- * local ISO dates.
+ * Worlds live under worlds so that no world name can meet the blobs folder. A slot is a server local
+ * date and hour such as 2026-10-13T16, see Slots. A folder named by a plain date, as Atlas 1.0 and 1.1
+ * wrote them, is a slot of its own, and a plain date given to any method here means the last slot
+ * held that day. Retention counts days, and a day is pruned with all of its slots.
  */
 public final class TimelineStore {
     static final String TILES = "tiles.json";
@@ -84,8 +86,97 @@ public final class TimelineStore {
         return root.resolve("worlds").resolve(TileKeys.safe(world));
     }
 
-    public Path dayDir(String world, String date) {
-        return worldDir(world).resolve(date);
+    /** The folder of a slot. A plain date names the last slot held that day, or its own folder when there is none. */
+    public Path dayDir(String world, String slot) {
+        return worldDir(world).resolve(resolve(world, slot));
+    }
+
+    /** True for a slot such as 2026-10-13T16 or a plain date. */
+    public static boolean validSlot(String s) {
+        return Slots.valid(s);
+    }
+
+    /**
+     * The slot a name stands for. A slot with an hour is itself. A plain date is the last slot of that
+     * day that holds a snapshot or a tombstone, the plain date folder itself when no slot with an hour
+     * does.
+     */
+    public String resolve(String world, String slot) {
+        if (slot == null || slot.length() != 10 || !validDate(slot)) {
+            return slot;
+        }
+        String best = null;
+        for (String s : slotsOf(world, slot)) {
+            if (s.length() == 13 && (isSnapshotDir(world, s) || Files.isRegularFile(worldDir(world).resolve(s).resolve(TOMBSTONE)))) {
+                best = s;
+            }
+        }
+        return best == null ? slot : best;
+    }
+
+    /** True when the slot folder of exactly this name holds a snapshot, without resolving a plain date. */
+    public boolean slotHasSnapshot(String world, String slot) {
+        return isSnapshotDir(world, slot);
+    }
+
+    /** True when the slot folder of exactly this name was pruned, without resolving a plain date. */
+    public boolean slotPruned(String world, String slot) {
+        Path dir = worldDir(world).resolve(slot);
+        return Files.isRegularFile(dir.resolve(TOMBSTONE)) && !Files.isRegularFile(dir.resolve(TILES));
+    }
+
+    /** The summary of the slot folder of exactly this name, or null. */
+    public JsonObject slotSummary(String world, String slot) {
+        try {
+            return readObject(worldDir(world).resolve(slot).resolve(SUMMARY));
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private boolean isSnapshotDir(String world, String folder) {
+        return Files.isRegularFile(worldDir(world).resolve(folder).resolve(TILES));
+    }
+
+    /** Every slot folder of the world, oldest first, plain dates before the hours of their day. */
+    public List<String> slots(String world) {
+        TreeSet<String> out = new TreeSet<>();
+        Path dir = worldDir(world);
+        if (!Files.isDirectory(dir)) {
+            return new ArrayList<>();
+        }
+        try (DirectoryStream<Path> s = Files.newDirectoryStream(dir)) {
+            for (Path p : s) {
+                String n = p.getFileName().toString();
+                if (Slots.valid(n) && Files.isDirectory(p)) {
+                    out.add(n);
+                }
+            }
+        } catch (IOException ignored) {
+            // Nothing listed.
+        }
+        return new ArrayList<>(out);
+    }
+
+    /** The slot folders of one day, oldest first. */
+    public List<String> slotsOf(String world, String date) {
+        List<String> out = new ArrayList<>();
+        Path dir = worldDir(world);
+        if (!Files.isDirectory(dir)) {
+            return out;
+        }
+        try (DirectoryStream<Path> s = Files.newDirectoryStream(dir, date + "*")) {
+            for (Path p : s) {
+                String n = p.getFileName().toString();
+                if (Slots.valid(n) && Slots.date(n).equals(date) && Files.isDirectory(p)) {
+                    out.add(n);
+                }
+            }
+        } catch (IOException ignored) {
+            // Nothing listed.
+        }
+        java.util.Collections.sort(out);
+        return out;
     }
 
     public Path eventsFile(String world, String date) {
@@ -144,22 +235,15 @@ public final class TimelineStore {
         }
     }
 
-    /** Every date of the world with a snapshot, a tombstone or events, oldest first. */
+    /** Every date of the world with a slot folder (snapshot or tombstone) or events, oldest first. */
     public List<String> dates(String world) {
         TreeSet<String> out = new TreeSet<>();
         Path dir = worldDir(world);
         if (!Files.isDirectory(dir)) {
             return new ArrayList<>();
         }
-        try (DirectoryStream<Path> s = Files.newDirectoryStream(dir)) {
-            for (Path p : s) {
-                String n = p.getFileName().toString();
-                if (validDate(n) && Files.isDirectory(p)) {
-                    out.add(n);
-                }
-            }
-        } catch (IOException ignored) {
-            // Nothing listed.
+        for (String slot : slots(world)) {
+            out.add(Slots.date(slot));
         }
         Path ev = dir.resolve("events");
         if (Files.isDirectory(ev)) {
@@ -190,23 +274,32 @@ public final class TimelineStore {
         return Files.isRegularFile(dayDir(world, date).resolve(TOMBSTONE)) && !hasSnapshot(world, date);
     }
 
-    /** Dates with a snapshot, oldest first. */
-    public List<String> snapshotDates(String world) {
+    /** Slots with a snapshot, oldest first. */
+    public List<String> snapshotSlots(String world) {
         List<String> out = new ArrayList<>();
-        for (String d : dates(world)) {
-            if (hasSnapshot(world, d)) {
-                out.add(d);
+        for (String s : slots(world)) {
+            if (isSnapshotDir(world, s)) {
+                out.add(s);
             }
         }
         return out;
     }
 
-    /** The newest snapshot date before the given date, or null. */
-    public String previousDate(String world, String date) {
+    /** Dates with at least one snapshot slot, oldest first. */
+    public List<String> snapshotDates(String world) {
+        TreeSet<String> out = new TreeSet<>();
+        for (String s : snapshotSlots(world)) {
+            out.add(Slots.date(s));
+        }
+        return new ArrayList<>(out);
+    }
+
+    /** The newest snapshot slot before the given slot, or null. */
+    public String previousSlot(String world, String slot) {
         String best = null;
-        for (String d : snapshotDates(world)) {
-            if (d.compareTo(date) < 0) {
-                best = d;
+        for (String s : snapshotSlots(world)) {
+            if (s.compareTo(slot) < 0) {
+                best = s;
             }
         }
         return best;
@@ -228,15 +321,16 @@ public final class TimelineStore {
         }
     }
 
-    /** The manifest of the day, cached while its file is unchanged, or null. */
-    public Manifest manifest(String world, String date) {
-        Path f = dayDir(world, date).resolve(TILES);
+    /** The manifest of the slot, cached while its file is unchanged, or null. */
+    public Manifest manifest(String world, String slot) {
+        String id = resolve(world, slot);
+        Path f = worldDir(world).resolve(id).resolve(TILES);
         try {
             if (!Files.isRegularFile(f)) {
                 return null;
             }
             long modified = Files.getLastModifiedTime(f).toMillis();
-            String key = world + "|" + date;
+            String key = world + "|" + id;
             CachedManifest c = manifests.get(key);
             if (c != null && c.modified() == modified) {
                 return c.manifest();
@@ -251,7 +345,7 @@ public final class TimelineStore {
         }
     }
 
-    /** Writes the manifest, its summary and the stats of a day, replacing an earlier snapshot of that day. */
+    /** Writes the manifest, its summary and the stats of a slot, replacing an earlier snapshot of that slot. */
     public void write(Manifest m, JsonObject stats) throws IOException {
         ensureWorld(m.world());
         Path day = dayDir(m.world(), m.date());
@@ -269,16 +363,25 @@ public final class TimelineStore {
         ensureWorld(world);
     }
 
-    /** Bytes used by the whole timeline on disk. */
+    /**
+     * Bytes used by the whole timeline on disk. A file linked into several day folders, such as an
+     * unchanged key place view, is counted once.
+     */
     public long diskBytes() {
         long[] total = new long[1];
         if (!Files.isDirectory(root)) {
             return 0;
         }
+        Set<Object> seen = new HashSet<>();
         try (var s = Files.walk(root)) {
             s.filter(Files::isRegularFile).forEach(p -> {
                 try {
-                    total[0] += Files.size(p);
+                    java.nio.file.attribute.BasicFileAttributes a = Files.readAttributes(p,
+                            java.nio.file.attribute.BasicFileAttributes.class);
+                    Object key = a.fileKey();
+                    if (key == null || seen.add(key)) {
+                        total[0] += a.size();
+                    }
                 } catch (IOException ignored) {
                     // Gone in between.
                 }
@@ -297,9 +400,10 @@ public final class TimelineStore {
     /**
      * Removes days older than retainDays (a day is kept while its date is after today minus
      * retainDays), then the oldest days across every world while the timeline uses more than
-     * maxBytes (0 or less means no cap), and then every blob no remaining manifest references. The
-     * newest snapshot of each world and today are always kept. A removed snapshot day leaves a
-     * tombstone, its events file goes with it. Tombstones far past the retention are forgotten.
+     * maxBytes (0 or less means no cap), and then every blob no remaining manifest references. A day
+     * goes with all of its slots. The day of the newest snapshot of each world and today are always
+     * kept. A removed snapshot slot leaves a tombstone, the events file of the day goes with it.
+     * Tombstones far past the retention are forgotten.
      */
     public synchronized PruneResult prune(LocalDate today, int retainDays, long maxBytes) throws IOException {
         LocalDate keepAfter = today.minusDays(Math.max(0, retainDays));
@@ -311,16 +415,17 @@ public final class TimelineStore {
             if (!snaps.isEmpty()) {
                 newest.put(world, snaps.get(snaps.size() - 1));
             }
+            for (String slot : slots(world)) {
+                String date = Slots.date(slot);
+                Path dir = worldDir(world).resolve(slot);
+                if (Files.isRegularFile(dir.resolve(TOMBSTONE)) && !isSnapshotDir(world, slot)
+                        && LocalDate.parse(date).isBefore(keepAfter.minusDays(TOMBSTONE_DAYS))
+                        && !Files.exists(eventsFile(world, date))) {
+                    deleteTree(dir);
+                }
+            }
             for (String date : dates(world)) {
                 LocalDate d = LocalDate.parse(date);
-                if (tombstone(world, date)) {
-                    if (d.isBefore(keepAfter.minusDays(TOMBSTONE_DAYS)) && !Files.exists(eventsFile(world, date))) {
-                        deleteTree(dayDir(world, date));
-                    }
-                    if (!Files.exists(eventsFile(world, date))) {
-                        continue;
-                    }
-                }
                 boolean isNewest = date.equals(newest.get(world));
                 // Today is never pruned, its events are still being written.
                 if (!d.isAfter(keepAfter) && !isNewest && d.isBefore(today)) {
@@ -330,23 +435,29 @@ public final class TimelineStore {
                 }
             }
         }
-        // Reference counts over every manifest that is left.
+        // Reference counts over every day that is left, each day counting a hash once for all its slots.
         Map<String, Integer> refs = new HashMap<>();
         Map<String, String> interned = new HashMap<>();
         for (String world : worlds()) {
-            for (String date : snapshotDates(world)) {
-                Manifest m = Manifest.read(dayDir(world, date).resolve(TILES));
+            Map<String, Set<String>> byDate = new TreeMap<>();
+            Map<String, Long> bytes = new HashMap<>();
+            for (String slot : snapshotSlots(world)) {
+                Manifest m = Manifest.read(worldDir(world).resolve(slot).resolve(TILES));
                 if (m == null) {
                     continue;
                 }
-                Set<String> hashes = new HashSet<>();
+                String date = Slots.date(slot);
+                Set<String> hashes = byDate.computeIfAbsent(date, k -> new HashSet<>());
                 for (String h : m.tiles().values()) {
                     hashes.add(interned.computeIfAbsent(h, k -> k));
                 }
-                for (String h : hashes) {
+                bytes.merge(date, slotBytes(world, slot), Long::sum);
+            }
+            for (Map.Entry<String, Set<String>> e : byDate.entrySet()) {
+                for (String h : e.getValue()) {
                     refs.merge(h, 1, Integer::sum);
                 }
-                days.add(new Day(world, date, dayDir(world, date), hashes, dayBytes(world, date)));
+                days.add(new Day(world, e.getKey(), worldDir(world), e.getValue(), bytes.getOrDefault(e.getKey(), 0L)));
             }
         }
         long[] collected = blobs.collect(refs.keySet());
@@ -367,7 +478,7 @@ public final class TimelineStore {
                 if (total <= maxBytes) {
                     break;
                 }
-                if (d.date().equals(newest.get(d.world()))) {
+                if (d.date().equals(newest.get(d.world())) || !LocalDate.parse(d.date()).isBefore(today)) {
                     continue;
                 }
                 long eventBytes = sizeOf(eventsFile(d.world(), d.date()));
@@ -406,8 +517,8 @@ public final class TimelineStore {
         return total;
     }
 
-    private long dayBytes(String world, String date) {
-        Path day = dayDir(world, date);
+    private long slotBytes(String world, String slot) {
+        Path day = worldDir(world).resolve(slot);
         return sizeOf(day.resolve(TILES)) + sizeOf(day.resolve(SUMMARY)) + sizeOf(day.resolve(STATS));
     }
 
@@ -420,25 +531,28 @@ public final class TimelineStore {
     }
 
     /**
-     * Removes the files of a day and leaves a tombstone when a snapshot was there. Returns true when
-     * anything was removed.
+     * Removes the files of a day, every slot of it and its events, and leaves a tombstone in each slot
+     * that held a snapshot. Returns true when anything was removed.
      */
     private boolean removeDay(String world, String date, String reason) throws IOException {
-        Path day = dayDir(world, date);
-        boolean hadSnapshot = hasSnapshot(world, date);
         boolean any = Files.deleteIfExists(eventsFile(world, date));
-        any |= Files.deleteIfExists(day.resolve(TILES));
-        any |= Files.deleteIfExists(day.resolve(SUMMARY));
-        any |= Files.deleteIfExists(day.resolve(STATS));
-        manifests.remove(world + "|" + date);
-        if (hadSnapshot) {
-            JsonObject t = new JsonObject();
-            t.addProperty("date", date);
-            t.addProperty("prunedAt", System.currentTimeMillis());
-            t.addProperty("reason", reason);
-            Json.writeAtomic(day.resolve(TOMBSTONE), Json.GSON.toJson(t));
-        } else if (Files.isDirectory(day) && !Files.isRegularFile(day.resolve(TOMBSTONE))) {
-            deleteTree(day);
+        for (String slot : slotsOf(world, date)) {
+            Path day = worldDir(world).resolve(slot);
+            boolean hadSnapshot = isSnapshotDir(world, slot);
+            any |= Files.deleteIfExists(day.resolve(TILES));
+            any |= Files.deleteIfExists(day.resolve(SUMMARY));
+            any |= Files.deleteIfExists(day.resolve(STATS));
+            manifests.remove(world + "|" + slot);
+            if (hadSnapshot) {
+                JsonObject t = new JsonObject();
+                t.addProperty("date", date);
+                t.addProperty("slot", slot);
+                t.addProperty("prunedAt", System.currentTimeMillis());
+                t.addProperty("reason", reason);
+                Json.writeAtomic(day.resolve(TOMBSTONE), Json.GSON.toJson(t));
+            } else if (Files.isDirectory(day) && !Files.isRegularFile(day.resolve(TOMBSTONE))) {
+                deleteTree(day);
+            }
         }
         return any;
     }
@@ -456,6 +570,15 @@ public final class TimelineStore {
         } catch (IOException | RuntimeException ignored) {
             // Tried again on the next prune.
         }
+    }
+
+    /** Snapshot slots held per world, for status. */
+    public Map<String, Integer> slotsHeld() {
+        Map<String, Integer> out = new TreeMap<>();
+        for (String w : worlds()) {
+            out.put(w, snapshotSlots(w).size());
+        }
+        return out;
     }
 
     /** Snapshot days held per world, for status. */

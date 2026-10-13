@@ -70,6 +70,28 @@ final class IsoRenderer {
      */
     static Result render(World world, IsoView v, ChunkFilter filter, ChunkBudget budget, boolean background,
                          long deadline, Palette c, java.util.function.LongConsumer loaded) throws InterruptedException {
+        Read r = read(world, v, filter, budget, background, deadline, c, loaded);
+        long t1 = System.nanoTime();
+        IsoRaster.Image img = IsoRaster.render(r.columns(), c, v.scale(), v.azimuth());
+        // The column records are dropped before the encode, so they can be collected while it runs.
+        r = new Read(null, r.print(), r.wanted(), r.read(), r.skipped(), r.t0());
+        long t2 = System.nanoTime();
+        return encode(img, r.skipped() > 0, r.wanted(), r.read(), r.skipped(), r.t0(), t1, t2, r.print());
+    }
+
+    /** The chunks of a view as read, before anything is drawn. */
+    record Read(Columns columns, IsoCache.Print print, int wanted, int read, int skipped, long t0) {
+        boolean partial() {
+            return skipped > 0;
+        }
+    }
+
+    /**
+     * Reads the chunks of the view into column records and their fingerprint without drawing them,
+     * the cheap half of a render. The daily key places use it to tell whether anything changed.
+     */
+    static Read read(World world, IsoView v, ChunkFilter filter, ChunkBudget budget, boolean background,
+                     long deadline, Palette c, java.util.function.LongConsumer loaded) throws InterruptedException {
         long t0 = System.nanoTime();
         int side = v.side();
         Columns a = new Columns(side * 32, (v.cx() - v.radius()) * 32, (v.cz() - v.radius()) * 32);
@@ -148,13 +170,7 @@ final class IsoRenderer {
             }
         }
         IsoCache.Print print = new IsoCache.Print(terrainPrint, imagePrint(world, v));
-        long t1 = System.nanoTime();
-        int wanted = want.size();
-        IsoRaster.Image img = IsoRaster.render(a, c, v.scale(), v.azimuth());
-        a = null;
-        loadedBefore = null;
-        long t2 = System.nanoTime();
-        return encode(img, skipped > 0, wanted, read, skipped, t0, t1, t2, print);
+        return new Read(a, print, want.size(), read, skipped, t0);
     }
 
     /** The place of a chunk in the fingerprint of a view, row by row from the north west corner. */

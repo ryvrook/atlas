@@ -4,6 +4,69 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
+## 1.2.0 - 2026-10-13
+
+This is Atlas 1.2.0, dated 2026-10-13. It shows more of what players build. The timeline keeps several
+snapshots a day, up to three key places are drawn from all four directions every day, and each address
+may hold more 3D views at once.
+
+### Upgrading
+
+- New settings are added with their defaults on the first start. They are `timeline.perDay` (`4`),
+  `isoViewsPerAddress` (`4`), `isoLargeViewsPerAddress` (`2`), `isoKeyPlaceLimit` (`3`) and
+  `iso.keyPlaces` (empty). Each fails closed like the rest, see Configuration in the README.
+- The default of `isoRequestsPerMinute` is now `20`. An existing `atlas.json` keeps the value it holds,
+  so set it to `20` by hand to get the new allowance.
+- The timeline now takes `timeline.perDay` snapshots a day, four by default at 04:00, 10:00, 16:00 and
+  22:00 with `timeline.hour` at 4. Set `timeline.perDay` to `1` for one snapshot a day as before. Each
+  snapshot is a slot named by its date and hour, such as `2026-10-13T16`, and gets a folder of that name.
+  Day folders written by 1.0 and 1.1 stay as they are and count as one slot of their day. A plain date
+  still works in every address and share link and means the last slot of that day.
+- Retention and the disk cap still count days. A pruned day loses all of its slots together. With four
+  slots a day the timeline holds about four times as many manifests and stats files, which are small.
+  The tile images are shared by every slot as before, so the disk use grows with what changed only.
+- `timeline` events from the event stream carry `slot` next to `date`, and the day list of
+  `GET /api/timeline/{world}` lists slots, see Changed.
+
+### Added
+
+- Key places. Up to `isoKeyPlaceLimit` places in `iso.keyPlaces`, each with a world, a position, a
+  radius (6 by default, 1 to 16), a label and a name. With the first snapshot of each day every key place
+  is drawn from all four directions at scale 2, lowered for a wide radius as usual, into
+  `iso/<label>-<azimuth>.png` of that slot. When nothing changed since the last render, which Atlas
+  learns by reading the chunks and comparing their fingerprint without drawing them, the pictures of that
+  render are linked into the new day instead of drawn again and the entries are marked unchanged.
+- `/atlas key add <world> <x> <z> <label> [radius] [name]`, `/atlas key remove <label>`,
+  `/atlas key list` and `/atlas key render <label>`, which draws a place now.
+- `GET`, `POST` and `DELETE /api/admin/keyplaces` for admins, by the admin token or a linked session with
+  the admin permission. Changes are written into `atlas.json` and apply at once.
+- A Key places section in the Admin tab with the list, a remove button and a form that starts from the
+  last spot right clicked on the map, or its middle. A right click offers Make this a key place to admins.
+- A Key places block at the top of the Timeline tab. Each place shows the picked direction for the day on
+  the slider, a strip of its four directions, Compare days with the divider, View live in 3D and Play,
+  which steps the place through every day held.
+- A Key places layer on the map for admins, a camera symbol per place with View in 3D.
+- `timeline.perDay`, `isoViewsPerAddress`, `isoLargeViewsPerAddress` and `isoKeyPlaceLimit`.
+
+### Changed
+
+- One address may hold `isoViewsPerAddress` 3D views in the render queue (4 by default, 2 before) and
+  `isoLargeViewsPerAddress` large ones waiting (2 by default, 1 before). The queue still holds 8 browser
+  views and admits 2 large ones at a time. `/atlas iso status` prints the allowances.
+- The default of `isoRequestsPerMinute` is 20 instead of 10.
+- The day list of `GET /api/timeline/{world}` has one row per slot with `slot`, `date`, `hour` and
+  `window`, and gains `perDay`, `hours` and `currentSlot`. Every route that took a date takes a slot.
+  The events of a slot are the hours of its day from its own hour to the next slot. `isoViews` entries of
+  key places carry `name`, `azimuth`, `scale`, `keyPlace`, `unchanged` and `sameAs`.
+- The timeline slider has a step per slot with the hour under the date, playback steps per slot, and
+  share links carry the slot as `t=2026-10-13T16`.
+- The 3D views of `iso.snapshots`, admin markers and key places are drawn once a day, with the first slot.
+  The other slots of the day show the same views.
+- A missed slot is taken five minutes after a start, only the latest one missed.
+- `/atlas timeline status` prints the schedule and the slots held.
+- The manifest of a slot names the slot before it in `previous`, and the export zip holds a folder per
+  slot next to the events of each day.
+
 ## 1.1.0 - 2026-10-13
 
 This is Atlas 1.1.0, dated 2026-10-13. It lets the separate Chronicle stats plugin share one login with

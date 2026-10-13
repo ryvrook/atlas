@@ -31,7 +31,8 @@ import java.util.logging.Level;
 
 /**
  * Isometric views. Renders run one at a time on the single Atlas-iso thread. Browsers may hold at
- * most QUEUE_LIMIT renders in the queue, each address at most IsoQueue.PER_ADDRESS of them, and a
+ * most QUEUE_LIMIT renders in the queue, each address at most isoViewsPerAddress of them with at most
+ * isoLargeViewsPerAddress large ones waiting, and a
  * new view from an address at its cap replaces the oldest of its views that has not started. At
  * most LARGE_LIMIT large views (wider than 17 by 17 chunks) are admitted at once, a further one
  * waits its turn with a countdown, and the thread rests LARGE_COOLDOWN_MS after a large one. Admin
@@ -106,6 +107,15 @@ public final class IsoService {
         public long renderedAt() {
             return entry.renderedAt();
         }
+
+        /** The fingerprint of the chunks as drawn, see KeyPlaces.digest. */
+        public long digest() {
+            return KeyPlaces.digest(result.print());
+        }
+    }
+
+    /** The fingerprint of the chunks of a view read without drawing it. partial is true when a chunk could not be read. */
+    public record Fingerprint(long digest, boolean partial, int read, int wanted) {
     }
 
     private static final class Job extends IsoQueue.Entry {
@@ -113,6 +123,8 @@ public final class IsoService {
         final CompletableFuture<Done> future = new CompletableFuture<>();
         /** A check of a stale cached view, drawn again only when its area changed. */
         final boolean refresh;
+        /** Set for a read of the chunks without a picture, the fingerprint of a key place. */
+        CompletableFuture<Fingerprint> printOnly;
         Task task;
 
         Job(String key, IsoView view, long bucket, String address) {
@@ -131,7 +143,8 @@ public final class IsoService {
     private final IsoCache cache;
     private final IsoRenderer.ChunkBudget budget;
     private final ThreadPoolExecutor exec;
-    private final IsoQueue queue = new IsoQueue(QUEUE_LIMIT, LARGE_LIMIT);
+    private final IsoQueue queue = new IsoQueue(QUEUE_LIMIT, LARGE_LIMIT, () -> cfg().isoViewsPerAddress(),
+            () -> cfg().isoLargeViewsPerAddress());
     private final Map<String, Long> failures = new ConcurrentHashMap<>();
     private final Set<String> dirty = ConcurrentHashMap.newKeySet();
     /** Chunks a render loaded, as world|cx|cz to the time until which their saves are ignored. */
@@ -198,6 +211,9 @@ public final class IsoService {
         }
         for (IsoQueue.Entry e : queue.all()) {
             ((Job) e).future.cancel(false);
+            if (((Job) e).printOnly != null) {
+                ((Job) e).printOnly.cancel(false);
+            }
         }
     }
 
@@ -407,6 +423,22 @@ public final class IsoService {
         return j.future;
     }
 
+    /**
+     * Reads the chunks of a view for its fingerprint without drawing it, as background work behind
+     * every browser view, like a snapshot render.
+     */
+    public CompletableFuture<Fingerprint> fingerprint(IsoView v) {
+        long b = bucket(System.currentTimeMillis());
+        String key = IsoCache.key(IsoCache.folder(v.world()), v, b) + "#print" + System.nanoTime();
+        Job j = new Job(key, v, b, null);
+        j.printOnly = new CompletableFuture<>();
+        queue.addDirect(j);
+        if (!execute(j)) {
+            j.printOnly.completeExceptionally(new RejectedExecutionException("Atlas is stopping"));
+        }
+        return j.printOnly;
+    }
+
     /** Hands a queued job to the render thread. False when the thread is stopping. */
     private boolean execute(Job j) {
         j.task = new Task(j);
@@ -459,6 +491,15 @@ public final class IsoService {
             if (world == null) {
                 throw new IllegalStateException("the world " + j.view.world() + " is not loaded");
             }
+            if (j.printOnly != null) {
+                IsoRenderer.Read r = IsoRenderer.read(world, j.view, filter(j.view.world()), budget, true,
+                        startedAt + DEADLINE_MS, palette(), idx -> ownLoads.put(j.view.world() + "|"
+                                + com.hypixel.hytale.math.util.ChunkUtil.xOfChunkIndex(idx) + "|"
+                                + com.hypixel.hytale.math.util.ChunkUtil.zOfChunkIndex(idx),
+                                System.currentTimeMillis() + OWN_LOAD_MS));
+                j.printOnly.complete(new Fingerprint(KeyPlaces.digest(r.print()), r.partial(), r.read(), r.wanted()));
+                return;
+            }
             if (j.refresh) {
                 Map<Long, Long> saved = cache.staleChunks(j.view, j.bucket);
                 if (saved.isEmpty()) {
@@ -507,7 +548,13 @@ public final class IsoService {
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             j.future.cancel(false);
+            if (j.printOnly != null) {
+                j.printOnly.cancel(false);
+            }
         } catch (Throwable t) {
+            if (j.printOnly != null) {
+                j.printOnly.completeExceptionally(t);
+            }
             failed.incrementAndGet();
             failures.put(j.key, System.currentTimeMillis());
             long now = System.currentTimeMillis();
@@ -599,7 +646,10 @@ public final class IsoService {
         List<String> out = new ArrayList<>();
         AtlasConfig c = cfg();
         out.add("Isometric views are " + (c.isoEnabled() ? "on" : "off") + ", radius up to " + c.isoMaxRadius()
-                + " chunks, " + c.isoRequestsPerMinute() + " new renders per minute and address.");
+                + " chunks, " + c.isoRequestsPerMinute() + " new renders per minute and address, "
+                + queue.perAddressCap() + " views per address in the queue with " + queue.largePerAddressCap()
+                + " large, " + QUEUE_LIMIT + " browser views in the queue at most with " + LARGE_LIMIT
+                + " large views admitted at once.");
         IsoQueue.Entry current = null;
         for (IsoQueue.Entry j : queue.all()) {
             if (j.startedAt() > 0) {

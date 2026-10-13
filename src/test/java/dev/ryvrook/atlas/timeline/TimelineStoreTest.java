@@ -29,7 +29,7 @@ class TimelineStoreTest {
             s.blobs().put(h, tiles[i]);
             map.put(Manifest.key(0, i, 0), h);
         }
-        String prev = s.previousDate(world, date.toString());
+        String prev = s.previousSlot(world, date.toString());
         Manifest p = prev == null ? null : s.manifest(world, prev);
         s.write(new Manifest(world, date.toString(), 1L, prev, false, 0, 0, map,
                 Manifest.diff(p == null ? null : p.tiles(), map)), null);
@@ -97,7 +97,7 @@ class TimelineStoreTest {
         TimelineStore s = new TimelineStore(dir);
         day(s, "a b", TODAY.minusDays(3), new byte[]{1});
         day(s, "a b", TODAY.minusDays(1), new byte[]{1});
-        assertEquals(TODAY.minusDays(3).toString(), s.previousDate("a b", TODAY.minusDays(1).toString()));
+        assertEquals(TODAY.minusDays(3).toString(), s.previousSlot("a b", TODAY.minusDays(1).toString()));
         assertEquals(List.of("a b"), s.worlds());
         Manifest m = s.manifest("a b", TODAY.minusDays(1).toString());
         assertNotNull(m);

@@ -9,9 +9,13 @@
   const map = A.map;
   const DAY = 86400000;
 
-  // ---- dates --------------------------------------------------------------
+  // ---- dates and slots ------------------------------------------------------
   // Timeline dates are server local ISO dates. They are handled as UTC midnights so no time zone moves a day.
-  const parseIso = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || "")); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : NaN; };
+  // A slot is a date and an hour such as 2026-10-13T16, one snapshot of the day. A plain date is a slot too, the
+  // only one of a day taken by Atlas 1.1 or older. parseIso reads the date of either.
+  const parseIso = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})(?:T\d{2})?$/.exec(String(s || "")); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : NaN; };
+  const hourOf = (s) => { const m = /T(\d{2})$/.exec(String(s || "")); return m ? Number(m[1]) : null; };
+  const hh = (h) => String(h).padStart(2, "0") + ":00";
   const isoOf = (t) => new Date(t).toISOString().slice(0, 10);
   const dayName = (s, weekday) => {
     const t = parseIso(s);
@@ -21,11 +25,17 @@
   };
 
   A.dayName = dayName;
+  // The hour of a slot as 16:00, empty for a plain date.
+  const hourName = A.slotHour = (s) => { const h = hourOf(s); return h == null ? "" : hh(h); };
+  // A slot for people, the day and, when the day holds more than one slot, its hour.
+  const slotName = A.slotName = (s, weekday) => dayName(s, weekday) + (hourOf(s) != null && perDayShown() ? ", " + hourName(s) : "");
+  const perDayShown = () => !!(T.info && (Number(T.info.perDay) > 1 || T.slots.some((x, i) => i > 0 && x.cal === T.slots[i - 1].cal && x.kind !== "missing")));
 
   // ---- state --------------------------------------------------------------
-  // index is the slot on the slider, -1 while the live map is shown. A slot is one calendar day from the first
-  // day held to today. Its kind is snap (a snapshot), events (events only, the map of the snapshot before it),
-  // pruned (removed by retention, a gap) or missing (nothing was kept that day, also a gap).
+  // index is the step on the slider, -1 while the live map is shown. A step is one slot of a day from the first
+  // day held to today, date naming the slot and cal its calendar day. A day with no slot at all is one step. Its kind
+  // is snap (a snapshot), events (events only, the map of the snapshot before it), pruned (removed by retention, a
+  // gap) or missing (nothing was kept that day, also a gap).
   const SPEEDS = [500, 1000, 2000];
   const T = A.tl = {
     world: null, info: null, error: null, slots: [], index: -1, playing: false, timer: null,
@@ -34,6 +44,10 @@
     stats: new Map(), events: new Map(), changed: new Map(), live: null, liveAt: 0, liveKey: "",
     want: null, off: new Set(A.store.get("tlOff", [])), seq: 0, statsWanted: false
   };
+  // Key places, see the Timeline tab below. az is the direction picked per place, shown the day a playing place is on.
+  const KAZ = [[0, "SE", "south east"], [90, "SW", "south west"], [180, "NW", "north west"], [270, "NE", "north east"]];
+  const K = { az: A.store.get("kpAz", {}), shown: {}, play: null };
+  if (!K.az || typeof K.az !== "object") K.az = {};
   const selectable = (s) => !!s && (s.kind === "snap" || s.kind === "events");
   const cur = () => (T.index >= 0 && T.index < T.slots.length ? T.slots[T.index] : null);
   const hasSnaps = () => T.slots.some((s) => s.kind === "snap");
@@ -44,7 +58,9 @@
 
   function buildSlots(info) {
     const days = (Array.isArray(info.days) ? info.days : []).filter((d) => d && !isNaN(parseIso(d.date)));
-    const by = new Map(days.map((d) => [d.date, d]));
+    const by = new Map();
+    for (const d of days) { if (!by.has(d.date)) by.set(d.date, []); by.get(d.date).push(d); }
+    for (const l of by.values()) l.sort((a, b) => String(a.slot || a.date) < String(b.slot || b.date) ? -1 : 1);
     const ends = days.map((d) => parseIso(d.date));
     const today = parseIso(info.today);
     if (!ends.length) return [];
@@ -56,13 +72,19 @@
     let lastSnap = null;
     for (let t = first; t <= last; t += DAY) {
       const date = isoOf(t);
-      const day = by.get(date) || null;
-      const kind = !day ? "missing" : day.pruned ? "pruned" : day.snapshot ? "snap" : "events";
-      if (kind === "snap") lastSnap = date;
-      slots.push({ date, day, kind, tiles: kind === "snap" ? date : kind === "events" ? lastSnap : null });
+      const list = by.get(date);
+      if (!list) { slots.push({ date, cal: date, hour: null, day: null, kind: "missing", tiles: null }); continue; }
+      for (const day of list) {
+        const id = Slots.valid(day.slot) ? day.slot : date;
+        const kind = day.pruned ? "pruned" : day.snapshot ? "snap" : "events";
+        if (kind === "snap") lastSnap = id;
+        slots.push({ date: id, cal: date, hour: day.hour != null ? Number(day.hour) : hourOf(id), day, kind, tiles: kind === "snap" ? id : kind === "events" ? lastSnap : null });
+      }
     }
     return slots;
   }
+
+  const Slots = { valid: (s) => !isNaN(parseIso(s)) };
 
   // ---- map layers ---------------------------------------------------------
   const changedGroup = L.layerGroup().addTo(map);
@@ -102,9 +124,9 @@
       if (T.want) {
         const w = T.want;
         T.want = null;
-        const j = T.slots.findIndex((s) => s.date === w);
+        const j = findSlot(w);
         if (selectable(T.slots[j])) { T.barOpen = true; select(j); }
-        else A.toast("The timeline of " + A.worldLabel(world) + " has nothing for " + dayName(w));
+        else A.toast("The timeline of " + A.worldLabel(world) + " has nothing for " + slotName(w));
       }
       if (T.statsWanted) queueStats();
       sync();
@@ -115,22 +137,31 @@
       sync();
     });
   };
-  // A shared link names a day before the days of its world are known, so it waits for them.
+  // The step of a slot, or for a plain date the last slot held that day, as links from Atlas 1.1 name a day.
+  function findSlot(w) {
+    let j = T.slots.findIndex((s) => s.date === w);
+    if (j < 0 && hourOf(w) == null) for (let i = 0; i < T.slots.length; i++) if (T.slots[i].cal === w && selectable(T.slots[i])) j = i;
+    return j;
+  }
+  // A shared link names a slot before the slots of its world are known, so it waits for them.
   A.timelineWant = (date) => {
     if (isNaN(parseIso(date))) return;
-    const j = T.info && state.world === T.world ? T.slots.findIndex((s) => s.date === date) : -1;
+    const j = T.info && state.world === T.world ? findSlot(date) : -1;
     if (selectable(T.slots[j])) { T.barOpen = true; select(j); } else T.want = date;
   };
   A.on("timelineDay", (d) => {
     if (!d || d.world !== state.world || !A.layerOn("timeline")) return;
     const shown = barShown();
-    A.loadTimeline().then(() => { if (shown && d.date) A.toast("A snapshot of " + dayName(d.date) + " was added to the timeline", "good"); });
+    A.loadTimeline().then(() => { if (shown && d.date) A.toast("A snapshot of " + slotName(d.slot || d.date) + " was added to the timeline", "good"); });
   });
 
   // ---- selecting a day ------------------------------------------------------
   function select(i) {
     const s = T.slots[i];
     if (!selectable(s)) return;
+    // The key places follow the slider again once a day is picked.
+    kpStop();
+    K.shown = {};
     const was = state.tlDate;
     T.index = i;
     state.tlDate = s.date;
@@ -148,6 +179,8 @@
   }
   function goLive(quiet) {
     stop();
+    kpStop();
+    K.shown = {};
     const was = !!state.tlDate;
     T.index = -1;
     state.tlDate = null;
@@ -493,7 +526,7 @@
       const b = row.querySelector("b");
       const t = v == null ? "none" : num(v, 0);
       if (b.textContent !== t) b.textContent = t;
-      b.title = at ? dayName(at) : "";
+      b.title = at ? slotName(at) : "";
       drawSpark(row.querySelector("canvas"), m);
     });
     const loading = T.slots.some((s) => s.day && s.day.stats && !T.stats.has(key(s.date)));
@@ -512,11 +545,14 @@
     range.max = String(n);
     range.value = String(T.index < 0 ? n : T.index);
     const label = s ? dayName(s.date, true) : "Live";
-    range.setAttribute("aria-valuetext", s ? label + (s.kind === "events" ? ", events only" : "") : "Live map");
-    $("tl-label").textContent = label;
+    // The hour of the slot sits under the date while the server keeps more than one snapshot a day.
+    const hour = s && perDayShown() ? hourName(s.date) : "";
+    range.setAttribute("aria-valuetext", s ? label + (hour ? ", " + hour : "") + (s.kind === "events" ? ", events only" : "") : "Live map");
+    const lh = esc(label) + (hour ? "<small class='tl-hour'>" + esc(hour) + "</small>" : "");
+    if ($("tl-label")._h !== lh) { $("tl-label").innerHTML = lh; $("tl-label")._h = lh; }
     $("tl-label").classList.toggle("past", !!s);
     const first = T.slots.find(selectable);
-    $("tl-first").textContent = first ? dayName(first.date) : "";
+    $("tl-first").textContent = first ? dayName(first.cal) : "";
     $("tl-speed").value = String(T.speed);
     const ch = $("tl-changed");
     ch.setAttribute("aria-pressed", String(T.changedOn));
@@ -544,8 +580,8 @@
       chip.innerHTML = A.icon("history", "sm") + "<span id='tl-chip-txt'></span><button class='btn small' id='tl-live'>Return to live</button>";
       $("tl-live").addEventListener("click", () => goLive());
     }
-    const note = s.kind === "events" ? (s.tiles ? "map of " + dayName(s.tiles) : "no map that day") : s.day && s.day.partial ? "some tiles from the day before" : "";
-    const h = "Viewing <b>" + esc(dayName(s.date, true)) + "</b>" + (note ? " <span class='muted'>" + esc(note) + "</span>" : "");
+    const note = s.kind === "events" ? (s.tiles ? "map of " + slotName(s.tiles) : "no map that day") : s.day && s.day.partial ? "some tiles from the snapshot before" : "";
+    const h = "Viewing <b>" + esc(slotName(s.date, true)) + "</b>" + (note ? " <span class='muted'>" + esc(note) + "</span>" : "");
     const t = $("tl-chip-txt");
     if (t._h !== h) { t.innerHTML = h; t._h = h; }
     chip.hidden = false;
@@ -622,7 +658,7 @@
     if (body.dataset.view !== "timeline") {
       body.dataset.view = "timeline";
       const speeds = SPEEDS.map((v) => "<option value='" + v + "'>" + (v / 1000) + " s a day</option>").join("");
-      body.innerHTML = A.head("Timeline", "<span class='badge' id='tl-badge'></span>") + "<div id='tl-msg'></div>" +
+      body.innerHTML = A.head("Timeline", "<span class='badge' id='tl-badge'></span>") + "<div id='tl-msg'></div><div id='tl-keys' class='kp-list' hidden></div>" +
         "<div id='tl-main'><div class='tl-ctl'>" +
         "<button class='icon-btn' id='tl-t-prev' aria-label='Previous day' title='Previous day (left arrow)'>" + A.icon("back") + "</button>" +
         "<button class='btn small primary' id='tl-t-play' aria-pressed='false'><svg class='ic sm' aria-hidden='true'><use href='#i-play'/></svg><span class='lbl'>Play</span></button>" +
@@ -641,6 +677,7 @@
       $("tl-t-speed").addEventListener("change", (e) => setSpeed(e.target.value));
       $("tl-t-changed").addEventListener("click", () => setChanged(!T.changedOn));
       $("tl-t-live").addEventListener("click", () => goLive());
+      $("tl-keys").addEventListener("click", onKeys);
       $("tl-sum").addEventListener("click", (e) => {
         const b = e.target.closest("[data-isod]");
         if (b) openIsoDay.apply(null, JSON.parse(b.dataset.isod));
@@ -714,7 +751,7 @@
     if (!s) {
       const last = T.slots.slice().reverse().find((x) => x.kind === "snap");
       let h = "<div class='note'><span class='badge good'>live</span> The map as it is now.";
-      if (last) h += " The newest snapshot is of " + esc(dayName(last.date)) + (last.day.takenAt ? ", taken " + esc(A.stamp(last.day.takenAt)) : "") + ".";
+      if (last) h += " The newest snapshot is of " + esc(slotName(last.date)) + (last.day.takenAt ? ", taken " + esc(A.stamp(last.day.takenAt)) : "") + ".";
       if (info.nextRunAt) h += " The next one is due " + esc(A.stamp(info.nextRunAt)) + ".";
       h += " Pick a day on the slider or press play.</div>";
       const withViews = T.slots.slice().reverse().find((x) => x.kind === "snap" && isoViewsOf(x).length);
@@ -726,7 +763,7 @@
     let h = "<div class='tiles'><div class='tile'><b>" + (s.kind === "snap" ? num(d.tiles, 0) : "none") + "</b><span>Tiles</span></div>" +
       "<div class='tile'><b>" + (s.kind === "snap" ? (ch && ch.first ? "first" : num(d.changed, 0)) : "none") + "</b><span>Changed</span></div>" +
       "<div class='tile'><b>" + num(d.events || 0, 0) + "</b><span>Events</span></div></div>";
-    if (s.kind === "events") h += "<div class='note'>No snapshot was taken that day. " + (s.tiles ? "The map shows the snapshot of " + esc(dayName(s.tiles)) + "." : "There is no earlier map to show.") + "</div>";
+    if (s.kind === "events") h += "<div class='note'>No snapshot was taken that day. " + (s.tiles ? "The map shows the snapshot of " + esc(slotName(s.tiles)) + "." : "There is no earlier map to show.") + "</div>";
     if (d.partial) h += "<div class='note'><span class='badge warn'>partial</span> Some tiles were being redrawn during the snapshot and show the day before.</div>";
     if (st) {
       const kv = [["Taken", st.takenAt ? A.stamp(st.takenAt) : null], ["Explored chunks", num(st.exploredChunks, 0)], ["Players seen", num(st.playersSeen, 0)], ["Peak online", num(st.peakOnline, 0)], ["Online at the snapshot", num(st.onlineNow, 0)],
@@ -746,7 +783,11 @@
   // Views drawn with a day's snapshot, as thumbnails that open in the 3D lightbox. The images answer 403 unless
   // the viewer may see terrain and iso, so they are only shown then. A past day's image never changes.
   const isoShown = () => A.layerOn("terrain") && state.layers.iso !== false;
-  const isoViewsOf = (s) => isoShown() && s && s.day && !s.day.pruned && Array.isArray(s.day.isoViews) ? s.day.isoViews.filter((v) => v && v.label && v.file) : [];
+  // Every view of a slot, key places included. The thumbnails leave key places out, they have a block of their own.
+  const allViewsOf = (s) => isoShown() && s && s.day && !s.day.pruned && Array.isArray(s.day.isoViews) ? s.day.isoViews.filter((v) => v && v.label && v.file) : [];
+  const isoViewsOf = (s) => allViewsOf(s).filter((v) => !v.keyPlace);
+  // One step per day for views, since every slot of a day shows the views drawn with its first slot.
+  const viewDays = () => { const seen = new Set(); return T.slots.filter((x) => x.kind === "snap" && !seen.has(x.cal) && (seen.add(x.cal), true)); };
   // Admin markers are drawn as marker-<id>, named after the marker when the admin layer is on this page.
   function isoLabel(label) {
     const m = /^marker-(.+)$/.exec(label);
@@ -758,16 +799,166 @@
   function isoHtml(s, latest) {
     const views = isoViewsOf(s);
     if (!views.length) return "";
-    return "<h3 class='sub'>" + esc(latest ? "3D views of " + dayName(s.date) : "3D views of the day") + "</h3><div class='iso-thumbs'>" + views.map((v) =>
-      "<button class='iso-thumb' data-isod='" + esc(JSON.stringify([s.date, v.label])) + "' aria-label='" + esc("Open the 3D view " + isoLabel(v.label) + " of " + dayName(s.date)) + "'>" +
+    return "<h3 class='sub'>" + esc(latest ? "3D views of " + dayName(s.cal) : "3D views of the day") + "</h3><div class='iso-thumbs'>" + views.map((v) =>
+      "<button class='iso-thumb' data-isod='" + esc(JSON.stringify([s.date, v.label])) + "' aria-label='" + esc("Open the 3D view " + isoLabel(v.label) + " of " + dayName(s.cal)) + "'>" +
       "<img src='" + esc(v.file) + "' alt='' loading='lazy' decoding='async'><span>" + esc(isoLabel(v.label)) + "</span></button>").join("") + "</div>";
   }
   function openIsoDay(date, label) {
     const s = T.slots.find((x) => x.date === date);
     const v = isoViewsOf(s).find((x) => x.label === label);
     if (!v || !A.openIsoDay) return;
-    const days = T.slots.filter((x) => x.date !== date).map((x) => { const o = isoViewsOf(x).find((y) => y.label === label); return o ? { date: x.date, file: o.file } : null; }).filter(Boolean);
-    A.openIsoDay({ world: state.world, label, date, file: v.file, x: v.x, z: v.z, radius: v.radius, title: isoLabel(label), days });
+    const cal = s ? s.cal : date;
+    const days = viewDays().filter((x) => x.cal !== cal).map((x) => { const o = isoViewsOf(x).find((y) => y.label === label); return o ? { date: x.cal, file: o.file } : null; }).filter(Boolean);
+    A.openIsoDay({ world: state.world, label, date: cal, file: v.file, x: v.x, z: v.z, radius: v.radius, title: isoLabel(label), days });
+  }
+
+  // ---- key places --------------------------------------------------------------
+  // The places the server draws from all four directions every day. Each shows the picked direction for the day on
+  // the slider, or the newest day while the map is live, a strip of its four directions, and buttons to compare two
+  // days with the divider, open the live 3D view and play the place through every day held.
+  function keyPlaces() {
+    const out = new Map();
+    for (const d of viewDays()) {
+      for (const v of allViewsOf(d)) {
+        if (!v.keyPlace || !KAZ.some((a) => a[0] === Number(v.azimuth))) continue;
+        let p = out.get(v.label);
+        if (!p) { p = { label: v.label, days: [] }; out.set(v.label, p); }
+        Object.assign(p, { name: v.name && v.name !== v.label ? v.name : A.keyName ? A.keyName({ label: v.label }) : v.label, x: v.x, z: v.z, radius: v.radius });
+        let day = p.days.find((x) => x.cal === d.cal);
+        if (!day) { day = { cal: d.cal, views: {} }; p.days.push(day); }
+        day.views[Number(v.azimuth)] = v;
+      }
+    }
+    return Array.from(out.values());
+  }
+  const kpAz = (p) => KAZ.some((a) => a[0] === Number(K.az[p.label])) ? Number(K.az[p.label]) : 0;
+  function kpDay(p) {
+    const want = K.shown[p.label];
+    if (want) { const d = p.days.find((x) => x.cal === want); if (d) return d; }
+    const s = cur();
+    if (s) { let best = null; for (const d of p.days) if (d.cal <= s.cal) best = d; return best || p.days[0]; }
+    return p.days[p.days.length - 1];
+  }
+  const kpDir = (az) => KAZ.find((a) => a[0] === az) || KAZ[0];
+  function keysHtml(list) {
+    if (!list.length) return "";
+    return "<h3 class='sub'>" + A.icon("camera", "sm") + "Key places</h3>" + list.map((p) => {
+      const nm = esc(p.name);
+      return "<section class='kp' data-kp='" + esc(p.label) + "' aria-label='" + esc("Key place " + p.name) + "'>" +
+        "<div class='kp-head'><b class='grow'>" + nm + "</b><span class='badge' data-kp-day></span><span class='badge good' data-kp-same hidden></span></div>" +
+        "<button class='kp-big' data-kp-open><img data-kp-img alt='' decoding='async'><span class='kp-none' data-kp-none hidden>No picture from this side that day</span></button>" +
+        "<div class='kp-dirs' role='group' aria-label='" + esc("Direction to look at " + p.name + " from") + "'>" + KAZ.map((a) =>
+          "<button data-kp-az='" + a[0] + "' aria-label='" + esc("Look from the " + a[2]) + "' title='" + esc("From the " + a[2]) + "'><img alt='' loading='lazy' decoding='async'><span>" + a[1] + "</span></button>").join("") + "</div>" +
+        "<div class='kp-acts'><button class='btn small primary' data-kp-play aria-pressed='false'><svg class='ic sm' aria-hidden='true'><use href='#i-play'/></svg><span class='lbl'>Play</span></button>" +
+        "<button class='btn small' data-kp-cmp>" + A.icon("history", "sm") + "Compare days</button>" +
+        (A.isoOk && A.isoOk() ? "<button class='btn small' data-kp-live>" + A.icon("cube", "sm") + "View live in 3D</button>" : "") + "</div></section>";
+    }).join("");
+  }
+  // The parts that change while playing or turning are set in place, so the picture never blinks.
+  function paintKp(el, p) {
+    const d = kpDay(p);
+    const az = kpAz(p);
+    const v = d && d.views[az];
+    const img = el.querySelector("[data-kp-img]");
+    const want = v ? new URL(v.file, location.href).href : "";
+    if (want && img.src !== want) img.src = want;
+    img.hidden = !v;
+    el.querySelector("[data-kp-none]").hidden = !!v;
+    const dir = kpDir(az);
+    const big = el.querySelector("[data-kp-open]");
+    big.disabled = !v;
+    big.setAttribute("aria-label", "Open " + p.name + " from the " + dir[2] + (d ? " on " + dayName(d.cal) : "") + " in the 3D view");
+    const db = el.querySelector("[data-kp-day]");
+    const dt = d ? dayName(d.cal) + ", " + dir[1] : "";
+    if (db.textContent !== dt) db.textContent = dt;
+    const same = el.querySelector("[data-kp-same]");
+    const sameDay = v && v.unchanged && v.sameAs && String(v.sameAs).slice(0, 10) !== d.cal ? String(v.sameAs).slice(0, 10) : "";
+    same.hidden = !sameDay;
+    if (sameDay) same.textContent = "unchanged since " + dayName(sameDay);
+    el.querySelectorAll("[data-kp-az]").forEach((b) => {
+      const a = Number(b.dataset.kpAz);
+      b.setAttribute("aria-pressed", String(a === az));
+      const tv = d && d.views[a];
+      const ti = b.querySelector("img");
+      const tw = tv ? new URL(tv.file, location.href).href : "";
+      if (tw && ti.src !== tw) ti.src = tw;
+      ti.hidden = !tv;
+      b.disabled = !tv;
+    });
+    const play = el.querySelector("[data-kp-play]");
+    const on = !!(K.play && K.play.label === p.label);
+    play.setAttribute("aria-pressed", String(on));
+    play.setAttribute("aria-label", (on ? "Pause " : "Play ") + p.name + " through the days held");
+    play.querySelector("use").setAttribute("href", on ? "#i-pause" : "#i-play");
+    play.querySelector(".lbl").textContent = on ? "Pause" : "Play";
+    play.disabled = p.days.length < 2;
+    el.querySelector("[data-kp-cmp]").disabled = p.days.filter((x) => x.views[az]).length < 2 || !v;
+  }
+  let kpList = [];
+  function drawKeys() {
+    const box = $("tl-keys");
+    if (!box) return;
+    kpList = available() ? keyPlaces() : [];
+    const sig = kpList.map((p) => p.label + ":" + p.name).join("|") + "|" + (A.isoOk && A.isoOk());
+    if (box._sig !== sig) { box._sig = sig; box.innerHTML = keysHtml(kpList); }
+    box.hidden = !kpList.length;
+    for (const p of kpList) { const el = box.querySelector("[data-kp='" + CSS.escape(p.label) + "']"); if (el) paintKp(el, p); }
+  }
+  function kpStop() {
+    if (!K.play) return;
+    clearTimeout(K.play.timer);
+    K.play = null;
+    drawKeys();
+  }
+  // Play steps the place through every day held in the picked direction, from the day shown, and stops at the newest.
+  function kpPlay(p) {
+    if (K.play && K.play.label === p.label) { kpStop(); return; }
+    kpStop();
+    const days = p.days;
+    let i = days.indexOf(kpDay(p));
+    if (i < 0 || i >= days.length - 1) i = 0;
+    K.shown[p.label] = days[i].cal;
+    K.play = { label: p.label, timer: 0 };
+    const stepKp = () => {
+      if (!K.play || K.play.label !== p.label) return;
+      i++;
+      if (i >= days.length) { kpStop(); return; }
+      K.shown[p.label] = days[i].cal;
+      const nx = days[i + 1] && days[i + 1].views[kpAz(p)];
+      if (nx) { const pre = new Image(); pre.src = nx.file; }
+      drawKeys();
+      if (i >= days.length - 1) { kpStop(); return; }
+      K.play.timer = setTimeout(stepKp, T.speed);
+    };
+    drawKeys();
+    K.play.timer = setTimeout(stepKp, T.speed);
+  }
+  function kpOpen(p, compare) {
+    const d = kpDay(p);
+    const az = kpAz(p);
+    const v = d && d.views[az];
+    if (!v || !A.openIsoDay) return;
+    const days = p.days.filter((x) => x !== d && x.views[az]).map((x) => ({ date: x.cal, file: x.views[az].file }));
+    let cmp = null;
+    if (compare && days.length) {
+      const before = days.filter((x) => x.date < d.cal);
+      cmp = (before.length ? before[before.length - 1] : days[0]).date;
+    }
+    A.openIsoDay({ world: state.world, label: p.label + "-" + az, date: d.cal, file: v.file, x: p.x, z: p.z, radius: p.radius, az,
+      title: p.name + ", from the " + kpDir(az)[2], days, cmp });
+  }
+  function onKeys(e) {
+    const el = e.target.closest("[data-kp]");
+    if (!el) return;
+    const p = kpList.find((x) => x.label === el.dataset.kp);
+    if (!p) return;
+    const b = e.target.closest("button");
+    if (!b || b.disabled) return;
+    if (b.dataset.kpAz != null) { K.az[p.label] = Number(b.dataset.kpAz); A.store.set("kpAz", K.az); drawKeys(); }
+    else if (b.hasAttribute("data-kp-play")) kpPlay(p);
+    else if (b.hasAttribute("data-kp-cmp")) { kpStop(); kpOpen(p, true); }
+    else if (b.hasAttribute("data-kp-open")) { kpStop(); kpOpen(p, false); }
+    else if (b.hasAttribute("data-kp-live") && A.openIso) A.openIso({ world: state.world, x: p.x, z: p.z, r: p.radius, exactR: true, az: kpAz(p), title: p.name });
   }
 
   function feedRow(e, past) {
@@ -782,7 +973,9 @@
     const past = !!s;
     const d = s ? T.events.get(key(s.date)) : T.live;
     const hEl = $("tl-feed-h");
-    const ht = s ? "Events of " + dayName(s.date, true) : "Events in the last 24 hours";
+    const w = s && s.day && Array.isArray(s.day.window) ? s.day.window : null;
+    const part = w && (w[0] > 0 || w[1] < 24) ? ", " + hh(w[0]) + " to " + (w[1] >= 24 ? "midnight" : hh(w[1])) : "";
+    const ht = s ? "Events of " + dayName(s.cal, true) + part : "Events in the last 24 hours";
     if (hEl.textContent !== ht) hEl.textContent = ht;
     const all = d && Array.isArray(d.items) ? d.items : [];
     // Chips for the groups this list holds, plus any that are switched off, so a group can always be switched back.
@@ -815,7 +1008,7 @@
     const msg = $("tl-msg"), main = $("tl-main");
     const badge = $("tl-badge");
     const s = cur();
-    const bt = s ? dayName(s.date) : available() ? "Live" : "";
+    const bt = s ? slotName(s.date) : available() ? "Live" : "";
     if (badge.textContent !== bt) badge.textContent = bt;
     badge.hidden = !bt;
     badge.classList.toggle("accent", !!s);
@@ -852,6 +1045,7 @@
       drawSparks();
       if (A.drawTlExport) A.drawTlExport($("tl-export"));
     }
+    if (ready) drawKeys(); else if ($("tl-keys")) $("tl-keys").hidden = true;
     if (feedOk) drawFeed();
   }
   const drawTabSoon = A.throttle(() => drawTab(), 150);

@@ -32,7 +32,7 @@ import java.util.function.Supplier;
  *   <li>api/iso, what the server allows</li>
  *   <li>api/iso/{world} with x, z, r, az and s, an isometric view</li>
  *   <li>api/iso/{world}/marker/{markerId} with layer, r, az and s, the view around a marker</li>
- *   <li>api/timeline/{world}/{date}/iso/{label}.png, a daily isometric view</li>
+ *   <li>api/timeline/{world}/{slot}/iso/{label}.png, a daily isometric view, {label}-{azimuth}.png for a key place</li>
  *   <li>api/timeline/{world}/export with from and to, handed to TimelineRoutes</li>
  * </ul>
  *
@@ -290,15 +290,23 @@ public final class IsoRoutes {
             error(ex, 403, "This layer is not visible to you.");
             return;
         }
-        if (!TimelineStore.validDate(date)) {
-            error(ex, 400, "The date must look like 2026-01-31.");
+        if (!TimelineStore.validSlot(date)) {
+            error(ex, 400, "The slot must look like 2026-01-31T16, or a date such as 2026-01-31.");
             return;
         }
         String label = file.endsWith(".png") ? file.substring(0, file.length() - 4) : null;
-        Path f = AtlasConfig.validIsoLabel(label) ? IsoSnapshots.file(t.store().dayDir(world, date), label) : null;
+        Path dir = t.store().dayDir(world, date);
+        if (IsoSnapshots.validFileLabel(label) && !Files.isRegularFile(IsoSnapshots.file(dir, label))) {
+            // A slot without views of its own shows the views of its day.
+            Path first = IsoSnapshots.dayViewsDir(t.store().worldDir(world), dev.ryvrook.atlas.timeline.Slots.date(date));
+            if (first != null) {
+                dir = first;
+            }
+        }
+        Path f = IsoSnapshots.validFileLabel(label) ? IsoSnapshots.file(dir, label) : null;
         byte[] data;
         try {
-            data = f == null || !IsoSnapshots.dayHeld(t.store().dayDir(world, date)) ? null : Files.readAllBytes(f);
+            data = f == null || !IsoSnapshots.dayHeld(dir) || !Files.isRegularFile(f) ? null : Files.readAllBytes(f);
         } catch (IOException e) {
             data = null;
         }
@@ -306,7 +314,7 @@ public final class IsoRoutes {
             error(ex, 404, "There is no isometric view with that label on that day.");
             return;
         }
-        boolean past = date.compareTo(t.today()) < 0;
+        boolean past = dev.ryvrook.atlas.timeline.Slots.date(date).compareTo(t.today()) < 0;
         png(ex, data, dev.ryvrook.atlas.tiles.TileService.etag(data),
                 past ? "public, max-age=31536000, immutable" : "public, max-age=300", false);
     }

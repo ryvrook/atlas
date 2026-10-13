@@ -23,7 +23,7 @@ import java.util.regex.Pattern;
  *
  * <p>A tile that is being written while it is read is skipped. That is a tile with a temporary
  * file next to it, or one whose size, time or identity changed between the look before and after
- * the read. A skipped tile keeps the hash it had in the earlier snapshot of the same day or the day
+ * the read. A skipped tile keeps the hash it had in the earlier snapshot of the same slot or the slot
  * before, and the manifest is marked partial.
  */
 final class SnapshotJob {

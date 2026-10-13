@@ -730,6 +730,10 @@ public final class ApiServer {
                 handleLink(ex);
                 return;
             }
+            if ("admin".equals(head)) {
+                handleAdmin(ex, method, parts);
+                return;
+            }
             if (!"GET".equals(method) && !"HEAD".equals(method)) {
                 ex.getResponseHeaders().set("Allow", "GET, HEAD");
                 error(ex, 405, "Only GET is allowed here.");
@@ -1030,6 +1034,79 @@ public final class ApiServer {
             }
         }
         return null;
+    }
+
+    /**
+     * api/admin, the routes that change server settings from the Admin tab. Admins only, by the admin
+     * token or a linked session with the admin permission. The as parameter is ignored here. A
+     * change sent with a session cookie must come from a page of this map, so a request whose Origin
+     * names another site is refused. The body is JSON of at most 4 KB.
+     */
+    private void handleAdmin(HttpExchange ex, String method, List<String> parts) throws IOException {
+        String address = clientAddress(ex);
+        String given = givenToken(ex.getRequestHeaders());
+        if (given != null && atlas.links().blocked(address)) {
+            ex.getResponseHeaders().set("Retry-After", "60");
+            error(ex, 429, "Too many attempts. Wait a minute and try again.");
+            return;
+        }
+        boolean tokenAdmin = tokenAdmin(given);
+        if (given != null && !tokenAdmin) {
+            atlas.links().rateLimited(address);
+        }
+        boolean write = !"GET".equals(method) && !"HEAD".equals(method);
+        if (write && !tokenAdmin && !sameOrigin(ex)) {
+            error(ex, 403, "Changes are only accepted from the map itself.");
+            return;
+        }
+        String body = null;
+        if ("POST".equals(method)) {
+            String type = ex.getRequestHeaders().getFirst("Content-Type");
+            if (type == null || !type.toLowerCase(java.util.Locale.ROOT).startsWith("application/json")) {
+                error(ex, 415, "Send the change as JSON.");
+                return;
+            }
+            body = new String(ex.getRequestBody().readNBytes(4096), StandardCharsets.UTF_8);
+        }
+        Viewer viewer = atlas.viewer(session(ex), tokenAdmin, null);
+        Atlas.ApiResult r = dev.ryvrook.atlas.iso.KeyPlaceRoutes.handle(atlas, method, parts, body, viewer);
+        if (r == null) {
+            error(ex, 404, "Not found.");
+            return;
+        }
+        if (r.status() == 405) {
+            ex.getResponseHeaders().set("Allow", "GET, HEAD, POST, DELETE");
+        }
+        json(ex, r.status(), r.body());
+    }
+
+    /**
+     * True when the request names no Origin, or one whose host and port are the Host the request was
+     * sent to (or the forwarded host behind a trusted proxy).
+     */
+    private boolean sameOrigin(HttpExchange ex) {
+        String origin = ex.getRequestHeaders().getFirst("Origin");
+        if (origin == null) {
+            return true;
+        }
+        String authority;
+        try {
+            authority = java.net.URI.create(origin.trim()).getRawAuthority();
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+        if (authority == null) {
+            return false;
+        }
+        String host = ex.getRequestHeaders().getFirst("Host");
+        if (host != null && host.trim().equalsIgnoreCase(authority)) {
+            return true;
+        }
+        String peer = ex.getRemoteAddress() == null || ex.getRemoteAddress().getAddress() == null
+                ? null : ex.getRemoteAddress().getAddress().getHostAddress();
+        String forwarded = ex.getRequestHeaders().getFirst("X-Forwarded-Host");
+        return forwarded != null && peer != null && atlas.proxies().trusts(peer)
+                && forwarded.split(",")[0].trim().equalsIgnoreCase(authority);
     }
 
     private void handleLink(HttpExchange ex) throws IOException {
