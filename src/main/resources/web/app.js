@@ -238,6 +238,7 @@
   // Data that does not depend on the world. The faction list is fetched by the views and search that use it.
   function loadShared(render) {
     A.loadNations();
+    if (A.loadIsoCaps) A.loadIsoCaps();
     loadActivity();
     state.factionsStale = true;
     if (render) A.render();
@@ -320,18 +321,40 @@
   }
   $("link-cancel").addEventListener("click", closeLink);
   $("link-code").addEventListener("input", (e) => { e.target.value = e.target.value.replace(/[^0-9a-z]/gi, "").toUpperCase().slice(0, 6); });
-  $("link-form").addEventListener("submit", (e) => {
-    e.preventDefault();
+  // loud also shows a failure as a toast, for a code that came in the address rather than from typing.
+  function submitLink(loud) {
     const code = $("link-code").value.trim();
-    if (code.length !== 6) { $("link-error").textContent = "The code has six characters."; return; }
+    const fail = (t) => { $("link-error").textContent = t; if (loud) A.toast(t, "bad"); };
+    if (code.length !== 6) { fail("The code has six characters."); return; }
     postLink({ code })
       .then((r) => r.json().catch(() => ({})).then((d) => ({ ok: r.ok, d })))
       .then(({ ok, d }) => {
-        if (!ok) { $("link-error").textContent = d.error || "That did not work. Check the code and try again."; return; }
+        if (!ok) { fail(d.error || "That did not work. Check the code and try again."); return; }
         closeLink();
         boot(true).then((ok) => ok && A.toast("Linked" + (state.viewer && state.viewer.name ? " as " + state.viewer.name : ""), "good"));
-      }).catch(() => { $("link-error").textContent = "The server could not be reached."; });
-  });
+      }).catch(() => fail("The server could not be reached."));
+  }
+  $("link-form").addEventListener("submit", (e) => { e.preventDefault(); submitLink(false); });
+  // The link message in game opens the map with ?code=. The code leaves the address at once, so a reload or a
+  // copied address never sends it again, and it is sent as soon as the map has loaded.
+  let urlCode = null;
+  try {
+    const q = new URLSearchParams(location.search);
+    if (q.has("code")) {
+      urlCode = String(q.get("code") || "").replace(/[^0-9a-z]/gi, "").toUpperCase().slice(0, 6);
+      q.delete("code");
+      const rest = q.toString();
+      history.replaceState(null, "", location.pathname + (rest ? "?" + rest : "") + location.hash);
+    }
+  } catch (e) { /* the address stays as it was */ }
+  function linkFromUrl() {
+    if (urlCode == null) return;
+    const code = urlCode;
+    urlCode = null;
+    openLink();
+    $("link-code").value = code;
+    submitLink(true);
+  }
 
   // ---- event stream -------------------------------------------------------
   let es = null;
@@ -572,8 +595,10 @@
   document.addEventListener("keydown", (e) => {
     const t = e.target;
     const typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
+    // An open dialog, the link form or a 3D view, takes Esc and every other key for itself.
+    const dialog = !!document.querySelector("dialog[open]");
     if (e.key === "Escape") {
-      if (dlg.open) return;
+      if (dialog) return;
       if (!$("world-menu").hidden) { closeWorldMenu(); return; }
       if (!$("account-menu").hidden) { closeAccountMenu(); return; }
       if (A.clearTools()) return;
@@ -581,7 +606,7 @@
       if (narrow() && A.panelOpen()) A.setPanel(false);
       return;
     }
-    if (typing || e.metaKey || e.ctrlKey || e.altKey || dlg.open) return;
+    if (typing || e.metaKey || e.ctrlKey || e.altKey || dialog) return;
     if (e.key === "/") { e.preventDefault(); focusSearch(); }
     else if (e.key === "f") A.findMe();
     else if (e.key === "l") A.togglePanel();
@@ -611,6 +636,8 @@
         if (byUrl && q.has("x") && q.has("z")) view = { x: +q.get("x"), z: +q.get("z"), zoom: q.has("zoom") ? +q.get("zoom") : null };
         // A shared link with t opens that day of the timeline once the days of the world are known.
         if (byUrl && q.get("t") && A.timelineWant) A.timelineWant(q.get("t"));
+        // A shared 3D view opens once api/iso has said views are allowed.
+        if (q.get("iso") && A.isoWant) A.isoWant(q.get("iso"));
       } else {
         const c = A.fromLatLng(map.getCenter());
         view = { x: c.x, z: c.z, zoom: map.getZoom() };
@@ -620,6 +647,7 @@
       loadShared(!!again);
       booted = true;
       showHint();
+      if (!again) linkFromUrl();
       return true;
     }).catch((e) => {
       if (!A.isServerError(e)) { booted = true; A.reportBug(e); return false; }

@@ -59,6 +59,11 @@ public final class TimelineRoutes {
         return new Atlas.ApiResult(status, Payloads.error(message));
     }
 
+    /** True for api/timeline/{world}/export, which streams a zip and is reached through IsoRoutes. */
+    public static boolean isExport(List<String> parts) {
+        return parts.size() == 3 && "timeline".equals(parts.get(0)) && "export".equals(parts.get(2));
+    }
+
     /** True for api/timeline/{world}/{date}/tiles/{zoom}/{x}/{z}.png, which ApiServer serves as an image. */
     public static boolean isTile(List<String> parts) {
         return parts.size() == 7 && "timeline".equals(parts.get(0)) && "tiles".equals(parts.get(3));
@@ -238,6 +243,7 @@ public final class TimelineRoutes {
             d.addProperty("partial", sum != null && Json.bool(sum, "partial"));
             d.addProperty("events", t.events().count(world, date));
             d.addProperty("stats", store.hasStats(world, date));
+            d.add("isoViews", dev.ryvrook.atlas.iso.IsoSnapshots.views(world, date, store.dayDir(world, date)));
             days.add(d);
         }
         o.add("days", days);
@@ -499,5 +505,205 @@ public final class TimelineRoutes {
     public String today() {
         Timeline t = timeline.get();
         return t == null ? LocalDate.now().toString() : t.today();
+    }
+
+    // ---- export ------------------------------------------------------------
+
+    /** Longest range of one export, in days. */
+    static final int MAX_EXPORT_DAYS = 90;
+    private final java.util.concurrent.atomic.AtomicBoolean exporting = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** Why a from and to pair cannot be exported, or null when it can. Both are required ISO dates. */
+    static String exportRangeError(String from, String to) {
+        if (from == null || to == null || !TimelineStore.validDate(from) || !TimelineStore.validDate(to)) {
+            return "Give from and to as dates such as 2026-01-31.";
+        }
+        LocalDate a = LocalDate.parse(from);
+        LocalDate b = LocalDate.parse(to);
+        if (b.isBefore(a)) {
+            return "The date from must not come after to.";
+        }
+        if (java.time.temporal.ChronoUnit.DAYS.between(a, b) + 1 > MAX_EXPORT_DAYS) {
+            return "An export covers at most " + MAX_EXPORT_DAYS + " days.";
+        }
+        return null;
+    }
+
+    /** Takes the single export slot. False while another export runs. */
+    boolean beginExport() {
+        return exporting.compareAndSet(false, true);
+    }
+
+    void endExport() {
+        exporting.set(false);
+    }
+
+    /**
+     * GET api/timeline/{world}/export?from=&to=, admins only. Streams a zip of every day in the range
+     * with its tiles.json, stats.json, events.jsonl and isometric views, and every tile image those
+     * days use once under blobs/. Nothing is held in memory but the list of image hashes. One export
+     * runs at a time, a second answers 409. ApiServer counts it against tileRequestsPerMinute per address.
+     */
+    public void export(com.sun.net.httpserver.HttpExchange ex, Viewer v, String world, Map<String, String> query)
+            throws IOException {
+        Atlas.ApiResult g = gate(v, world, "timeline");
+        if (g == null && !v.admin()) {
+            g = error(403, "Only admins may export the timeline.");
+        }
+        String from = query.get("from");
+        String to = query.get("to");
+        String bad = g == null ? exportRangeError(from, to) : null;
+        if (g == null && bad != null) {
+            g = error(400, bad);
+        }
+        if (g == null && !beginExport()) {
+            ex.getResponseHeaders().set("Retry-After", "30");
+            g = error(409, "Another timeline export is running. Try again when it is done.");
+        }
+        if (g != null) {
+            sendJson(ex, g);
+            return;
+        }
+        try {
+            streamExport(ex, world, LocalDate.parse(from), LocalDate.parse(to));
+        } finally {
+            endExport();
+        }
+    }
+
+    private void streamExport(com.sun.net.httpserver.HttpExchange ex, String world, LocalDate from, LocalDate to)
+            throws IOException {
+        TimelineStore store = timeline.get().store();
+        com.sun.net.httpserver.Headers h = ex.getResponseHeaders();
+        h.set("Access-Control-Allow-Origin", "*");
+        h.set("Content-Type", "application/zip");
+        h.set("Cache-Control", "no-store");
+        h.set("X-Content-Type-Options", "nosniff");
+        String name = "atlas-timeline-" + dev.ryvrook.atlas.tiles.TileKeys.safe(world) + "-" + from + "-" + to + ".zip";
+        h.set("Content-Disposition", "attachment; filename=\"" + name + "\"");
+        if ("HEAD".equals(ex.getRequestMethod())) {
+            ex.sendResponseHeaders(200, -1);
+            return;
+        }
+        ex.sendResponseHeaders(200, 0);
+        long started = System.currentTimeMillis();
+        Counting counted = new Counting(ex.getResponseBody());
+        int days = 0;
+        java.util.Set<String> hashes = new java.util.LinkedHashSet<>();
+        int images = 0;
+        try (java.util.zip.ZipOutputStream zip = new java.util.zip.ZipOutputStream(counted)) {
+            zip.setLevel(java.util.zip.Deflater.BEST_SPEED);
+            entry(zip, "README.txt", ("Atlas timeline export of " + world + " from " + from + " to " + to + ". Each folder "
+                    + "days/<date> holds that day's tiles.json (tile key to image hash), stats.json, events.jsonl and its "
+                    + "isometric views under iso, and every image a tiles.json names is stored once as blobs/<hash>.png.\n")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            for (LocalDate d = from; !d.isAfter(to); d = d.plusDays(1)) {
+                String date = d.toString();
+                java.nio.file.Path day = store.dayDir(world, date);
+                boolean any = false;
+                any |= copy(zip, day.resolve(TimelineStore.TILES), "days/" + date + "/tiles.json");
+                any |= copy(zip, day.resolve(TimelineStore.STATS), "days/" + date + "/stats.json");
+                any |= copy(zip, store.eventsFile(world, date), "days/" + date + "/events.jsonl");
+                java.nio.file.Path iso = day.resolve("iso");
+                if (store.hasSnapshot(world, date) && java.nio.file.Files.isDirectory(iso)) {
+                    try (java.nio.file.DirectoryStream<java.nio.file.Path> s = java.nio.file.Files.newDirectoryStream(iso)) {
+                        List<java.nio.file.Path> files = new ArrayList<>();
+                        s.forEach(files::add);
+                        files.sort(null);
+                        for (java.nio.file.Path f : files) {
+                            String n = f.getFileName().toString();
+                            if (n.endsWith(".png") || n.equals("index.json")) {
+                                any |= copy(zip, f, "days/" + date + "/iso/" + n);
+                            }
+                        }
+                    }
+                }
+                Manifest m = store.manifest(world, date);
+                if (m != null) {
+                    hashes.addAll(m.tiles().values());
+                }
+                if (any) {
+                    days++;
+                }
+            }
+            for (String hash : hashes) {
+                if (BlobStore.validHash(hash) && copy(zip, store.blobs().path(hash), "blobs/" + hash + ".png")) {
+                    images++;
+                }
+            }
+        } finally {
+            ex.getResponseBody().close();
+        }
+        log("Atlas exported the timeline of %s from %s to %s, %d %s and %d images, %d bytes in %d ms", world, from, to,
+                days, days == 1 ? "day" : "days", images, counted.count, System.currentTimeMillis() - started);
+    }
+
+    private static void entry(java.util.zip.ZipOutputStream zip, String name, byte[] data) throws IOException {
+        zip.putNextEntry(new java.util.zip.ZipEntry(name));
+        zip.write(data);
+        zip.closeEntry();
+    }
+
+    /** Copies a file into the zip. False when it does not exist, or went away, as a pruned day may. */
+    private static boolean copy(java.util.zip.ZipOutputStream zip, java.nio.file.Path file, String name) throws IOException {
+        java.io.InputStream in;
+        try {
+            in = java.nio.file.Files.newInputStream(file);
+        } catch (java.nio.file.NoSuchFileException e) {
+            return false;
+        }
+        try (in) {
+            zip.putNextEntry(new java.util.zip.ZipEntry(name));
+            in.transferTo(zip);
+            zip.closeEntry();
+        }
+        return true;
+    }
+
+    private static void sendJson(com.sun.net.httpserver.HttpExchange ex, Atlas.ApiResult r) throws IOException {
+        com.sun.net.httpserver.Headers h = ex.getResponseHeaders();
+        h.set("Access-Control-Allow-Origin", "*");
+        h.set("Content-Type", "application/json; charset=utf-8");
+        h.set("X-Content-Type-Options", "nosniff");
+        h.set("Cache-Control", "no-store");
+        byte[] body = Json.GSON.toJson(r.body()).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        if ("HEAD".equals(ex.getRequestMethod())) {
+            ex.sendResponseHeaders(r.status(), -1);
+            return;
+        }
+        ex.sendResponseHeaders(r.status(), body.length);
+        try (java.io.OutputStream out = ex.getResponseBody()) {
+            out.write(body);
+        }
+    }
+
+    private static void log(String format, Object... args) {
+        try {
+            com.hypixel.hytale.logger.HytaleLogger.get("Atlas").at(java.util.logging.Level.INFO)
+                    .log(String.format(Locale.ROOT, format, args));
+        } catch (RuntimeException | LinkageError ignored) {
+            // No logging backend, as in unit tests.
+        }
+    }
+
+    /** Counts the bytes written through it. */
+    private static final class Counting extends java.io.FilterOutputStream {
+        long count;
+
+        Counting(java.io.OutputStream out) {
+            super(out);
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            out.write(b);
+            count++;
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            out.write(b, off, len);
+            count += len;
+        }
     }
 }

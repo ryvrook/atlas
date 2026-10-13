@@ -4,6 +4,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.hypixel.hytale.assetstore.event.LoadedAssetsEvent;
+import com.hypixel.hytale.server.core.asset.type.blocktype.config.BlockType;
 import com.hypixel.hytale.math.vector.Transform;
 import com.hypixel.hytale.server.core.event.events.player.PlayerChatEvent;
 import com.hypixel.hytale.server.core.event.events.player.PlayerDisconnectEvent;
@@ -18,6 +20,10 @@ import dev.ryvrook.atlas.data.DominionSnapshot;
 import dev.ryvrook.atlas.data.EngineData;
 import dev.ryvrook.atlas.data.LiveState;
 import dev.ryvrook.atlas.http.ApiServer;
+import dev.ryvrook.atlas.iso.IsoChunkSaveSystem;
+import dev.ryvrook.atlas.iso.IsoRoutes;
+import dev.ryvrook.atlas.iso.IsoService;
+import dev.ryvrook.atlas.iso.IsoSnapshots;
 import dev.ryvrook.atlas.systems.BlockActivitySystem;
 import dev.ryvrook.atlas.systems.ChunkSaveSystem;
 import dev.ryvrook.atlas.systems.DeathSystem;
@@ -58,6 +64,8 @@ public final class AtlasPlugin extends JavaPlugin {
     private Atlas atlas;
     private ApiServer server;
     private volatile Timeline timeline;
+    private IsoService iso;
+    private IsoSnapshots isoSnapshots;
     private volatile ScheduledThreadPoolExecutor scheduler;
     private final List<ScheduledFuture<?>> tasks = new ArrayList<>();
     private ScheduledFuture<?> playerTask;
@@ -91,6 +99,11 @@ public final class AtlasPlugin extends JavaPlugin {
         return server;
     }
 
+    /** The isometric views, or null before setup. */
+    public IsoService iso() {
+        return iso;
+    }
+
     /** The timeline, or null before setup. */
     public Timeline timeline() {
         return timeline;
@@ -121,7 +134,12 @@ public final class AtlasPlugin extends JavaPlugin {
         server.setHealthExtras(this::healthExtras);
         server.setOtherMapMods(this::otherMapMods);
         timeline = new Timeline(atlas, getDataDirectory(), getLogger());
-        server.setTimeline(new TimelineRoutes(atlas, this::timeline));
+        TimelineRoutes timelineRoutes = new TimelineRoutes(atlas, this::timeline);
+        server.setTimeline(timelineRoutes);
+        iso = new IsoService(atlas, getDataDirectory(), getLogger(), IsoService.budgetOf(atlas.tiles()));
+        isoSnapshots = new IsoSnapshots(atlas, iso, getLogger());
+        IsoRoutes.install(new IsoRoutes(atlas, iso, this::timeline, timelineRoutes));
+        IsoSnapshots.install(isoSnapshots);
 
         getCommandRegistry().registerCommand(new AtlasCommand(this));
         getEntityStoreRegistry().registerSystem(BlockActivitySystem.breaks(atlas.heat()));
@@ -134,6 +152,8 @@ public final class AtlasPlugin extends JavaPlugin {
             }
         }));
         getChunkStoreRegistry().registerSystem(new ChunkSaveSystem(atlas.tiles()));
+        getChunkStoreRegistry().registerSystem(new IsoChunkSaveSystem(iso));
+        registerAssetReload();
         getEventRegistry().registerAsyncGlobal(PlayerChatEvent.class, future -> future.thenApply(this::onChat));
         getEventRegistry().registerGlobal(PlayerDisconnectEvent.class, this::onDisconnect);
 
@@ -182,6 +202,9 @@ public final class AtlasPlugin extends JavaPlugin {
         atlas.seedFeed();
         atlas.leaderboard().poll();
         timeline.start(ex);
+        iso.start(ex);
+        tasks.add(ex.scheduleWithFixedDelay(guard("iso sweep",
+                () -> isoSnapshots.sweep(timeline.store().root())), 120, 600, TimeUnit.SECONDS));
         if (configError == null) {
             server.startWithRetry(ex);
             warnPublicUrl();
@@ -231,6 +254,11 @@ public final class AtlasPlugin extends JavaPlugin {
         if (timeline != null) {
             timeline.stop();
         }
+        IsoRoutes.install(null);
+        IsoSnapshots.install(null);
+        if (iso != null) {
+            iso.stop();
+        }
         if (server != null) {
             server.stop();
         }
@@ -239,6 +267,12 @@ public final class AtlasPlugin extends JavaPlugin {
             atlas.tiles().shutdown();
             saveQuietly();
         }
+    }
+
+    /** Rebuilds the isometric colour table after the block types were loaded again. */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private void registerAssetReload() {
+        getEventRegistry().register((Class) LoadedAssetsEvent.class, BlockType.class, e -> iso.assetsChanged());
     }
 
     /** Runs a task on the Atlas scheduler, or right here when the scheduler is not running. */
@@ -484,6 +518,7 @@ public final class AtlasPlugin extends JavaPlugin {
         }
         if (transientWorld) {
             atlas.tiles().dropWorld(name);
+            iso.dropWorld(name);
             transientWorlds.remove(name);
             saveTransientWorlds();
             getLogger().at(Level.INFO).log("Atlas dropped the map data of the removed world %s", name);

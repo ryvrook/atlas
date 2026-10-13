@@ -1,8 +1,44 @@
 # Developing Atlas
 
-This guide is for contributors. It covers how to build and smoke test Atlas on a headless server,
-how tiles are made, which threads do what, how markers are merged and how the BetterMap integration
-reads its files. The README covers installing and configuring Atlas.
+This guide is for contributors. It covers the source layout, the tests, how to build and smoke test
+Atlas on a headless server, how tiles are made, which threads do what, how markers are merged, how
+marker layers and the timeline are stored and how the BetterMap integration reads its files. The
+README covers installing and configuring Atlas, and [API.md](API.md) is the browser API reference.
+
+## Source layout
+
+Everything lives under `src/main/java/dev/ryvrook/atlas`.
+
+| Package | What it holds |
+| --- | --- |
+| root | `AtlasPlugin`, the plugin entry and scheduler, and `Atlas`, the shared state and the JSON routes |
+| `api` | The public marker API for other plugins. The only package other mods may compile against |
+| `auth` | Link codes, sessions, viewers and the rate key of an address |
+| `command` | `/atlas` and its sub commands |
+| `config` | `atlas.json` parsing, validation and visibility levels |
+| `data` | Engine reads, the factions snapshot, Feats, kills, heat, last seen and the payload builders |
+| `iso` | 3D views, the chunk reader, the raster, the colour table, the PNG encoder, the cache, daily views and the routes |
+| `http` | The embedded HTTP server, the event stream hub, rate limits, trusted proxies and marker icons |
+| `markers` | Marker layers behind the API, the drop folder, the admin layer and the layer route |
+| `systems` | Engine systems that watch deaths and blocks |
+| `tiles` | Tile keys, the explored index, chunk image decoding, the render queue and the tile cache |
+| `timeline` | Snapshots, the blob store, manifests, the event log, daily stats and the timeline routes |
+| `util` | JSON helpers and atomic writes |
+
+The web client lives in `src/main/resources/web` with `core.js`, `app.js`, `map.js`, `panel.js`,
+`timeline.js`, `iso.js`, `export.js`, `style.css`, `index.html` and the bundled Leaflet under `vendor`.
+
+`iso.js` holds the 3D lightbox. It reads `api/iso` with the other shared data, asks for views with
+`fetch` so a 202 answer can be read, polls after `etaSeconds`, keeps the last six pictures as blob
+addresses and builds the share link from the `X-Atlas-Iso` header of the picture on screen. Pan and
+zoom are CSS transforms on the image, and the compare slider clips the older day's layer with
+`clip-path`. `export.js` draws the view onto a canvas from the same tile addresses the map uses,
+records with `canvas.captureStream` and `MediaRecorder`, and pauses the recorder while each day's
+tiles load so slow tiles never stretch a day. A click on a marker opens `A.openActions`, a popup with
+the hover card and its buttons.
+
+`Payloads` in `data` builds every API body from an explicit field list. A new field goes there and
+into [API.md](API.md). Version 1 may only grow, so never rename, retype or remove a field.
 
 ## Building
 
@@ -17,6 +53,30 @@ and build with the wrapper.
 The jar lands in `build/libs/Atlas-<version>.jar`. The Hytale server artifact comes from the Hytale
 Maven repository, and `hytale_channel` and `hytale_version` in `gradle.properties` select it.
 
+The version is set once, as `version` in `build.gradle.kts`. `processResources` writes it into
+`manifest.json` in place of `@version@`, and a generated `version.txt` next to `AtlasVersion` carries
+it to the code. Never edit the version anywhere else.
+
+## Tests
+
+`./gradlew build` runs the JUnit 5 tests under `src/test/java`, and `./gradlew test` runs them alone.
+Only failures are printed, with the full stack trace. The tests need no running server. They cover
+pure logic and use the Hytale server jar only for types.
+
+| Package | Tests |
+| --- | --- |
+| `auth` | Rate keys, revoke, linked name lookup and the attempt limit |
+| `config` | Parsing, defaults, added keys, the fail closed cases and per world settings |
+| `data` | Marker merging, the hidden player rule, payload field lists and Feats diffs |
+| `http` | Path safety, rate limits, rate keys, trusted proxies and the event stream queue |
+| `iso` | View parameters, the cache keys and prune, the raster on synthetic columns and the iso config |
+| `markers` | The drop folder parser, the layer payload and tiers, popup escaping and timeline visibility |
+| `tiles` | Tile key math, the explored index, chunk image decoding, the render queue and the token bucket |
+| `timeline` | The blob store, manifest diffs, pruning with tombstones, the event log bound, route parsing and the export range |
+
+Add a test next to the code you change. A change to a payload needs a case in `PayloadsTest` or
+`LayerJsonTest` that pins the field list.
+
 ## Smoke test on a headless server
 
 You need `HytaleServer.jar` and `Assets.zip` from a Hytale install or the server download. The
@@ -27,45 +87,69 @@ and `$JAVA` for a Java 25 binary.
 2. Give the server a `permissions.json` containing `{"users":{},"groups":{}}`. A server without one
    can exit right after start.
 3. To keep the map off the default port, create `mods/Ryvrook_Atlas/atlas.json` with only
-   `{"bind": "127.0.0.1", "port": 8190}`. Atlas fills in every other key on first start.
-4. Start the server from that folder. A bare server (`--bare`) loads no world, so every tile would
-   return 404. Start it without `--bare` so it generates a world, then load chunks by piping console
-   commands into it. Wait for the world before sending them and keep the pipe open afterwards so the
-   console stays attached.
+   `{"bind": "127.0.0.1", "port": 8190}`. Atlas fills in every other key on first start. Pick ports
+   of your own when several test servers run at once.
+4. Copy a saved world from an earlier run, its `universe` folder and `config.json`, into the server
+   folder. Its explored chunks are read at start, so tiles work at once. Without one, start the
+   server without `--bare` so it generates a world. A bare server loads no world and every tile
+   would return 404.
+5. Start the server from that folder with `chunk load` lines on its console and a time limit, so a
+   test run never leaves a server behind. Wait for the world before sending commands and keep the
+   pipe open afterwards so the console stays attached.
 
 ```sh
 cd /path/to/testserver
 ( sleep 60; printf 'chunk load 0 0\nchunk load 1 0\nchunk load 0 1\n'; sleep 600 ) | \
-  "$JAVA" -jar "$HYTALE/Server/HytaleServer.jar" --assets "$HYTALE/Assets.zip" \
-  --auth-mode offline --disable-sentry --bind 127.0.0.1:5521 > boot.log 2>&1
+  perl -e 'alarm 660; exec @ARGV' -- "$JAVA" -jar "$HYTALE/Server/HytaleServer.jar" \
+  --assets "$HYTALE/Assets.zip" --auth-mode offline --disable-sentry --bind 127.0.0.1:5521 > boot.log 2>&1
 ```
 
-A saved world from an earlier run can be reused by copying the whole folder, `universe` included.
-Its explored chunks are read at start, so tiles work without the chunk load commands.
+`perl -e 'alarm N'` ends the server after N seconds with exit code 142. Console commands such as
+`atlas snapshot default`, `atlas render status` or `atlas marker add default spawn 0 0 Spawn` can be
+added to the `printf` line, since Atlas commands also run from the console.
 
-Loaded chunks are picked up within 30 seconds. Then check the server from another shell.
+Loaded chunks are picked up within 30 seconds. Then check the server from another shell. `$TOKEN`
+is the `adminToken` from the test server's `atlas.json`.
 
 ```sh
 curl -s http://127.0.0.1:8190/api/health
+curl -s -H "X-Atlas-Token: $TOKEN" http://127.0.0.1:8190/api/health
 curl -s http://127.0.0.1:8190/api/worlds
-curl -s -o tile.png -w '%{http_code}\n' http://127.0.0.1:8190/api/tiles/default/0/0/0.png
+curl -s -o tile.png -D - http://127.0.0.1:8190/api/tiles/default/0/0/0.png | grep -i -e '^HTTP' -e etag
 curl -sI http://127.0.0.1:8190/ | grep -i -e content-security-policy -e referrer-policy -e nosniff
+curl -s -H 'Accept-Encoding: gzip' -o /dev/null -D - http://127.0.0.1:8190/app.js | grep -i content-encoding
+curl -s http://127.0.0.1:8190/api/layers/default
+curl -s http://127.0.0.1:8190/api/timeline/default
+curl -s -D - -o view.png 'http://127.0.0.1:8190/api/iso/default?x=0&z=0&r=4&s=2' | grep -i -e '^HTTP' -e etag
 grep -n 'dev.ryvrook' boot.log
 ```
 
 What to expect.
 
-- `api/health` answers `{"ok":true,"version":"..."}` without a token and adds uptime, stream
-  and tile cache figures with `X-Atlas-Token`.
-- `api/worlds` lists the world with `exploredChunks` above 0 and a `bounds` object.
-- The tile request returns 200 with a 256 pixel PNG near spawn, and 404 far from anything explored.
-- The page carries the Content Security Policy, `Referrer-Policy` and `X-Content-Type-Options`.
+- `api/health` answers `{"ok":true,"version":"..."}` without a token, and with it adds uptime,
+  stream, tile cache and render figures, `status` and `degraded`.
+- `api/worlds` carries `apiVersion` 1 and lists the world with `exploredChunks` above 0 and a
+  `bounds` object.
+- The tile request returns 200 with a 256 pixel PNG and an `ETag` near spawn, and 404 far from
+  anything explored. The same request with `If-None-Match` set to that ETag returns 304.
+- The page carries the Content Security Policy, `Referrer-Policy` and `X-Content-Type-Options`, and
+  `app.js` comes back gzipped.
+- `api/layers/default` lists any layer you dropped into `mods/Ryvrook_Atlas/markers`.
+- `api/timeline/default` lists a day with `snapshot` true once `atlas snapshot default` ran. A second
+  snapshot on the same day writes no new blobs.
+- The 3D view answers 202 with `etaSeconds` first and 200 with a PNG when asked again after that time.
 - `boot.log` holds the Atlas start lines and no stack trace that mentions `dev.ryvrook`.
+
+To check that a broken config fails closed, put `{"port": "x"}` in `atlas.json` before boot and expect
+one SEVERE line and no web server, then fix the file and run `atlas reload` on the console. To check
+the bind retry, hold the port with `nc -l 8190` before boot.
 
 Open the page in a browser and check the console. The client must load without Content Security
 Policy reports. The policy allows scripts and styles from the same origin, inline style attributes,
 the one inline boot script in `index.html` by its hash, and images from the same origin, `data:` and
-`blob:`. New client code must not add inline scripts or event handler attributes.
+`blob:`. New client code must not add inline scripts or event handler attributes, and labels from
+marker layers must be set as text, never as HTML. Run `node --check` on every client script after a
+change.
 
 ## Tiles
 
@@ -98,6 +182,19 @@ Tiles are cached in memory up to `tileCacheMb` and on disk under `tiles` in the 
 When the engine saves a chunk its tiles are marked dirty and re-rendered at most every five minutes
 per world.
 
+Every chunk image the engine has to build takes a token from one bucket of `chunkImagesPerMinute`
+shared by all renders. Images already cached or in memory cost nothing. Browser requests may drain it, background work only while it is above half. A request that
+finds the bucket empty gets the cached tile or a partial one at once instead of waiting. Background
+renders go through a queue of at most 8,192 tasks with one task per tile, worked by two
+`Atlas-tiles` threads that get five seconds to finish at shutdown. `Atlas-tiles-control` runs the
+idle pre render every five seconds and removes orphaned temporary files two seconds after start.
+
+Each world's tile folder holds `world.json` with the world UUID and seed. A mismatch at start or
+when the world is added clears the folder once. On the ten minute refresh, saved zoom 0 tiles older
+than `tileMaxAgeHours` are compared with a hash of their current chunk images, at most 256 per pass,
+and drawn again only when the images changed. Tiles are written to a temporary file with a unique
+name, flushed with fsync and moved into place. Each tile carries a strong ETag made from its bytes.
+
 Saved chunks are read from the world storage at start and every ten minutes, and chunks loaded in
 memory are added every 30 seconds. A chunk that becomes explored after its tile was drawn has its
 tile redrawn within about 30 seconds, without the five minute wait, and browsers are told over the
@@ -109,7 +206,9 @@ waiting for a refresh when the server stops are removed from disk so the next st
 
 - Periodic work runs on two `Atlas-scheduler` threads owned by the plugin. Nothing runs on the
   engine's shared scheduled executor.
-- Tile renders run on two `Atlas-tiles` threads.
+- Tile renders run on two `Atlas-tiles` threads, and `Atlas-tiles-control` steers them.
+- `Atlas-sse-watchdog` closes event streams whose writes stall for 15 seconds.
+- 3D views render one at a time on the single `Atlas-iso` thread.
 - HTTP requests run on virtual threads, one per request. At most 64 ordinary requests are handled
   at once and the rest get 503 with `Retry-After`. Event streams are not counted there because
   they have their own limits of `sseClientsPerIp` per address and 500 in total.
@@ -133,10 +232,15 @@ The periodic tasks and their intervals.
 | Shared and personal markers | 5 seconds |
 | Feats export check | 5 seconds |
 | BetterMap settings check | 15 seconds |
+| Marker layer drop folder | 5 seconds, with the shared markers |
+| Idle pre render | 5 seconds, after 30 seconds without a tile request |
+| Timeline event log flush | 5 seconds |
+| Timeline schedule check | 1 minute |
 | Loaded chunks and dirty tiles | 30 seconds |
-| Saved chunks from world storage | 10 minutes |
-| Saving data files | 5 minutes |
-| Pruning sessions, heat, last seen and caches | 10 minutes |
+| Saved chunks, missing chunks and the tile age check | 10 minutes |
+| Saving data files and the timeline activity counters | 5 minutes |
+| Removing daily 3D views of pruned timeline days | 10 minutes |
+| Pruning sessions, heat, last seen, caches and rate limit buckets | 10 minutes |
 
 Engine markers are read on the world thread at most every ten seconds per world. Each open event
 stream resolves its viewer again every 30 seconds.
@@ -182,6 +286,78 @@ home swallows a store or provider entry within one block of it that is a bed, wh
 `Home` icon, a name containing "bed" or the home's own name. A provider entry whose id starts with
 `user_` is a player marker the store read already covers and is always dropped.
 
+## Marker layers
+
+`MarkerService` in `markers` holds every layer, whether it came from the API, a drop folder file or
+`admin.json`. The API classes in `api` keep their own state under the layer lock and report each
+change to a listener, which `MarkerService` turns into a `layers` event per world after a short
+delay of 300 milliseconds, so a plugin that adds many markers causes one event. The tier is applied
+in `LayerJson` when a layer is served, never when it is stored.
+
+Drop folder files are parsed by `LayerFile` into a detached layer that is swapped in whole, so a
+half read file never shows. A file that fails keeps its last good layer and logs once until its
+modification time or size changes. The admin commands copy the admin layer, change the copy and
+write `admin.json` atomically, and refuse to write while the file holds an error.
+
+`AtlasApi` publishes the running instance through `enable` and `disable`. Hooks registered with
+`onEnable` and `onDisable` live in static lists, so they survive a reload of Atlas.
+
+## Timeline
+
+`Timeline` owns the schedule. Once a minute it checks whether the daily run for `timeline.hour` is
+due, and a run missed while the server was down follows five minutes after start. `SnapshotJob`
+walks the saved tiles of a world in batches of 128 with a short pause between batches, hashes each
+image with SHA-256 and stores new images in `BlobStore` under `snapshots/blobs`. Tiles mid write are
+skipped and keep the image of the day before, which marks the day partial. Nothing runs on a world
+thread.
+
+`Manifest` maps each tile key to its hash and lists the keys that changed against the previous day.
+`TimelineStore` keeps one folder per world and day with `tiles.json`, `summary.json` and
+`stats.json`. Pruning removes days past `retainDays`, then the oldest days while the total is above
+`maxDiskMb`, never the newest snapshot of a world or today, and leaves `tombstone.json` so the day
+stays listed as pruned. Blobs no other day uses are deleted with it. Tombstones more than 400 days
+past the retention are forgotten.
+
+`EventLog.record` queues events from anywhere and a flush every five seconds appends them to
+`events/<date>.jsonl`. A day stops at 5,000 events with one `dropped` line. Events are stored with
+real names, and `TimelineRoutes` applies the hidden player rule, the layer of each kind and the chunk
+rounding when they are served, so un-hiding a player later works. `ActivityTracker` counts activity
+per world in hourly buckets for the daily stats and keeps 48 hours in `activity.json`.
+
+## 3D views
+
+`IsoService` owns the single `Atlas-iso` thread and the queue. Browsers may hold at most eight
+renders, at most two wider than 17 by 17 chunks, and the thread rests two seconds after a large one.
+Admin commands and the daily snapshot queue without those limits. The queue is prioritised, so a
+browser view waiting in it is drawn first, and daily views and console renders follow in the order
+they came, which keeps a long daily snapshot from holding up views people wait for. A render that cannot
+get its chunk reads within two minutes is drawn with what it has.
+
+`IsoRenderer` reads the chunk components directly, not the world map images. It filters the square
+against the explored index and the render limit, asks the chunk store for chunks in batches of 16
+with `GetChunkFlags.NO_GENERATE`, and reads `BlockChunk`, `HeightmapColumn`, `ChunkColumn` and the
+block and fluid sections with `getComponentConcurrent` on the `Atlas-iso` thread, never a world
+thread. As with tiles, every read of a chunk that is not already in memory takes a token from the
+background half of the shared `chunkImagesPerMinute` budget. Views have no budget of their own on
+purpose. Chunks loaded
+this way never tick and the engine unloads them within about half a minute, saving them on the way
+out, so `IsoChunkSaveSystem` ignores saves of chunks a render loaded for two minutes. Every other
+save inside a view drops that view from the cache.
+
+The height map counts leaves but not plants or fluid, which sit one above it. `Palette` takes each
+block type's texture computed colour, with the particle colour or grey as fallbacks, and the biome
+tint is applied per face. The table is rebuilt after an asset reload. `IsoRaster` draws one column
+per block in depth order into an int array. Side faces at the edge and next to missing chunks drop a
+fixed skirt of 12 blocks, leaf canopies drop at most three blocks with the trunk drawn under them,
+and missing chunks are a grey floor. `PngEncoder` writes with the Sub filter and the fastest deflate
+level. `IsoView` lowers the scale so a side stays within 1,100 block pixels.
+
+`IsoCache` keys a view on the world, centre chunk, radius, direction, scale and a six hour bucket. It
+keeps an LRU in memory within `isoCacheMb` and files under `iso/<world>/` within `isoDiskMb`, oldest
+first out. Partial views stay in memory for a minute and never reach disk. `IsoSnapshots` draws the
+daily areas into `iso/` of the day folder with an `index.json`, which the day list reads as
+`isoViews`, and a sweep every ten minutes removes the views of days that were pruned.
+
 ## BetterMap
 
 Atlas contains no BetterMap code. It only reads BetterMap's files and never writes to its folder.
@@ -208,7 +384,9 @@ unless the file turns them off.
   included, as the in game map does.
 - `hideDeathMarkerOnMap` drops `death` entries.
 - `worldBorderEnabled` with `worldBorderRadius`, `worldBorderOffsetX` and `worldBorderOffsetZ` gives
-  every world in `/api/worlds` a border, drawn as a dashed circle. Without it `border` is null.
+  the worlds BetterMap tracks a border in `/api/worlds`, drawn as a dashed circle. Those are the
+  worlds in `allowedWorlds`, or `default` and `world` when the key is missing. Everywhere else
+  `border` is null.
 
 ```json
 {"shape": "circle", "x": 800, "z": 0, "radius": 400}
@@ -227,5 +405,7 @@ block, and leaves it null otherwise.
 
 ## Pull requests
 
-Keep each change focused on one thing and make sure `./gradlew build` passes. For changes to tiles,
-markers or the web client, run the smoke test above and say in the pull request what you checked.
+Keep each change focused on one thing and make sure `./gradlew build` passes with its tests. For
+changes to tiles, markers, the timeline or the web client, run the smoke test above and say in the
+pull request what you checked. A change to an API shape must keep version 1 intact and update
+[API.md](API.md).

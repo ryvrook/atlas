@@ -238,7 +238,8 @@
       el.setAttribute("role", "button");
       el.tabIndex = 0;
       el.innerHTML = "<span class='avatar'></span><div class='grow'><div class='title'></div><div class='sub'></div></div>" +
-        "<div class='acts'><button class='icon-btn' data-act='locate' title='Show on the map'>" + A.icon("locate", "sm") + "</button>" +
+        "<div class='acts'><button class='icon-btn' data-act='iso' title='View in 3D' hidden>" + A.icon("cube", "sm") + "</button>" +
+        "<button class='icon-btn' data-act='locate' title='Show on the map'>" + A.icon("locate", "sm") + "</button>" +
         "<button class='icon-btn' data-act='follow' title='Follow'>" + A.icon("eye", "sm") + "</button></div>";
       return el;
     },
@@ -257,6 +258,11 @@
       if (el.getAttribute("aria-label") !== label) el.setAttribute("aria-label", label);
       const loc = el.querySelector("[data-act=locate]");
       if (loc.getAttribute("aria-label") !== "Show " + p.name + " on the map") loc.setAttribute("aria-label", "Show " + p.name + " on the map");
+      // Admins may view the area around any placed player in 3D, everyone else only around themself.
+      const iso = el.querySelector("[data-act=iso]");
+      const isoOn = !!(A.isoOk && A.isoOk() && (A.isAdmin() || p.self) && p.x != null && p.z != null && A.worldShown(p.world));
+      if (iso.hidden === isoOn) iso.hidden = !isoOn;
+      if (isoOn && iso.getAttribute("aria-label") !== "View the area around " + p.name + " in 3D") iso.setAttribute("aria-label", "View the area around " + p.name + " in 3D");
       const fol = el.querySelector("[data-act=follow]");
       const on = state.follow === p.uuid;
       fol.classList.toggle("on", on);
@@ -292,6 +298,11 @@
     if (!row || e.target.closest(".fac")) return;
     const id = row.dataset.key;
     const act = e.target.closest("[data-act]");
+    if (act && act.dataset.act === "iso") {
+      const p = A.playerData(id);
+      if (p && p.x != null && p.z != null) A.openIso({ world: p.world, x: p.x, z: p.z, title: p.name });
+      return;
+    }
     if (act && act.dataset.act === "follow") A.followPlayer(id);
     else A.locatePlayer(id);
     if (narrow() && !(act && act.dataset.act === "follow")) A.setPanel(false);
@@ -360,6 +371,7 @@
       const el = document.createElement("div");
       el.className = "row mk-row";
       el.innerHTML = "<span class='sym mini' aria-hidden='true'></span><div class='grow'><div class='title'></div><div class='sub'><span class='mk-by'></span><span class='mk-xyz'></span></div></div>" +
+        "<button class='btn small iso-btn' data-act='iso' hidden>" + A.icon("cube", "sm") + "3D</button>" +
         "<button class='btn small' data-act='show'>" + A.icon("locate", "sm") + "Show</button>";
       return el;
     },
@@ -386,6 +398,10 @@
       const btn = el.querySelector("[data-act=show]");
       const label = "Show " + lk.title + " on the map";
       if (btn.getAttribute("aria-label") !== label) btn.setAttribute("aria-label", label);
+      const iso = el.querySelector("[data-act=iso]");
+      const isoOn = !!(A.isoOk && A.isoOk());
+      if (iso.hidden === isoOn) iso.hidden = !isoOn;
+      if (iso.getAttribute("aria-label") !== "View " + lk.title + " in 3D") iso.setAttribute("aria-label", "View " + lk.title + " in 3D");
     }
   };
   const chipSpec = {
@@ -414,6 +430,10 @@
         drawMarkerList();
       });
       $("mk-list").addEventListener("click", (e) => {
+        const iso = e.target.closest("[data-act=iso]");
+        const ir = iso && iso.closest(".row[data-key]");
+        const mk = ir && state.markers.find((x) => A.markerKey(x) === ir.dataset.key);
+        if (mk) { A.openIso({ marker: mk.id, x: mk.x, z: mk.z, title: A.markerLook(mk).title }); return; }
         const b = e.target.closest("[data-act=show]");
         const row = b && b.closest(".row[data-key]");
         if (!row) return;
@@ -421,6 +441,14 @@
         if (narrow()) A.setPanel(false);
       });
       $("mk-layers").addEventListener("click", (e) => {
+        const iso = e.target.closest("[data-lm3]");
+        if (iso) {
+          const [layer, id] = JSON.parse(iso.dataset.lm3);
+          const rec = A.mlayers.get(layer);
+          const m = rec && (rec.def.markers || []).find((x) => String(x.id) === id);
+          if (m) { const at = A.layerMarkerAt(m); A.openIso({ marker: id, layer, autoR: m.kind !== "point", x: at && at.x, z: at && at.z, title: m.label || LM_KIND[m.kind] || "Marker" }); }
+          return;
+        }
         const b = e.target.closest("[data-lm]");
         if (!b) return;
         const [layer, id] = JSON.parse(b.dataset.lm);
@@ -442,6 +470,7 @@
       const rows = def.markers.filter((m) => m && A.layerMarkerAt(m));
       if (!rows.length) continue;
       const off = !A.mlayerWanted(def);
+      const iso = !!(A.isoOk && A.isoOk());
       h += "<h3 class='sub'>" + A.icon("layer", "xs") + esc(def.label || def.id) + " <span class='badge'>" + num(rows.length, 0) + "</span>" + (off ? "<span class='badge'>switched off</span>" : "") + "</h3>";
       h += rows.slice(0, LAYER_ROWS).map((m) => {
         const at = A.layerMarkerAt(m);
@@ -449,6 +478,7 @@
         const c = A.col(m.tint, "#4a8ea4");
         return "<div class='row mk-row'><span class='sym mini' aria-hidden='true' style='background:" + c + ";color:" + A.inkOn(c) + "'>" + A.icon(m.kind === "point" ? (m.icon ? A.engineIcon(m.icon) : "pin") : m.kind === "circle" ? "target" : m.kind === "polyline" ? "ruler" : "diamond") + "</span>" +
           "<div class='grow'><div class='title'>" + esc(label) + "</div><div class='sub'><span>" + esc(LM_KIND[m.kind] || "Marker") + "</span><span class='mk-xyz'>" + esc(A.xyzText(at.x, null, at.z)) + "</span></div></div>" +
+          (iso ? "<button class='btn small iso-btn' data-lm3='" + esc(JSON.stringify([def.id, String(m.id)])) + "' aria-label='" + esc("View " + label + " in 3D") + "'>" + A.icon("cube", "sm") + "3D</button>" : "") +
           "<button class='btn small' data-lm='" + esc(JSON.stringify([def.id, String(m.id)])) + "' aria-label='" + esc("Show " + label + " on the map") + "'>" + A.icon("locate", "sm") + "Show</button></div>";
       }).join("");
       if (rows.length > LAYER_ROWS) h += "<p class='muted' style='font-size:13px'>" + esc("And " + A.plural(rows.length - LAYER_ROWS, "more marker") + " on the map.") + "</p>";
@@ -486,6 +516,12 @@
   A.on("markers", () => { A.buildTabs(); if (state.tab === "markers") drawMarkerList(); });
   A.on("mlayers", () => { A.buildTabs(); if (state.tab === "markers") drawMarkerList(); });
   A.on("markerIcons", () => { if (state.tab === "markers") drawMarkerList(); });
+  // The 3D buttons follow what api/iso allows.
+  A.on("isoCaps", () => {
+    if (state.detail) return;
+    if (state.tab === "markers") drawMarkerList();
+    if (state.tab === "players") drawPlayerList();
+  });
 
   // ---- factions -----------------------------------------------------------
   const factionRow = (f, i) => "<div class='row click' role='button' tabindex='0' data-open='" + esc(f.tag) + "'>" + (i != null ? "<span class='rank'>" + (i + 1) + "</span>" : "") +

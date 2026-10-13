@@ -20,6 +20,8 @@
     return d.toLocaleDateString([], { timeZone: "UTC", weekday: weekday ? "short" : undefined, month: "short", day: "numeric", year: d.getUTCFullYear() !== new Date().getFullYear() ? "numeric" : undefined });
   };
 
+  A.dayName = dayName;
+
   // ---- state --------------------------------------------------------------
   // index is the slot on the slider, -1 while the live map is shown. A slot is one calendar day from the first
   // day held to today. Its kind is snap (a snapshot), events (events only, the map of the snapshot before it),
@@ -595,8 +597,7 @@
   document.addEventListener("keydown", (e) => {
     if (!barShown() || e.metaKey || e.ctrlKey || e.altKey) return;
     const t = e.target;
-    const dlg = $("link-dialog");
-    if (dlg && dlg.open) return;
+    if (document.querySelector("dialog[open]")) return;
     const typing = t && (t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable || (t.tagName === "INPUT" && t.id !== "tl-range"));
     if (typing || (t && t.closest && t.closest("#tabs, .popover"))) return;
     if (e.key === "ArrowLeft" || e.key === "ArrowRight") step(e.key === "ArrowRight" ? 1 : -1);
@@ -607,6 +608,9 @@
     e.stopPropagation();
   }, true);
   A.timelineEsc = () => { if (!state.tlDate) return false; goLive(); return true; };
+  // The exports stop the playback before they draw the days.
+  A.tlStop = stop;
+  A.tlSelectable = selectable;
 
   // ---- the Timeline tab ---------------------------------------------------------
   let tabBody = null;
@@ -628,7 +632,8 @@
         "<button class='btn small' id='tl-t-live'>" + A.icon("history", "sm") + "Live</button></div>" +
         "<div id='tl-sum'></div>" +
         "<h3 class='sub'>Over the days held <span class='muted' id='tl-spark-note' hidden>loading</span></h3><div id='tl-spark' class='tl-spark'>" +
-        METRICS.map((m) => "<div class='spark' data-m='" + m[0] + "'><div class='spark-head'><span>" + m[1] + "</span><b></b></div><canvas aria-hidden='true'></canvas></div>").join("") + "</div></div>" +
+        METRICS.map((m) => "<div class='spark' data-m='" + m[0] + "'><div class='spark-head'><span>" + m[1] + "</span><b></b></div><canvas aria-hidden='true'></canvas></div>").join("") + "</div>" +
+        "<div id='tl-export'></div></div>" +
         "<h3 class='sub' id='tl-feed-h'></h3><div class='chips' id='tl-chips' style='padding:0 0 10px'></div><div id='tl-feed-msg'></div><ul class='feed' id='tl-feed'></ul>";
       $("tl-t-prev").addEventListener("click", () => step(-1));
       $("tl-t-next").addEventListener("click", () => step(1));
@@ -636,6 +641,10 @@
       $("tl-t-speed").addEventListener("change", (e) => setSpeed(e.target.value));
       $("tl-t-changed").addEventListener("click", () => setChanged(!T.changedOn));
       $("tl-t-live").addEventListener("click", () => goLive());
+      $("tl-sum").addEventListener("click", (e) => {
+        const b = e.target.closest("[data-isod]");
+        if (b) openIsoDay.apply(null, JSON.parse(b.dataset.isod));
+      });
       $("tl-spark").addEventListener("click", (e) => {
         const c = e.target.closest("canvas");
         if (!c || !T.slots.length) return;
@@ -707,7 +716,9 @@
       let h = "<div class='note'><span class='badge good'>live</span> The map as it is now.";
       if (last) h += " The newest snapshot is of " + esc(dayName(last.date)) + (last.day.takenAt ? ", taken " + esc(A.stamp(last.day.takenAt)) : "") + ".";
       if (info.nextRunAt) h += " The next one is due " + esc(A.stamp(info.nextRunAt)) + ".";
-      return h + " Pick a day on the slider or press play.</div>";
+      h += " Pick a day on the slider or press play.</div>";
+      const withViews = T.slots.slice().reverse().find((x) => x.kind === "snap" && isoViewsOf(x).length);
+      return h + (withViews ? isoHtml(withViews, true) : "");
     }
     const d = s.day || {};
     const st = T.stats.get(key(s.date));
@@ -728,7 +739,35 @@
       }
     } else if (d.stats) h += "<div class='skeleton' style='width:70%'></div>";
     else if (s.kind === "snap") h += "<p class='muted' style='font-size:13px'>No stats were kept for this day.</p>";
-    return h;
+    return h + isoHtml(s, false);
+  }
+
+  // ---- daily 3D views ------------------------------------------------------------
+  // Views drawn with a day's snapshot, as thumbnails that open in the 3D lightbox. The images answer 403 unless
+  // the viewer may see terrain and iso, so they are only shown then. A past day's image never changes.
+  const isoShown = () => A.layerOn("terrain") && state.layers.iso !== false;
+  const isoViewsOf = (s) => isoShown() && s && s.day && !s.day.pruned && Array.isArray(s.day.isoViews) ? s.day.isoViews.filter((v) => v && v.label && v.file) : [];
+  // Admin markers are drawn as marker-<id>, named after the marker when the admin layer is on this page.
+  function isoLabel(label) {
+    const m = /^marker-(.+)$/.exec(label);
+    const rec = m && A.mlayers && A.mlayers.get("atlas:admin");
+    const mk = rec && (rec.def.markers || []).find((x) => String(x.id) === m[1]);
+    const t = mk && mk.label ? String(mk.label) : A.pretty(m ? "marker " + m[1] : label).replace(/-/g, " ");
+    return t.charAt(0).toUpperCase() + t.slice(1);
+  }
+  function isoHtml(s, latest) {
+    const views = isoViewsOf(s);
+    if (!views.length) return "";
+    return "<h3 class='sub'>" + esc(latest ? "3D views of " + dayName(s.date) : "3D views of the day") + "</h3><div class='iso-thumbs'>" + views.map((v) =>
+      "<button class='iso-thumb' data-isod='" + esc(JSON.stringify([s.date, v.label])) + "' aria-label='" + esc("Open the 3D view " + isoLabel(v.label) + " of " + dayName(s.date)) + "'>" +
+      "<img src='" + esc(v.file) + "' alt='' loading='lazy' decoding='async'><span>" + esc(isoLabel(v.label)) + "</span></button>").join("") + "</div>";
+  }
+  function openIsoDay(date, label) {
+    const s = T.slots.find((x) => x.date === date);
+    const v = isoViewsOf(s).find((x) => x.label === label);
+    if (!v || !A.openIsoDay) return;
+    const days = T.slots.filter((x) => x.date !== date).map((x) => { const o = isoViewsOf(x).find((y) => y.label === label); return o ? { date: x.date, file: o.file } : null; }).filter(Boolean);
+    A.openIsoDay({ world: state.world, label, date, file: v.file, x: v.x, z: v.z, radius: v.radius, title: isoLabel(label), days });
   }
 
   function feedRow(e, past) {
@@ -811,6 +850,7 @@
       const se = $("tl-sum");
       if (se._h !== sum) { se.innerHTML = sum; se._h = sum; }
       drawSparks();
+      if (A.drawTlExport) A.drawTlExport($("tl-export"));
     }
     if (feedOk) drawFeed();
   }

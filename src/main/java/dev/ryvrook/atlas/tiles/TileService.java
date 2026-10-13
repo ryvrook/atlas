@@ -623,6 +623,12 @@ public final class TileService {
         return bucket.rate();
     }
 
+    /** The shared chunk image budget, synced with chunkImagesPerMinute, for other renderers that read chunks. */
+    public TokenBucket budget() {
+        syncBudget();
+        return bucket;
+    }
+
     public long lastTileRequestAt() {
         return lastTileRequest;
     }

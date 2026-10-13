@@ -70,6 +70,9 @@
     }
   };
   dayTerrain.on("tileloadstart", (e) => { e.tile._day = dayTerrain.getTileUrl(e.coords); });
+  // Tile addresses for the exports, which draw the view onto a canvas. coords has x, y and the Leaflet zoom z.
+  A.dayTileUrl = dayUrl;
+  A.liveTileUrl = (c) => terrain.getTileUrl(c);
   // Warms the browser cache with the tiles on screen for the day that plays next.
   A.preloadDay = (date) => {
     if (!date || !map.hasLayer(dayTerrain)) return;
@@ -247,6 +250,39 @@
   });
   const marker = A.marker = (ll, opts) => new Marker(ll, opts);
 
+  // ---- marker actions -------------------------------------------------------
+  // A click on a marker opens its card as a small popup with buttons such as View in 3D and Open the faction. The
+  // hover card stays a tooltip, and a marker with nothing to offer keeps doing what a click did before.
+  const actPop = L.popup({ className: "atlas-popup act-pop", maxWidth: 300, minWidth: 190, autoPanPadding: [24, 24], offset: [0, -12] });
+  A.openActions = (latlng, html, acts, from) => {
+    acts = (acts || []).filter(Boolean);
+    if (!acts.length) return false;
+    const el = document.createElement("div");
+    el.innerHTML = html + "<div class='tc-acts'>" + acts.map((a, i) => "<button class='btn small" + (i === 0 ? " primary" : "") + "' data-i='" + i + "'" + (a.aria ? " aria-label='" + esc(a.aria) + "'" : "") + ">" + A.icon(a.icon, "sm") + esc(a.label) + "</button>").join("") + "</div>";
+    el.querySelectorAll("[data-i]").forEach((b) => b.addEventListener("click", () => { map.closePopup(actPop); acts[+b.dataset.i].run(); }));
+    if (from && from.closeTooltip) from.closeTooltip();
+    actPop.setLatLng(latlng).setContent(el).openOn(map);
+    const f = el.querySelector("button");
+    if (f && !touch) f.focus({ preventScroll: true });
+    return true;
+  };
+  // The View in 3D button of a card, or nothing while the server does not offer views to this viewer.
+  A.isoAct = (o, what) => A.isoOk && A.isoOk() ? { label: "View in 3D", icon: "cube", aria: "View " + (what || "this place") + " in 3D", run: () => A.openIso(Object.assign({ world: state.world }, o)) } : null;
+  A.factionAct = (tag) => tag && A.layerOn("factions") ? { label: "Open faction", icon: "shield", run: () => A.emit("openFaction", tag) } : null;
+  // A popup a plugin or the server prepared is kept and gets the action row under it.
+  A.withActions = (html, acts) => {
+    const el = document.createElement("div");
+    el.innerHTML = html;
+    acts = (acts || []).filter(Boolean);
+    if (!acts.length) return el;
+    const row = document.createElement("div");
+    row.className = "tc-acts";
+    row.innerHTML = acts.map((a, i) => "<button class='btn small' data-i='" + i + "'" + (a.aria ? " aria-label='" + esc(a.aria) + "'" : "") + ">" + A.icon(a.icon, "sm") + esc(a.label) + "</button>").join("");
+    row.querySelectorAll("[data-i]").forEach((b) => b.addEventListener("click", () => { map.closePopup(); acts[+b.dataset.i].run(); }));
+    el.appendChild(row);
+    return el;
+  };
+
   // ---- tooltip cards --------------------------------------------------------
   // Every map tooltip is a small card. A title line, a muted subtitle, then the block position on its own line
   // in tabular figures. title and sub are html that the caller has already escaped.
@@ -328,7 +364,12 @@
     if (!s.marker) {
       const m = marker(toLatLng(p.x, p.z), { icon: playerIcon(p), keyboard: false, riseOnHover: true, zIndexOffset: p.self ? 1000 : 0, label: playerLabel(p) });
       tip(m, playerCard(p), { offset: [0, -10] });
-      m.on("click", () => { if (s.data.faction && A.layerOn("factions")) A.emit("openFaction", s.data.faction); else m.openTooltip(); });
+      // Admins and the player themself get the card with View in 3D. Everyone else opens the faction as before.
+      m.on("click", () => {
+        const d = s.data;
+        if ((A.isAdmin() || d.self) && placed(d) && A.openActions(m.getLatLng(), playerCard(d).replace("<div class='tc-hint'>Click to open the faction</div>", ""), [A.isoAct({ world: d.world, x: d.x, z: d.z, title: d.name }, "the area around " + d.name), A.factionAct(d.faction)], m)) return;
+        if (d.faction && A.layerOn("factions")) A.emit("openFaction", d.faction); else m.openTooltip();
+      });
       groups.players.addLayer(m);
       const el = m.getElement();
       if (el) el.classList.add("fade-in");
@@ -731,8 +772,12 @@
     let extra = "";
     if (p.control) extra += "<div class='tc-sub'>" + esc(p.control) + "</div>";
     if (p.status && p.status !== p.control) extra += "<div class='tc-sub'>" + esc(p.status) + "</div>";
-    tip(m, card(esc(p.label || e[2]), sub, { x: p.x, z: p.z }, extra), { offset: [0, -18] });
-    if (p.holder) m.on("click", () => { if (A.layerOn("factions")) A.emit("openFaction", p.holder); });
+    const html = card(esc(p.label || e[2]), sub, { x: p.x, z: p.z }, extra);
+    tip(m, html, { offset: [0, -18] });
+    m.on("click", () => {
+      if (A.openActions(m.getLatLng(), html, [A.isoAct({ x: p.x, z: p.z, title: p.label || e[2] }, p.label || e[2]), A.factionAct(p.holder)], m)) return;
+      if (p.holder && A.layerOn("factions")) A.emit("openFaction", p.holder);
+    });
     return m;
   }
   let pointsSeq = 0;
@@ -761,8 +806,13 @@
       const m = marker(toLatLng(p.x, p.z), { icon: symIcon(k[0], col(p.color, k[1]), { count: !!p.expiresAt, endsAt: p.expiresAt }), label: (p.label || k[2]) + ", " + String(k[2]).toLowerCase() + (p.faction ? " of " + p.faction : "") });
       const title = esc(p.label || k[2]) + (p.faction ? " " + A.facChip(p.faction, p.color, true) : "");
       const exp = p.expiresAt ? "<div class='tc-sub'>Expires in <span data-ends='" + Number(p.expiresAt) + "'>" + A.fmtLeft(p.expiresAt - Date.now()) + "</span></div>" : "";
-      tip(m, card(title, esc(k[2]), { x: p.x, z: p.z }, exp));
-      if (p.faction) m.on("click", () => { if (A.layerOn("factions")) A.emit("openFaction", p.faction); });
+      const html = card(title, esc(k[2]), { x: p.x, z: p.z }, exp);
+      tip(m, html);
+      // Waypoints, homes, rallies and the other faction points open their card with View in 3D.
+      m.on("click", () => {
+        if (A.openActions(m.getLatLng(), html, [A.isoAct({ x: p.x, z: p.z, title: p.label || k[2] }, p.label || k[2]), A.factionAct(p.faction)], m)) return;
+        if (p.faction && A.layerOn("factions")) A.emit("openFaction", p.faction);
+      });
       groups.points.addLayer(m);
     }
     for (const z of d.zones || []) {
@@ -864,6 +914,8 @@
       const label = lk.title + ", " + (lk.kind === "shared" && lk.by ? "shared marker by " + lk.by : MARKER_KIND[lk.kind].sub.toLowerCase());
       const m = marker(toLatLng(mk.x, mk.z), { icon: symIcon(lk.sym, lk.color, { size: lk.size, img: lk.img, own: lk.own, ring: lk.ring, pulse: !!lk.alert, pulseColor }), zIndexOffset: lk.z, title: "", label });
       tip(m, markerCard(mk, lk), { offset: [0, lk.size === "big" ? -18 : -14] });
+      // The server looks the marker up by its id, the viewer's own markers included.
+      m.on("click", () => A.openActions(m.getLatLng(), markerCard(mk, lk), [A.isoAct({ marker: mk.id, x: mk.x, z: mk.z, title: lk.title }, lk.title)], m));
       m._grp = lk.group;
       markerRefs.set(A.markerKey(mk), m);
     }
@@ -945,8 +997,20 @@
       else { const f = fillOf(m, tint); it = L.polygon(pts, { color: tint, weight: weight || 2, fillColor: f.c, fillOpacity: f.o }); }
       it.bindTooltip(card(esc(name), sub, null, hint), { sticky: true, className: "card" });
     }
-    // The popup is html the server prepared, with text from untrusted sources already escaped.
-    if (it && m.popup) it.bindPopup(String(m.popup), { className: "atlas-popup", maxWidth: 300, autoPanPadding: [24, 24] });
+    // The popup is html the server prepared, with text from untrusted sources already escaped. View in 3D goes under
+    // it. A point uses the marker route, a shape leaves the radius to the server so the view covers it.
+    if (!it) return null;
+    const iso = () => A.isoAct({ marker: m.id, layer: def.id, autoR: m.kind !== "point", x: m.kind === "point" || m.kind === "circle" ? m.x : null, z: m.kind === "point" || m.kind === "circle" ? m.z : null, title: name }, name);
+    if (m.popup) {
+      it.bindPopup(() => A.withActions(String(m.popup), [iso()]), { className: "atlas-popup", maxWidth: 300, autoPanPadding: [24, 24] });
+      it.on("popupopen", () => it.closeTooltip());
+    } else {
+      it.on("click", (e) => {
+        const at = m.kind === "point" ? it.getLatLng() : e.latlng;
+        const html = card(esc(name), sub, m.kind === "point" ? { x: m.x, y: m.y, z: m.z } : m.kind === "circle" ? { x: m.x, z: m.z } : null);
+        A.openActions(at, html, [iso()], it);
+      });
+    }
     return it;
   }
   function buildLayer(def) {
@@ -1167,12 +1231,14 @@
     if (state.tlDate) q.set("t", state.tlDate);
     return location.origin + location.pathname + "?" + q.toString();
   };
+  // While a 3D view is open the address carries it as iso=world,x,z,r,az,s, so a copied address opens it again.
+  const isoTail = () => { const p = A.isoParam ? A.isoParam() : ""; return p ? "&iso=" + p : ""; };
   A.saveUrl = () => {
     if (!state.world) return;
     const c = fromLatLng(map.getCenter());
     const q = new URLSearchParams({ world: state.world, x: String(c.x), z: String(c.z), zoom: String(map.getZoom()) });
     if (state.tlDate) q.set("t", state.tlDate);
-    try { history.replaceState(null, "", "?" + q.toString() + location.hash); } catch (e) { /* some embedded views block it */ }
+    try { history.replaceState(null, "", "?" + q.toString() + isoTail() + location.hash); } catch (e) { /* some embedded views block it */ }
   };
   map.on("moveend", A.throttle(() => A.saveUrl(), 400));
   A.shareView = () => { A.saveUrl(); A.copy(location.href, "Link to this view"); };
@@ -1202,7 +1268,8 @@
       "<div class='menu-sep'></div>" +
       "<button class='menu-item' data-act='copy'>" + A.icon("copy", "sm") + "<span class='grow'>Copy coordinates</span></button>" +
       "<button class='menu-item' data-act='link'>" + A.icon("link", "sm") + "<span class='grow'>Copy a link to this spot</span></button>" +
-      "<button class='menu-item' data-act='measure'>" + A.icon("ruler", "sm") + "<span class='grow'>Measure from here</span></button>";
+      "<button class='menu-item' data-act='measure'>" + A.icon("ruler", "sm") + "<span class='grow'>Measure from here</span></button>" +
+      (A.isoOk && A.isoOk() ? "<button class='menu-item' data-act='iso'>" + A.icon("cube", "sm") + "<span class='grow'>View this area in 3D</span></button>" : "");
     ctx.hidden = false;
     const size = map.getSize();
     const w = ctx.offsetWidth, h = ctx.offsetHeight;
@@ -1211,6 +1278,8 @@
     ctx.querySelector("[data-act='copy']").addEventListener("click", () => { closeCtx(); A.copy(p.x + " " + p.z, "Coordinates X " + p.x + " Z " + p.z); });
     ctx.querySelector("[data-act='link']").addEventListener("click", () => { closeCtx(); A.copy(A.urlFor(p.x, p.z, map.getZoom()), "Link to this spot"); });
     ctx.querySelector("[data-act='measure']").addEventListener("click", () => { closeCtx(); A.setMeasure(true); addMeasurePoint(e.latlng); });
+    const iso = ctx.querySelector("[data-act='iso']");
+    if (iso) iso.addEventListener("click", () => { closeCtx(); A.openIso({ x: p.x, z: p.z, title: "X " + p.x + "  Z " + p.z }); });
     ctx.querySelector("button").focus({ preventScroll: true });
   });
   map.on("click movestart zoomstart", closeCtx);

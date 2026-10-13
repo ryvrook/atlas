@@ -1,0 +1,671 @@
+# Atlas browser API, version 1
+
+This is the reference for the JSON API and the event stream that the Atlas web client uses. Scripts,
+bots and other sites may use it too. Every payload is built by Atlas from an explicit field list.
+Nothing from the factions snapshot file or the Feats export is passed through as a raw object.
+
+## Versioning
+
+`apiVersion` is `1`. It appears at the top level of `GET /api/worlds` and of the `hello` event, and
+inside the `server` object of both.
+
+Within version 1 Atlas promises the following.
+
+- No field listed here is removed, renamed or given another type.
+- A key listed here is always present. When it has no value it holds `null`.
+- New fields, new endpoints, new event names and new values of open ended strings (such as a
+  timeline event `kind`) may be added. Clients must ignore what they do not know.
+- A change that breaks any of the above raises `apiVersion` to 2.
+
+The web client in the jar always matches the server it came with. A client that sees
+`server.version` change in `hello` or `/api/worlds` should reload.
+
+## Conventions
+
+- Every field has one JSON type.
+- Every point in time is epoch milliseconds, in a key ending in `At` or named `at`, `now`, `since`
+  or `updatedAt`.
+- Every duration is a number of seconds in a key ending in `Seconds`. No key ends in `Ms`.
+- The second map axis is `z` everywhere, in blocks, chunks and tiles. Tile rows are `[zoom, x, z]`.
+- `cx` and `cz` are chunk coordinates. A chunk is 32 blocks.
+- Types below use `string`, `int`, `number`, `bool`, `ms` (int epoch milliseconds), `T|null`, `[T]`
+  for an array and `{key: T}` for an object with free keys.
+- Every JSON answer carries `Access-Control-Allow-Origin: *` and `X-Content-Type-Options: nosniff`.
+  Every GET route also answers HEAD.
+
+## Authentication and viewers
+
+A request is public unless it carries a link session or the admin token.
+
+- A browser linked with `/atlas link` sends the `atlas_session` cookie.
+- Scripts send the `adminToken` from `atlas.json` as `X-Atlas-Token` or `Authorization: Bearer <token>`.
+- An admin may add `?as=TAG` to any route to see what a member of that faction sees.
+
+A wrong admin token counts against the same limit as link codes, 10 attempts per minute and address,
+and further requests that carry a token then get 429.
+
+## Errors
+
+Every error with a body uses one shape.
+
+```
+{ok: false, error: string}
+```
+
+| Status | When |
+| --- | --- |
+| 400 | Bad input, such as a malformed date or coordinates that are not whole numbers |
+| 403 | The viewer may not see the layer the route belongs to |
+| 404 | Unknown world, faction, day or endpoint, a disabled world, or a world hidden from this viewer |
+| 405 | A method other than GET or HEAD, or anything but POST on the link route |
+| 409 | A timeline export while another one runs. Carries `Retry-After` |
+| 415 | A link request that is not JSON |
+| 429 | A rate limit. Carries `Retry-After` in seconds |
+| 503 | Too many requests at once, a tile render that could not start in time, or a 3D view that just failed. Carries `Retry-After` |
+
+A 3D view that is still being drawn answers 202 with a JSON body, see [3D views](#3d-views).
+
+Tile and image routes answer 404 and 503 without a body, since browsers load them as images. Their
+403 still has the JSON body.
+
+## Rate limits
+
+API routes count against `apiRequestsPerMinute` per address (600 by default). Tiles, marker icons and
+timeline day tiles count against `tileRequestsPerMinute` (3000 by default). Both are buckets that hold
+one minute of requests and refill steadily. IPv6 clients share one bucket per /64. The page and its
+static files are not limited.
+
+## Visibility
+
+Each route belongs to a visibility layer from `atlas.json`. A viewer who may not see that layer gets
+403. `viewer.layers` in `/api/worlds` and `hello` says which layers apply to the viewer.
+
+**Hidden players.** For a viewer who is not an admin and not the player themself, a hidden player is
+never listed in players or offline rows, and wherever a hidden player's name appears elsewhere
+(kills, leaderboard rows, recent unlocks, milestones, firsts, marker authors, chat, timeline events)
+the name is `"A player"` and the uuid is `null`. Feed text is shared by every viewer and always says
+"A player" for hidden players in lines Atlas writes. Players hidden only by the crouching or invisible
+rule lose their position but keep their name.
+
+**Hidden worlds.** A world with `hiddenWorld: true` answers 404 to non admins on every route that
+names it. Players, kills, feed lines, world events and tile updates in it never reach those viewers.
+A world disabled in `atlas.json` is left out of `/api/worlds` for everyone, admins included, and
+every route that names it answers 404.
+
+**Positions.** Positions are whole blocks for non admins and two decimals for admins. Offline
+positions are snapped to the chunk corner for non admins other than the player themself.
+
+## Shared objects
+
+```
+Viewer      {linked: bool, name: string|null, faction: string|null, admin: bool, viewingAs: bool,
+             layers: {<layer>: bool}}
+Server      {apiVersion: 1, title: string, publicUrl: string|null, version: string, now: ms,
+             uptimeSeconds: int, betterMap: bool}
+Party       {name: string, uuid: string|null, type: string, player: bool, boss: bool}
+Kill        {at: ms, world: string|null, victim: Party, killer: Party|null, cause: string|null, ranged: bool}
+FeedLine    {at: ms, type: string, text: string, source: "atlas"|"dominion", world: string|null}
+ChatLine    {at: ms, name: string, tag: string|null, text: string}
+Siege       {id: string|null, attacker: string|null, defender: string|null, phase: string|null, world: string,
+             chunk: [cx, cz]|null, endsAt: ms|null}
+NationRef   {tag: string, name: string, color: string|null}
+```
+
+- `viewingAs` is true when an admin views the map as a faction, and `faction` then holds that
+  faction's tag, which the client sends back as `?as=`.
+- `layers` has one key per visibility layer, which are players, paths, lastSeen, territories, points,
+  events, zones, factions, nations, stats, terrain, heat, feed, chat, kills, markers, worldevents,
+  leaderboard, layers, timeline and iso.
+- `Party.uuid` is null for creatures and for hidden players. `Party.type` is the creature role id, or
+  `"Player"` for players.
+- `FeedLine.world` names the world a line is about (deaths, boss kills and world events written by
+  Atlas, or the world of a factions line) and is null otherwise. `source` is `"dominion"` for lines
+  from the factions snapshot file.
+
+## Endpoints
+
+### GET /api/worlds
+
+Always 200.
+
+```
+{apiVersion: 1, title: string, standalone: bool, defaultWorld: string|null, viewer: Viewer, server: Server,
+ tile: {size: int, chunkPixels: int, chunkBlocks: int, blocksPerTile: int, minZoom: int, maxZoom: int,
+        levels: {"<zoom>": {pxPerBlock: number, chunksPerTile: int}}},
+ worlds: [World]}
+
+World   {name: string, kind: "world"|"portal"|"instance", displayName: string, hiddenWorld: bool,
+         portal: Portal|null, players: int|null, spawn: {x: int, y: int, z: int}|null,
+         time: {hour: int, dayProgress: number}|null, mapEnabled: bool, exploredChunks: int,
+         bounds: {minX: int, minZ: int, maxX: int, maxZ: int}|null,
+         border: Circle|null, renderLimit: Circle|null}
+Portal  {type: string|null, typeName: string, timeLimit: bool, remainingSeconds: number|null,
+         elapsedSeconds: number|null, voidStage: int|null, voidActive: bool, entries: int}
+Circle  {shape: "circle", x: number, z: number, radius: number}
+```
+
+- `defaultWorld` is the world to open first. Null means the client picks, and it is also null when
+  the viewer may not open that world.
+- `displayName` follows `worlds.<name>.displayName` in `atlas.json` when set.
+- `hiddenWorld` follows `worlds.<name>.hidden` when set, and otherwise is true for portal and
+  instance worlds while `showPortalWorlds` is off.
+- `players` is null when the viewer may not see players.
+- `border` is set only on worlds BetterMap tracks.
+- `renderLimit` is the circle outside which tiles answer 404, so the client may draw it as the edge
+  of the map.
+
+### GET /api/players
+
+Takes `world` and `trails=1`. Follows `players`, and answers 403 to non admins while `showPlayers` is
+off.
+
+```
+{at: ms, players: [Player], offline: [Offline]|null}
+
+Player  {uuid: string, name: string, world: string|null, x: number|null, y: number|null, z: number|null,
+         located: bool, underground: bool, hidden: bool|null, hiddenReason: string|null,
+         faction: string|null, color: string|null, health: number|null, maxHealth: number|null,
+         self: bool, source: "live"|"snapshot", trail: [[x, z]]|null}
+Offline {uuid: string|null, name: string, faction: string|null, at: ms, world: string,
+         x: int|null, z: int|null}
+```
+
+- `located` false means online without a known position. `underground` true means below
+  `hideBelowY`, with null coordinates.
+- `hidden` and `hiddenReason` are null for non admins. For admins `hiddenReason` is `"list"` (the
+  hide list), `"dominion"` (the snapshot flag), `"crouching"`, `"invisible"`, or the reason a plugin
+  gave through `AtlasApi.setHidden`.
+- `trail` is null unless trails were asked for and `paths` is visible.
+- `offline` is null unless `lastSeen` is visible.
+- Players in a world the viewer may not open are left out, except the viewer themself.
+
+### GET /api/markers/{world}
+
+Follows `markers`.
+
+```
+{world: string, at: ms|null, markers: [Marker]}
+
+Marker  {id: string, kind: "spawn"|"poi"|"engine"|"shared"|"personal"|"home"|"death",
+         source: "spawn"|"poi"|"warp"|"block"|"other"|"shared"|"personal"|"home"|"death",
+         name: string, x: int, y: int|null, z: int, icon: string|null, major: bool, alert: Alert|null,
+         tint: string|null, by: {uuid: string|null, name: string|null}|null, own: bool}
+Alert   {icon: string|null, durationSeconds: number, timeoutSeconds: number, tint: string|null}
+```
+
+`kind` is the marker type the client draws by and `source` says where it came from. `own` is true for
+the viewer's personal markers, homes and deaths, which no other viewer ever gets. `by` is null unless
+`showMarkerAuthors` is on and an author is known. Duplicates from different sources are listed once.
+
+### GET /api/layers/{world}
+
+Marker layers from plugins, drop folder files and the `/atlas marker` commands. Follows `layers`. 400
+without a world. A layer whose own tier the viewer does not meet is left out, as is a layer with no
+markers in this world that the viewer may see.
+
+```
+{world: string, at: ms, layers: [Layer]}
+
+Layer        {id: string, plugin: string, label: string, source: "api"|"file"|"admin",
+              tier: "public"|"linked"|"faction"|"admin", defaultHidden: bool, priority: int,
+              minZoom: int|null, maxZoom: int|null, updatedAt: ms, markers: [LayerMarker]}
+LayerMarker  {id: string, kind: "point"|"polyline"|"polygon"|"circle", label: string|null, popup: string|null,
+              x: number|null, y: number|null, z: number|null, radius: number|null, points: [[x, z]]|null,
+              icon: string|null, iconData: string|null, tint: string|null, fill: string|null,
+              weight: number|null, faction: string|null}
+```
+
+- `id` is `plugin:layer`. Drop folder files are `file:<file name>` and the admin layer is
+  `atlas:admin`.
+- Layers are sorted by `priority`, highest first, then by id. Higher priority draws on top.
+- `minZoom` and `maxZoom` use the zoom levels of `tile.levels`, where a larger number is further out.
+  Null means every zoom.
+- A `point` uses `x`, `z` and an optional `y`, with `icon` (an engine icon name, loaded from
+  `/api/marker-icons/{icon}.png`), `iconData` (a base64 image data URL of at most 8 KB) or neither for
+  the default pin. A `circle` uses `x`, `z` and `radius` in blocks. A `polyline` (open) and a
+  `polygon` (closed) use `points` as `[x, z]` rows in blocks.
+- `popup` is HTML ready to insert. Untrusted text is escaped by the server, with line breaks as
+  `<br>`. Only a popup a plugin set through the Java API with `popupHtml` is passed as written.
+- `label` is plain text. Set it as text, never as HTML.
+- `tint` colours the icon or outline and `fill` the inside of a polygon or circle, as `#rgb`,
+  `#rrggbb` or `#rrggbbaa`. `weight` is the outline width in pixels. Null means the client default.
+- On a layer with tier `faction`, a marker with a `faction` tag is sent only to members of that
+  faction and a marker without one to every faction member. Admins get every marker.
+
+### GET /api/worldevents
+
+Takes `world`. Follows `worldevents`.
+
+```
+{events: [WorldEvent]}
+
+WorldEvent {id: string, world: string, name: string, displayName: string, startedAt: ms,
+            x: int|null, z: int|null, located: bool}
+```
+
+### GET /api/kills
+
+Takes `limit`, 1 to 200, 50 by default. Follows `kills`. Newest last.
+
+```
+{kills: [Kill]}
+```
+
+### GET /api/leaderboard
+
+Follows `leaderboard`. Answers 200 with `available: false` and empty lists when no Feats export
+exists.
+
+```
+{available: bool, updatedAt: ms|null, totalFeats: int, totalPoints: int, online: int|null,
+ rarityPlayers: int, rarity: {<featId>: number},
+ players: [Row], recent: [Unlock], milestones: [Record], firsts: [Record]}
+
+Row     {rank: int, uuid: string|null, name: string, points: int, unlocked: int, lastUnlockAt: ms|null}
+Unlock  {at: ms, uuid: string|null, name: string, feat: string, featName: string, tier: string,
+         points: int, category: string, hiddenFeat: bool, rarity: number|null}
+Record  {feat: string, featName: string, tier: string, at: ms, uuid: string|null, name: string|null}
+```
+
+`rarity` is the share of counted players, 0 to 1, who own each feat, empty until Feats counts enough
+players. `Unlock.rarity` is the same value for that feat or null. `milestones` and `firsts` are oldest
+first. A milestone reached with nobody named has `uuid` and `name` null. Rows are in Feats rank order
+and `rank` starts at 1.
+
+### GET /api/territories/{world}
+
+Follows `territories`.
+
+```
+{world: string, at: ms|null, territories: [Territory], sieges: [Siege]}
+
+Territory {id: string|null, tag: string, name: string, color: string|null, type: string|null, raidable: bool,
+           chunks: [[cx, cz]], breached: [[cx, cz]], zones: [{id: string|null, name: string, chunks: [[cx, cz]]}],
+           power: number|null, maxPower: number|null, claims: int|null}
+```
+
+Sieges are those of this world that are running or ended under a minute ago.
+
+### GET /api/points/{world}
+
+Answers 403 only when `points`, `events` and `zones` are all hidden.
+
+```
+{world: string, points: [Point], zones: [Zone]}
+
+Point {id: string, kind: string, label: string|null, x: int, y: int|null, z: int, color: string|null,
+       faction: string|null, expiresAt: ms|null, event: bool,
+       holder: string|null, control: string|null, status: string|null}
+Zone  {id: string, name: string, x: int, z: int, icon: string|null}
+```
+
+`y` is null for non admins. `event` is true for hills, outposts and envoys, which follow `events`.
+
+### GET /api/factions
+
+Follows `factions`. Sorted by value, highest first.
+
+```
+{at: ms|null, factions: [Faction]}
+
+Faction {id: string|null, tag: string, name: string, color: string|null, leader: string|null, members: int,
+         online: int, claims: int, power: number, maxPower: number, value: number, rank: int, kills: int,
+         deaths: int, siegesWon: int, siegesLost: int, level: int, points: int,
+         relations: {<tag>: "ALLY"|"TRUCE"|"ENEMY"}, createdAt: ms|null, description: string|null,
+         bank: number|null, nation: NationRef|null}
+```
+
+`bank` is null unless the viewer is an admin or a member. `nation` is null when the faction has none
+or `nations` is hidden.
+
+### GET /api/factions/{tag}
+
+Follows `factions`. 404 when no visible faction has that tag.
+
+```
+{faction: Faction, lands: [{world: string, claims: int, x: int, z: int}],
+ onlineMembers: [{name: string, world: string|null}], sieges: [Siege]}
+```
+
+`lands` and `sieges` are empty when `territories` is hidden. `onlineMembers` follows the players rules.
+
+### GET /api/nations
+
+Follows `nations`.
+
+```
+{at: ms|null, nations: [Nation], independent: [FactionBrief]}
+
+Nation       {id: string|null, tag: string, name: string, color: string|null, memberCount: int,
+              value: number, claims: int, factions: [FactionBrief]}
+FactionBrief {tag: string, name: string, color: string|null, value: number, claims: int, power: number,
+              members: int}
+```
+
+The `factions` lists are empty when `factions` is hidden.
+
+### GET /api/stats
+
+Follows `stats`.
+
+```
+{at: ms, online: int, worlds: int, uptimeSeconds: int, snapshot: {present: bool, at: ms|null},
+ factions: {count: int, claims: int, topValue: [Top]|null, topPower: [Top]|null, topKills: [Top]|null}|null,
+ grace: {active: bool, endsAt: ms|null}|null, eotw: bool|null, activeSieges: int|null,
+ events: Events|null,
+ activity: {breaksLastHour: int, placesLastHour: int, breaksLastDay: int, placesLastDay: int}}
+
+Top      {tag: string, name: string, color: string|null, amount: number}
+Events   {enabled: bool|null, koths: [EventRow], outposts: [EventRow], envoys: [string], bounties: int,
+          season: string|null, seasonEndsAt: ms|null}
+EventRow {name: string, status: string|null, holder: string|null, control: string|null, endsAt: ms|null}
+```
+
+`factions`, `grace`, `eotw`, `activeSieges` and `events` are null without a factions snapshot file.
+The top lists are null when factions are hidden or limited to the viewer's own. `events` is null when
+the `events` layer is hidden.
+
+### GET /api/changes/{world}
+
+Takes `since`, an hour ago by default and at most seven days back. Follows `terrain`.
+
+```
+{world: string, now: ms, since: ms, tiles: [[zoom, x, z, at]]}
+```
+
+### GET /api/heat/{world}
+
+Takes `since` like the changes route. Follows `heat`.
+
+```
+{world: string, now: ms, since: ms, bucketSeconds: int, chunks: [[cx, cz, breaks, places]]}
+```
+
+Faction limited viewers get only chunks inside their own land.
+
+### GET /api/tiles/{world}/{zoom}/{x}/{z}.png
+
+A 256 pixel PNG at zoom -2 to 4. Follows `terrain`. Carries a strong `ETag` and answers a matching
+`If-None-Match` with 304. A tile that does not exist answers 404, and a render that could not start
+in time answers 503 with `Retry-After`. A partial tile carries `X-Atlas-Partial: 1` and
+`Cache-Control: no-store`. Tile x is the block x divided by the blocks per tile of the zoom, rounded
+down, and the same goes for z.
+
+### GET /api/marker-icons/{Name}.png
+
+A marker image from the server's assets, such as `UserB`, `Home` or `Death`. The same for everyone,
+no session is looked at. ETag and 304. 404 for unknown names.
+
+### GET /api/health
+
+Answers `{ok: true, version: string}` to everyone. Admins also get the following.
+
+```
+{name: string, uptimeSeconds: int, standalone: bool, sseClients: int,
+ tileCache: {entries: int, bytes: int, maxBytes: int, queued: int, diskWriteFailures: int,
+             lastDiskWriteFailureAt: ms|null},
+ render: {queued: int, running: int, done: int, paused: bool, perWorld: {<world>: int},
+          budgetLeft: int, budgetPerMinute: int}|null,
+ stalledWorlds: [{world: string, updatedAt: ms}],
+ bind: {state, attempts, startedAt, nextAttemptAt, error}|null,
+ failingTasks: [{task: string, since: ms}],
+ diskWriteFailures: [{file: string, at: ms, error: string}],
+ status: "ok"|"degraded", degraded: [string]}
+```
+
+`budgetLeft` is -1 when the chunk image budget is unlimited. A world counts as stalled when its info
+was not refreshed for 30 seconds. `degraded` names each problem found, from `renderBacklog`,
+`worldPollStalled`, `bindRetry`, `taskFailing`, `diskWriteFailing` and `tileWriteFailing`.
+
+### POST /api/link
+
+Takes JSON. `{"code": "ABC123"}` links the browser and answers `{ok: true, viewer: Viewer}`.
+`{"action": "logout"}` unlinks it and answers `{ok: true}`. Another content type gets 415.
+
+## Timeline
+
+Daily snapshots of each world's tiles and stats plus an event log. Dates are server local ISO dates
+such as `"2026-10-13"`. Every timeline route answers 404 when `timeline.enabled` is false, for an
+unknown, disabled or hidden world, and for a day that holds nothing. Day tiles and the changed list
+follow `terrain`, every other timeline route follows `timeline`. A malformed date answers 400.
+
+### GET /api/timeline/{world}
+
+```
+{world: string, enabled: bool, hour: int, nextRunAt: ms|null, retainDays: int, today: string, days: [Day]}
+
+Day     {date: string, snapshot: bool, pruned: bool, takenAt: ms|null, tiles: int, changed: int, partial: bool,
+         events: int, stats: bool, isoViews: [IsoDay]}
+IsoDay  {label: string, x: int, z: int, radius: int, file: string}
+```
+
+Days are oldest first and include days that only have events, such as today before its snapshot,
+with `snapshot: false`. A pruned day stays listed with `pruned: true` so a slider can show a gap.
+`nextRunAt` is null while the timeline is off. `partial` means some tiles were being redrawn during
+the snapshot and kept their image from the day before. `events` counts stored lines.
+
+`isoViews` lists the 3D views drawn with that day's snapshot, empty when there are none or the day
+was pruned. `file` is the relative address of the image,
+`api/timeline/{world}/{date}/iso/{label}.png`. Labels are lower case letters, digits, dashes and
+underscores. Views of server markers are labelled `marker-<id>`.
+
+### GET /api/timeline/{world}/{date}/tiles/{zoom}/{x}/{z}.png
+
+The tile as it was that day, with the same coordinates as `/api/tiles`. PNG with a strong `ETag` and
+304. Past days are cached for a year as immutable, today for five minutes. A tile that did not exist
+that day, or a day without a snapshot, answers 404 without a body. Counts against the tile rate limit.
+
+### GET /api/timeline/{world}/{date}/changed
+
+404 when the day has no snapshot.
+
+```
+{world: string, date: string, previous: string|null, first: bool, tiles: [[zoom, x, z]]}
+```
+
+The tiles whose image differs from the previous snapshot of the world, at every zoom. On the first
+day held, `first` is true, `previous` is null and every tile is listed.
+
+### GET /api/timeline/{world}/{date}/stats
+
+404 when the day has no stats.
+
+```
+{world: string, date: string, takenAt: ms, windowSeconds: int, exploredChunks: int, tiles: int, changed: int,
+ playersSeen: int, peakOnline: int, onlineNow: int, kills: int, deaths: int, blocksBroken: int,
+ blocksPlaced: int, worldEvents: int, events: int, feats: FeatsSummary|null}
+
+FeatsSummary {updatedAt: ms|null, totalFeats: int, totalPoints: int, players: int, rarityCount: int,
+              milestones: int, firsts: int,
+              top: [{rank: int, uuid: string|null, name: string, points: int, unlocked: int}]}
+```
+
+`windowSeconds` is 86400, the 24 hours before `takenAt`. `kills` counts deaths with a player killer
+and `deaths` deaths of players, both in this world. `blocksBroken` and `blocksPlaced` come from the
+heat data. `feats` is null without a Feats export or when `leaderboard` is hidden from the viewer.
+`top` holds at most ten rows in Feats rank order.
+
+### GET /api/timeline/{world}/{date}/events
+
+```
+{world: string, date: string, dropped: bool, items: [TimelineEvent]}
+
+TimelineEvent {at: ms, kind: string, world: string, x: int|null, z: int|null, who: string|null, text: string}
+```
+
+Oldest first. `kind` is one of `join`, `leave`, `death`, `kill`, `worldevent.start`,
+`worldevent.end`, `feats.unlock`, `feats.milestone`, `feats.first`, `dominion`, `marker.add`,
+`marker.remove`, `snapshot` and `dropped`, or another lowercase dotted kind, which clients show as a
+plain line. A day holds at most 5,000 events, then one `dropped` event with `dropped: true` and
+nothing after it.
+
+### GET /api/timeline/{world}/events
+
+Events of a time range across days. Takes `from`, `to`, `kind` and `limit`.
+
+```
+{world: string, from: ms, to: ms, truncated: bool, items: [TimelineEvent]}
+```
+
+`to` defaults to now and `from` to 24 hours before `to`. The range is clamped to 31 days and the
+clamped `from` is returned. `kind` is a comma list, each entry matching that kind or the kinds below
+it, so `worldevent` matches `worldevent.start`. `limit` is 1 to 5000, 1000 by default. Oldest first,
+and when more match, the newest `limit` are kept with `truncated: true`. Values that are not whole
+numbers, or `from` after `to`, answer 400.
+
+### GET /api/timeline/{world}/{date}/iso/{label}.png
+
+A daily 3D view. PNG with a strong `ETag` and 304. Past days are cached for a year as immutable,
+today for five minutes. 404 for an unknown label or day, 403 when `terrain` or `iso` is hidden, 400
+for a malformed date, and the timeline 404 rules. Counts against the API rate limit.
+
+### GET /api/timeline/{world}/export
+
+Admins only. Takes `from` and `to`, both dates, inclusive, at most 90 days apart. Streams a zip as it
+is built, with `Content-Type: application/zip` and `Content-Disposition: attachment`. The zip holds
+`README.txt`, then per day `days/{date}/tiles.json`, `stats.json`, `events.jsonl` and `iso/` (its views
+and `index.json`) when present, then every tile image those days name, once, as `blobs/{hash}.png`.
+
+- 403 for non admins.
+- 400 for missing or malformed dates, `from` after `to`, or a longer range.
+- 409 with `Retry-After` while another export runs. One runs at a time per server.
+- 429 past `tileRequestsPerMinute` per address, next to the API limit.
+- The timeline 404 rules.
+
+Files are copied as stored, so player names are not hidden. That is why the route is admin only.
+
+### Timeline visibility per event
+
+Items are filtered when served. `kill` and `death` follow `kills`, `worldevent.*` follows
+`worldevents`, `feats.*` follows `leaderboard`, `marker.*` follows `markers`, `snapshot` and
+`dropped` need only `timeline`, and everything else follows `feed`. For non admins a hidden player
+other than the viewer is `"A player"` in `who` and in `text`, and `join`, `leave`, `kill` and `death`
+of a hidden player lose `x` and `z`. Those four kinds are snapped to the chunk corner for non admins
+other than the player.
+
+## 3D views
+
+Isometric pictures of an area, one column per block with side faces, trees, water and plants. Views
+follow `terrain` and `iso`, and the viewer needs both, otherwise 403. `viewer.layers.iso` tells the
+client. A view covers a square of `2r + 1` by `2r + 1` chunks around the chunk that holds `x` and
+`z`. Only explored chunks inside the world's `renderLimit` are drawn, anything else in the square is a
+flat grey floor. The server never generates terrain for a view.
+
+### GET /api/iso
+
+Always 200. What the server allows, so the client can hide the action.
+
+```
+{ok: true, enabled: bool, visible: bool, maxRadius: int, defaultRadius: int, defaultScale: int,
+ azimuths: [int], maxScale: {"<radius>": int}}
+```
+
+`enabled` is `isoEnabled`. `visible` is true when the viewer may see both `terrain` and `iso`.
+`maxScale` gives the largest scale each radius allows, 3 up to radius 5, 2 up to radius 8 and 1 above.
+
+### GET /api/iso/{world}
+
+Takes these parameters.
+
+- `x` and `z`, a block position, required whole numbers.
+- `r`, the radius in chunks, 1 to `maxRadius` (at most 16). 4 by default, or `maxRadius` when lower.
+- `az`, 0, 90, 180 or 270, 0 by default. 0 looks from the south east, with east running down to the
+  right, 90 from the south west, 180 from the north west and 270 from the north east.
+- `s`, the pixel scale, 1 to 3, 2 by default. A scale above `maxScale` of the radius is lowered
+  silently.
+
+The answers.
+
+- `200` with a PNG on a transparent background, a strong `ETag` (304 on `If-None-Match`),
+  `Cache-Control: public, max-age=300` and `X-Atlas-Iso` set to `world,x,z,r,az,s` as drawn, where x
+  and z are the centre of the centre chunk and r and s are after clamping. A view drawn while chunks
+  were missing carries `X-Atlas-Partial: 1` and `Cache-Control: no-store`.
+- `202` while the view is queued or drawing, with `Retry-After` set to `etaSeconds`. Ask again with
+  the same query after that time. Asking about a queued view is free.
+  ```
+  {ok: true, queued: true, etaSeconds: int,
+   view: {world: string, x: int, z: int, radius: int, azimuth: int, scale: int}}
+  ```
+- `429` with `Retry-After` when this address started more than `isoRequestsPerMinute` new renders in
+  the last minute, or when the render queue is full. Cached views do not count.
+- `503` with `Retry-After` for a view whose render just failed. It is tried again after 30 seconds.
+- `400` for bad parameters, `403` when `terrain` or `iso` is hidden, and `404` when `isoEnabled` is
+  false, for an unknown, disabled or hidden world, and for a square with no explored chunk inside the
+  render limit.
+
+Every request also counts against the API rate limit. Views are cached and drawn again at least
+every six hours, sooner when a chunk inside them is saved.
+
+### GET /api/iso/{world}/marker/{markerId}
+
+Takes `layer`, `r`, `az` and `s`. The same answers for the view centred on a marker the viewer may
+see. The id is looked up in `/api/markers/{world}` first, which holds the spawn, engine and shared
+markers and the viewer's own personal markers, homes and deaths, then in the marker layers of
+`/api/layers/{world}`. `layer`, a layer id such as `atlas:admin`, limits the lookup to that layer.
+Without `r`, a polygon, polyline or circle gets a radius that covers it and a point gets radius 4. 404
+when no visible marker has that id.
+
+## Event stream, GET /api/events
+
+Takes `world` and `as`. Server sent events, each frame with an `id:`, an `event:` and one `data:`
+JSON line. The stream sends a `retry:` of 3 to 5 seconds, different per client.
+
+On connect, in this order, come `hello`, `players` with `full: true`, then `feedlog`, `chatlog` and
+`killlog` for the layers the viewer may see.
+
+```
+hello        {apiVersion: 1, viewer: Viewer, server: Server}
+players      {at: ms, hidden: bool, full: bool, players: [Player], left: [string]}
+feedlog      {items: [FeedLine]}
+chatlog      {items: [ChatLine]}
+killlog      {items: [Kill]}
+feed         FeedLine
+chat         ChatLine
+kill         Kill
+markers      {world: string, own: bool}
+layers       {world: string, layers: [string]}
+worldevent   {world: string, id: string, name: string, displayName: string, state: "start"|"end",
+              x: int|null, z: int|null, at: ms}
+tiles        {world: string, at: ms, tiles: [[zoom, x, z]]}
+snapshot     {sections: [string], at: ms|null, present: bool}
+leaderboard  {updatedAt: ms|null}
+worlds       {updatedAt: ms}
+timeline     {world: string, date: string}
+```
+
+- `players` rows follow the Player shape with `trail` null. `full: false` frames list only players
+  that changed plus `left`, the uuids that left the viewer's view. `left` is `[]` on full frames.
+  `hidden: true` means `players` is hidden for this viewer and the list is empty.
+- `markers` says the markers of a world changed, such as shared markers, warps, block markers or
+  portal markers. `own: true` means only this viewer's personal markers changed. Refetch
+  `/api/markers/{world}`.
+- `layers` names the layer ids that changed in a world. Each viewer gets only ids of layers they may
+  see now or could see before the change. Refetch `/api/layers/{world}` and replace the named layers.
+  A named layer missing from the answer was removed or is no longer visible.
+- `snapshot.sections` names the factions snapshot sections that changed, from territories, points,
+  factions, nations, events, feed and chat. Refetch the matching routes.
+- `leaderboard`, `worlds` and `timeline` say to refetch `/api/leaderboard`, `/api/worlds` and
+  `/api/timeline/{world}`. `worlds` is also sent when `/atlas reload` changes a world setting.
+- `hello` is sent again without a reconnect when the viewer changes, for example after a revoke, a
+  new permission or a new faction. Streams check this every 30 seconds.
+
+**Control frames.** `hello`, `markers`, `tiles`, `worlds`, `leaderboard`, `snapshot`, `layers` and
+`timeline` are never dropped from a slow client's queue. When the queue is full the oldest data frame
+goes instead. A client that takes no data for 15 seconds is closed.
+
+**Resume.** A browser that reconnects with `Last-Event-ID` within a minute, as the same viewer and
+for the same world, gets the frames it missed from the last 200, without a new `hello`. The frames are
+replayed as they were built during that minute. Any other reconnect starts over with `hello`.
+
+**Limits.** Each address may hold `sseClientsPerIp` streams (8 by default) and more get 429 with
+`Retry-After: 30`. Past 500 streams in total the answer is 503.
+
+## Removed in version 1
+
+- `GET /api/bosses` and the `boss` event. The route answers 404.
+- Heat in `/api/changes`. It has its own route, `/api/heat/{world}`.
+- `hidden` on a world, now `hiddenWorld`.
+- `uptimeMs` in `server` and `/api/stats`, now `uptimeSeconds`.
+- `lastSeen` on offline rows, now `at`.
+- Bare arrays in `feedlog`, `chatlog` and `killlog`, now `{items: [...]}`.
+- `{"hidden": true}` bodies for hidden layers, now 403 with an error body.

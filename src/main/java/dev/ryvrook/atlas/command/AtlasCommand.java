@@ -44,6 +44,7 @@ public final class AtlasCommand extends CommandBase {
         addSubCommand(new StaffCommands.Marker(plugin));
         addSubCommand(new StaffCommands.Snapshot(plugin));
         addSubCommand(new StaffCommands.Timeline(plugin));
+        addSubCommand(new StaffCommands.Iso(plugin));
     }
 
     @Override
@@ -53,7 +54,7 @@ public final class AtlasCommand extends CommandBase {
             context.sendMessage(Message.join(
                     Message.raw("Atlas ").color(ACCENT).bold(true),
                     Message.raw("is the live web map at ").color(TEXT),
-                    Message.raw(url).color("#ffffff")));
+                    Message.raw(url).color("#ffffff").link(url)));
         } else {
             context.sendMessage(Message.join(
                     Message.raw("Atlas ").color(ACCENT).bold(true),
@@ -88,10 +89,11 @@ public final class AtlasCommand extends CommandBase {
                     Message.raw(" and it works for " + minutes + " minutes.").color(TEXT)));
             String url = plugin.publicUrl();
             if (url != null) {
+                String withCode = url + (url.endsWith("/") ? "" : "/") + "?code=" + code;
                 context.sendMessage(Message.join(
                         Message.raw("Open ").color(TEXT),
-                        Message.raw(url).color("#ffffff"),
-                        Message.raw(" and enter it in the link dialog.").color(TEXT)));
+                        Message.raw(url).color("#ffffff").link(withCode),
+                        Message.raw(" and the map links itself, or enter the code in the link dialog.").color(TEXT)));
             } else {
                 context.sendMessage(Message.raw("Open the map and enter it in the link dialog. " + noAddress(plugin)).color(TEXT));
             }
@@ -136,7 +138,7 @@ public final class AtlasCommand extends CommandBase {
             if (url != null) {
                 context.sendMessage(Message.join(
                         Message.raw("Atlas runs at ").color(TEXT),
-                        Message.raw(url).color("#ffffff"),
+                        Message.raw(url).color("#ffffff").link(url),
                         Message.raw(up ? " and the web server is up." : " but the web server is not running.")
                                 .color(up ? TEXT : BAD)));
             } else {

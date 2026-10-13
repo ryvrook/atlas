@@ -20,7 +20,7 @@ import static dev.ryvrook.atlas.command.AtlasCommand.bad;
 import static dev.ryvrook.atlas.command.AtlasCommand.good;
 import static dev.ryvrook.atlas.command.AtlasCommand.say;
 
-/** Staff commands added in Atlas 1.0, hide and show for other players, admin markers and the timeline. */
+/** Staff commands added in Atlas 1.0, hide and show for other players, admin markers, the timeline and isometric views. */
 final class StaffCommands {
     private StaffCommands() {
     }
@@ -389,6 +389,107 @@ final class StaffCommands {
         @Override
         protected void executeSync(CommandContext context) {
             TimelineCommands.status(plugin, context);
+        }
+    }
+
+    // ---- isometric views --------------------------------------------------------
+
+    /** /atlas iso world x z [radius] [scale] and /atlas iso status. */
+    static final class Iso extends CommandBase {
+        Iso(AtlasPlugin plugin) {
+            super("iso", "Draw an isometric view of an area into the data folder.");
+            requirePermission(Atlas.ADMIN_PERMISSION);
+            addSubCommand(new IsoStatus(plugin));
+            addUsageVariant(new IsoDraw(plugin, 0));
+            addUsageVariant(new IsoDraw(plugin, 1));
+            addUsageVariant(new IsoDraw(plugin, 2));
+        }
+
+        @Override
+        protected void executeSync(CommandContext context) {
+            say(context, "Use /atlas iso <world> <x> <z> [radius] [scale], or /atlas iso status.");
+        }
+    }
+
+    static final class IsoDraw extends CommandBase {
+        private final AtlasPlugin plugin;
+        private final RequiredArg<String> world;
+        private final RequiredArg<Integer> x;
+        private final RequiredArg<Integer> z;
+        private final RequiredArg<Integer> radius;
+        private final RequiredArg<Integer> scale;
+
+        IsoDraw(AtlasPlugin plugin, int extra) {
+            super("Draw an isometric view around a block position.");
+            this.plugin = plugin;
+            requirePermission(Atlas.ADMIN_PERMISSION);
+            this.world = withRequiredArg("world", "The world name", ArgTypes.STRING);
+            this.x = withRequiredArg("x", "Block x of the centre", ArgTypes.INTEGER);
+            this.z = withRequiredArg("z", "Block z of the centre", ArgTypes.INTEGER);
+            this.radius = extra >= 1 ? withRequiredArg("radius", "Radius in chunks, 4 by default", ArgTypes.INTEGER) : null;
+            this.scale = extra >= 2 ? withRequiredArg("scale", "Pixels per block edge, 1 to 3, 2 by default", ArgTypes.INTEGER) : null;
+        }
+
+        @Override
+        protected void executeSync(CommandContext context) {
+            if (!staff(plugin, context)) {
+                return;
+            }
+            String w = context.get(world);
+            if (!knownWorld(plugin, context, w)) {
+                return;
+            }
+            if (!plugin.atlas().config().worldEnabled(w)) {
+                bad(context, "The world " + w + " is disabled in atlas.json.");
+                return;
+            }
+            dev.ryvrook.atlas.iso.IsoService iso = plugin.iso();
+            String r = radius == null ? null : Integer.toString(context.get(radius));
+            String s = scale == null ? null : Integer.toString(context.get(scale));
+            dev.ryvrook.atlas.iso.IsoView.Parsed p = dev.ryvrook.atlas.iso.IsoView.of(w, context.get(x), context.get(z), r, "0", s,
+                    plugin.atlas().config().isoMaxRadius());
+            if (p.view() == null) {
+                bad(context, p.error());
+                return;
+            }
+            if (!iso.anyAllowed(p.view())) {
+                bad(context, "Nothing has been explored in that area of " + w + ".");
+                return;
+            }
+            say(context, "Drawing the isometric view of " + w + " with radius " + p.view().radius() + " and scale "
+                    + p.view().scale() + ". It runs in the background.");
+            iso.render(p.view()).whenComplete((d, err) -> {
+                if (err != null || d == null) {
+                    bad(context, "The isometric view could not be drawn" + (err == null || err.getMessage() == null ? "."
+                            : ", " + err.getMessage() + "."));
+                    return;
+                }
+                try {
+                    java.nio.file.Path file = iso.export(d);
+                    good(context, "Saved " + d.width() + " by " + d.height() + " pixels in "
+                            + d.ms() + " ms to " + file
+                            + (d.partial() ? ". Some chunks were missing and show as grey floor." : "."));
+                } catch (java.io.IOException e) {
+                    bad(context, "The isometric view could not be saved, " + e.getMessage() + ".");
+                }
+            });
+        }
+    }
+
+    static final class IsoStatus extends CommandBase {
+        private final AtlasPlugin plugin;
+
+        IsoStatus(AtlasPlugin plugin) {
+            super("status", "Show the isometric render queue and caches.");
+            this.plugin = plugin;
+            requirePermission(Atlas.ADMIN_PERMISSION);
+        }
+
+        @Override
+        protected void executeSync(CommandContext context) {
+            for (String line : plugin.iso().status()) {
+                say(context, line);
+            }
         }
     }
 }

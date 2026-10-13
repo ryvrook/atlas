@@ -632,7 +632,7 @@ public final class ApiServer {
 
     /**
      * Takes one request from the client's API or tile budget and returns the seconds to wait, or 0
-     * when the request may go ahead. Tiles and marker icons use tileRequestsPerMinute, every other
+     * when the request may go ahead. Tiles, marker icons and timeline exports use tileRequestsPerMinute, every other
      * api request apiRequestsPerMinute. The page and its files are not limited. Without
      * trustedProxies, local and private peers are not limited per address, since behind an
      * unlisted reverse proxy every browser would share the proxy's address.
@@ -643,7 +643,7 @@ public final class ApiServer {
             return 0;
         }
         boolean tile = path.startsWith("/api/tiles/") || path.startsWith("/api/marker-icons/")
-                || (path.startsWith("/api/timeline/") && path.contains("/tiles/"));
+                || (path.startsWith("/api/timeline/") && (path.contains("/tiles/") || path.endsWith("/export")));
         AtlasConfig cfg = atlas.config();
         int limit = tile ? cfg.tileRequestsPerMinute() : cfg.apiRequestsPerMinute();
         if (limit <= 0) {
@@ -780,6 +780,9 @@ public final class ApiServer {
             Atlas.ApiResult marker = atlas.markerRoutes().handle(method, String.join("/", parts), viewer, query);
             if (marker != null) {
                 json(ex, marker.status(), marker.body());
+                return;
+            }
+            if (dev.ryvrook.atlas.iso.IsoRoutes.serve(ex, viewer, parts, query, clientAddress(ex))) {
                 return;
             }
             dev.ryvrook.atlas.timeline.TimelineRoutes tl = timeline;

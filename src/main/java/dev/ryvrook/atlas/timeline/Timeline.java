@@ -414,6 +414,7 @@ public final class Timeline {
         Manifest m = j.result(takenAt);
         JsonObject stats = stats(j.world, j.date, takenAt, m);
         store.write(m, stats);
+        dev.ryvrook.atlas.iso.IsoSnapshots.dayTaken(j.world, j.date, store.dayDir(j.world, j.date));
         String text = r.daily() ? "The daily snapshot of the map was taken." : "An admin took a snapshot of the map.";
         EventLog.record(j.world, takenAt, "snapshot", null, null, null, text);
         long seconds = Math.max(0, (takenAt - j.startedAt) / 1000);
