@@ -49,6 +49,8 @@
   let view = null;
   let drawn = null;
   let reqSeq = 0, pollTimer = null, tickTimer = null, ctrl = null, opener = null;
+  // The address of the live view being fetched or waited for, so the same view is never asked for twice at once.
+  let pendUrl = null;
   // Recent images as blob addresses, so turning back to a direction seen a moment ago is instant.
   const cache = new Map();
   let shownBlob = null;
@@ -158,7 +160,7 @@
   }
   function onClose() {
     reqSeq++;
-    clearTimeout(pollTimer); clearInterval(tickTimer);
+    clearTimeout(pollTimer); clearInterval(tickTimer); pendUrl = null;
     if (ctrl) { try { ctrl.abort(); } catch (e) { /* already done */ } ctrl = null; }
     ptrs.clear(); pinch = null; drag = null;
     view = null; drawn = null;
@@ -206,18 +208,23 @@
   // ---- loading a live view -----------------------------------------------------------
   // A fetch rather than an img, so the 202 answer can be read. While the view is queued the request is sent again
   // after etaSeconds, at least one second apart. A 429 or 503 offers a retry once its Retry-After has passed.
-  function load() {
+  // A new direction or radius stops the wait for the old view, the server drops it once newer ones replace it.
+  function load(poll) {
     if (!view || view.mode !== "live") return;
+    const url = isoUrl(view);
+    if (!poll && url === pendUrl) return;
     const seq = ++reqSeq;
+    pendUrl = null;
     clearTimeout(pollTimer); clearInterval(tickTimer);
     if (ctrl) { try { ctrl.abort(); } catch (e) { /* already done */ } }
     ctrl = window.AbortController ? new AbortController() : null;
-    const url = isoUrl(view);
     const hit = cache.get(url);
     if (hit) { cachePut(url, hit); showEntry(hit); return; }
-    setState("loading", "Loading the view", "", null);
+    pendUrl = url;
+    if (!poll) setState("loading", "Loading the view", "", null);
     fetch(url, { credentials: "same-origin", headers: { Accept: "image/png, application/json" }, signal: ctrl ? ctrl.signal : undefined }).then((r) => {
       if (seq !== reqSeq) return null;
+      if (r.status !== 202) pendUrl = null;
       const hdr = parseHdr(r.headers.get("X-Atlas-Iso"));
       if (r.status === 200) {
         return r.blob().then((b) => {
@@ -232,22 +239,25 @@
         return r.json().catch(() => ({})).then((d) => {
           if (seq !== reqSeq) return;
           const eta = Math.max(1, Math.min(120, Math.round(Number(d && d.etaSeconds) || 1)));
-          queued(eta, seq);
+          queued(eta, Math.max(0, Math.floor(Number(d && d.ahead) || 0)), seq);
         });
       }
       return r.json().catch(() => null).then((b) => { if (seq === reqSeq) failed(r.status, b && typeof b.error === "string" ? b.error : "", retrySecs(r)); });
     }).catch((e) => {
       if (seq !== reqSeq || (e && e.name === "AbortError")) return;
+      pendUrl = null;
       if (e && e.status == null && !(e instanceof TypeError)) { A.reportBug(e); return; }
       failed(0, "", 0);
     });
   }
-  function queued(eta, seq) {
+  function queued(eta, ahead, seq) {
     let left = eta;
-    const say = () => setState("queued", "Drawing this view", left > 1 ? "Ready in about " + A.plural(left, "second") + ". Large views take up to a minute." : "Almost ready.", null);
+    const say = () => setState("queued", ahead ? "Waiting in the queue" : "Drawing this view", (ahead ? A.plural(ahead, "view") + " ahead. " : "") +
+      (left > 1 ? "Ready in about " + A.plural(left, "second") + ". Large views take up to a minute." : "Almost ready."), null);
     say();
+    clearInterval(tickTimer);
     tickTimer = setInterval(() => { if (seq !== reqSeq) { clearInterval(tickTimer); return; } left = Math.max(1, left - 1); say(); }, 1000);
-    pollTimer = setTimeout(() => { if (seq === reqSeq) load(); }, eta * 1000);
+    pollTimer = setTimeout(() => { if (seq === reqSeq) load(true); }, eta * 1000);
   }
   function failed(status, text, wait) {
     const lead = status === 404 ? "Nothing explored here"

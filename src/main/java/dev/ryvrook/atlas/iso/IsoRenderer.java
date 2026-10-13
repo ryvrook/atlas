@@ -42,9 +42,12 @@ final class IsoRenderer {
     private static final long BATCH_WAIT_MS = 30_000;
     private static final long BUDGET_POLL_MS = 200;
 
-    /** Takes one chunk read from the shared chunk image budget, false when it is spent for now. */
+    /**
+     * Takes one chunk read from the shared chunk image budget, false when it is spent for now.
+     * Background work only takes from the upper half of the bucket.
+     */
     interface ChunkBudget {
-        boolean tryTake();
+        boolean tryTake(boolean background);
     }
 
     /** True for chunks the view may read, explored ones inside the render limit. */
@@ -52,20 +55,21 @@ final class IsoRenderer {
         boolean allowed(int cx, int cz);
     }
 
-    /** What one render did. */
+    /** What one render did. print holds the fingerprint of every chunk of the square as it was drawn. */
     record Result(byte[] png, int width, int height, boolean partial, int wanted, int read, int skipped, long readMs,
-                  long drawMs, long encodeMs) {
+                  long drawMs, long encodeMs, IsoCache.Print print) {
     }
 
     private IsoRenderer() {
     }
 
     /**
-     * Reads and draws the view. loaded hears about every chunk this render brought into memory, at
-     * the moment it arrived.
+     * Reads and draws the view. Only chunks not already in memory take a budget token, as background
+     * work when background is set. loaded hears about every chunk this render brought into memory,
+     * at the moment it arrived.
      */
-    static Result render(World world, IsoView v, ChunkFilter filter, ChunkBudget budget, long deadline, Palette c,
-                         java.util.function.LongConsumer loaded) throws InterruptedException {
+    static Result render(World world, IsoView v, ChunkFilter filter, ChunkBudget budget, boolean background,
+                         long deadline, Palette c, java.util.function.LongConsumer loaded) throws InterruptedException {
         long t0 = System.nanoTime();
         int side = v.side();
         Columns a = new Columns(side * 32, (v.cx() - v.radius()) * 32, (v.cz() - v.radius()) * 32);
@@ -83,13 +87,14 @@ final class IsoRenderer {
         int read = 0;
         int skipped = 0;
         boolean outOfBudget = false;
+        long[] terrainPrint = new long[side * side];
         for (int i = 0; i < want.size(); i += BATCH) {
             int end = Math.min(want.size(), i + BATCH);
             List<Long> batch = new ArrayList<>();
             for (int k = i; k < end; k++) {
                 long idx = want.getLong(k);
                 boolean inMemory = loadedBefore != null && loadedBefore.contains(idx);
-                if (!inMemory && !outOfBudget && !take(budget, deadline)) {
+                if (!inMemory && !outOfBudget && !take(budget, background, deadline)) {
                     outOfBudget = true;
                 }
                 if (!inMemory && outOfBudget) {
@@ -128,8 +133,11 @@ final class IsoRenderer {
                     throw new InterruptedException();
                 }
                 try {
-                    if (readChunk(cs, st, ref, ChunkUtil.xOfChunkIndex(idx), ChunkUtil.zOfChunkIndex(idx), a, c)) {
+                    int cx = ChunkUtil.xOfChunkIndex(idx);
+                    int cz = ChunkUtil.zOfChunkIndex(idx);
+                    if (readChunk(cs, st, ref, cx, cz, a, c)) {
                         read++;
+                        terrainPrint[slot(v, cx, cz)] = a.hashChunk(cx * 32 - a.minBlockX, cz * 32 - a.minBlockZ);
                     } else {
                         skipped++;
                     }
@@ -139,22 +147,115 @@ final class IsoRenderer {
                 }
             }
         }
+        IsoCache.Print print = new IsoCache.Print(terrainPrint, imagePrint(world, v));
         long t1 = System.nanoTime();
         int wanted = want.size();
         IsoRaster.Image img = IsoRaster.render(a, c, v.scale(), v.azimuth());
         a = null;
         loadedBefore = null;
         long t2 = System.nanoTime();
-        return encode(img, skipped > 0, wanted, read, skipped, t0, t1, t2);
+        return encode(img, skipped > 0, wanted, read, skipped, t0, t1, t2, print);
+    }
+
+    /** The place of a chunk in the fingerprint of a view, row by row from the north west corner. */
+    static int slot(IsoView v, int cx, int cz) {
+        return (cz - v.cz() + v.radius()) * v.side() + (cx - v.cx() + v.radius());
+    }
+
+    /** The hash of the map image of every chunk of the square the engine holds in memory, 0 for the others. */
+    private static long[] imagePrint(World world, IsoView v) {
+        long[] out = new long[v.chunks()];
+        com.hypixel.hytale.server.core.universe.world.worldmap.WorldMapManager wmm;
+        try {
+            wmm = world.getWorldMapManager();
+        } catch (RuntimeException e) {
+            return out;
+        }
+        if (wmm == null) {
+            return out;
+        }
+        for (int dz = -v.radius(); dz <= v.radius(); dz++) {
+            for (int dx = -v.radius(); dx <= v.radius(); dx++) {
+                out[slot(v, v.cx() + dx, v.cz() + dz)] = imageHash(wmm, v.cx() + dx, v.cz() + dz);
+            }
+        }
+        return out;
+    }
+
+    private static long imageHash(com.hypixel.hytale.server.core.universe.world.worldmap.WorldMapManager wmm, int cx,
+                                  int cz) {
+        try {
+            return dev.ryvrook.atlas.tiles.MapImageDecoder.hash(wmm.getImageIfInMemory(cx, cz));
+        } catch (RuntimeException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * True when none of the chunks, packed as IsoCache.chunk, changed since the view was drawn. A map
+     * image the engine holds that differs from the one at render time counts as a change at once.
+     * Otherwise the chunk is read again and the records it gives are compared, since the engine may
+     * keep an outdated map image for a while. A chunk the view may not draw is drawn as floor either
+     * way and is skipped. A chunk it may draw that was not read at render time, one that cannot be
+     * read now and one not in memory while the budget is spent all count as changed.
+     */
+    static boolean unchanged(World world, IsoView v, IsoCache.Print print, java.util.Collection<Long> chunks,
+                             ChunkFilter filter, ChunkBudget budget, Palette c) throws InterruptedException {
+        com.hypixel.hytale.server.core.universe.world.worldmap.WorldMapManager wmm = null;
+        try {
+            wmm = world.getWorldMapManager();
+        } catch (RuntimeException ignored) {
+            // Only the records are compared then.
+        }
+        ChunkStore cs = world.getChunkStore();
+        Store<ChunkStore> st = cs.getStore();
+        LongOpenHashSet inMemory = loaded(cs);
+        for (long packed : chunks) {
+            int cx = IsoCache.chunkX(packed);
+            int cz = IsoCache.chunkZ(packed);
+            if (!v.covers(cx, cz) || !filter.allowed(cx, cz)) {
+                continue;
+            }
+            int k = slot(v, cx, cz);
+            if (print.terrain()[k] == 0) {
+                return false;
+            }
+            long img = wmm == null ? 0 : imageHash(wmm, cx, cz);
+            if (img != 0 && print.image()[k] != 0 && img != print.image()[k]) {
+                return false;
+            }
+            long idx = ChunkUtil.indexChunk(cx, cz);
+            if ((inMemory == null || !inMemory.contains(idx)) && !budget.tryTake(true)) {
+                return false;
+            }
+            Ref<ChunkStore> ref;
+            try {
+                ref = cs.getChunkReferenceAsync(idx, GetChunkFlags.NO_GENERATE).get(BATCH_WAIT_MS, TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException | RuntimeException e) {
+                return false;
+            }
+            if (ref == null || !ref.isValid()) {
+                return false;
+            }
+            Columns one = new Columns(32, cx * 32, cz * 32);
+            try {
+                if (!readChunk(cs, st, ref, cx, cz, one, c) || one.hashChunk(0, 0) != print.terrain()[k]) {
+                    return false;
+                }
+            } catch (IllegalStateException | NullPointerException | IndexOutOfBoundsException e) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Encodes the picture. The column records are no longer referenced, so they can be collected while it runs. */
     private static Result encode(IsoRaster.Image img, boolean partial, int wanted, int read, int skipped, long t0, long t1,
-                                 long t2) {
+                                 long t2, IsoCache.Print print) {
         byte[] png = PngEncoder.encode(img.argb(), img.width(), img.height());
         long t3 = System.nanoTime();
         return new Result(png, img.width(), img.height(), partial, wanted, read, skipped,
-                (t1 - t0) / 1_000_000, (t2 - t1) / 1_000_000, (t3 - t2) / 1_000_000);
+                (t1 - t0) / 1_000_000, (t2 - t1) / 1_000_000, (t3 - t2) / 1_000_000, print);
     }
 
     /** The chunks the world holds in memory now, or null when the set kept changing while it was copied. */
@@ -170,8 +271,8 @@ final class IsoRenderer {
     }
 
     /** Waits for a budget token until the deadline. False when the deadline passed first. */
-    private static boolean take(ChunkBudget budget, long deadline) throws InterruptedException {
-        while (!budget.tryTake()) {
+    private static boolean take(ChunkBudget budget, boolean background, long deadline) throws InterruptedException {
+        while (!budget.tryTake(background)) {
             if (System.currentTimeMillis() >= deadline) {
                 return false;
             }

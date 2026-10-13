@@ -69,6 +69,40 @@ final class Columns {
         return n * (1 + 2 + 2 + 2 + 4 + 2 * DEPTH + 2 + 2 + 2 + 2);
     }
 
+    /**
+     * A 64 bit FNV-1a hash of the records of one chunk whose north west column is ox, oz, so a view
+     * can tell whether what it draws of a chunk changed. Never 0, which stands for not read.
+     */
+    long hashChunk(int ox, int oz) {
+        long x = 0xcbf29ce484222325L;
+        for (int lz = 0; lz < 32; lz++) {
+            for (int lx = 0; lx < 32; lx++) {
+                int i = (oz + lz) * w + ox + lx;
+                x = mix(x, flags[i]);
+                x = mix(x, terrain[i]);
+                x = mix(x, waterTop[i]);
+                x = mix(x, fluid[i]);
+                x = mix(x, tint[i]);
+                for (int k = 0; k < DEPTH; k++) {
+                    x = mix(x, ids[i * DEPTH + k]);
+                }
+                x = mix(x, extra[i]);
+                x = mix(x, canopyTop[i]);
+                x = mix(x, canopyBottom[i]);
+                x = mix(x, trunk[i]);
+            }
+        }
+        return x == 0 ? 1 : x;
+    }
+
+    private static long mix(long x, int v) {
+        for (int b = 0; b < 4; b++) {
+            x ^= (v >>> (b * 8)) & 0xFF;
+            x *= 0x100000001b3L;
+        }
+        return x;
+    }
+
     /** Sets a plain column of ground with the given id stack, for tests and missing sections. */
     void ground(int i, int height, int... stack) {
         flags[i] = PRESENT;

@@ -26,18 +26,27 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 
 /**
  * Isometric views. Renders run one at a time on the single Atlas-iso thread. Browsers may hold at
- * most QUEUE_LIMIT renders in the queue, at most LARGE_LIMIT of them wider than 17 by 17 chunks, and
- * the thread rests LARGE_COOLDOWN_MS after a large one. Admin commands and the daily snapshot queue
- * without those limits, and a browser view waiting in the queue is drawn before them, so a long
- * daily snapshot never holds up the views people are waiting for. Every read of a chunk that is not
- * in memory takes a token from the shared chunk image budget as background work, so views never
- * starve the tiles people are looking at.
+ * most QUEUE_LIMIT renders in the queue, each address at most IsoQueue.PER_ADDRESS of them, and a
+ * new view from an address at its cap replaces the oldest of its views that has not started. At
+ * most LARGE_LIMIT large views (wider than 17 by 17 chunks) are admitted at once, a further one
+ * waits its turn with a countdown, and the thread rests LARGE_COOLDOWN_MS after a large one. Admin
+ * commands and the daily snapshot queue without those limits, and a browser view waiting in the
+ * queue is drawn before them, so a long daily snapshot never holds up the views people are waiting
+ * for. Every read of a chunk that is not in memory takes a token from the shared chunk image budget,
+ * from the full bucket for browser views like a tile request and as background work for commands
+ * and snapshots.
+ *
+ * <p>A chunk saved inside a cached view marks it stale and never drops it. A stale view is served at
+ * once with a short cache time, and a check on the render thread compares the fingerprint of the
+ * saved chunks with the one taken when the view was drawn. Only a real change draws the view again,
+ * behind every browser view waiting and while the old picture is still served. That redraw takes
+ * budget as foreground work, since someone is looking at the view, and a partial redraw never
+ * replaces the complete picture.
  */
 public final class IsoService {
     static final int QUEUE_LIMIT = 8;
@@ -60,8 +69,15 @@ public final class IsoService {
     /** How a request was answered. */
     public enum Kind { READY, QUEUED, BUSY, LIMITED, FAILED }
 
-    /** The answer to a request. entry is set when READY, etaSeconds when QUEUED, retryAfter otherwise. */
-    public record Answer(Kind kind, IsoCache.Entry entry, int etaSeconds, int retryAfter) {
+    /**
+     * The answer to a request. entry is set when READY, retryAfter when BUSY, LIMITED or FAILED.
+     * ahead counts the views drawn before this one and etaSeconds estimates when it is done, for a
+     * view that was not queued the drawing time of the views it would wait behind.
+     */
+    public record Answer(Kind kind, IsoCache.Entry entry, int etaSeconds, int retryAfter, int ahead, boolean stale) {
+        Answer(Kind kind, IsoCache.Entry entry, int etaSeconds, int retryAfter, int ahead) {
+            this(kind, entry, etaSeconds, retryAfter, ahead, false);
+        }
     }
 
     /** A finished render for a command or a snapshot. */
@@ -92,20 +108,21 @@ public final class IsoService {
         }
     }
 
-    private static final AtomicLong SEQ = new AtomicLong();
-
-    private static final class Job {
-        final IsoView view;
+    private static final class Job extends IsoQueue.Entry {
         final long bucket;
-        final boolean browser;
-        final long seq = SEQ.incrementAndGet();
-        volatile long startedAt;
         final CompletableFuture<Done> future = new CompletableFuture<>();
+        /** A check of a stale cached view, drawn again only when its area changed. */
+        final boolean refresh;
+        Task task;
 
-        Job(IsoView view, long bucket, boolean browser) {
-            this.view = view;
+        Job(String key, IsoView view, long bucket, String address) {
+            this(key, view, bucket, address, false);
+        }
+
+        Job(String key, IsoView view, long bucket, String address, boolean refresh) {
+            super(key, view, address);
             this.bucket = bucket;
-            this.browser = browser;
+            this.refresh = refresh;
         }
     }
 
@@ -114,18 +131,19 @@ public final class IsoService {
     private final IsoCache cache;
     private final IsoRenderer.ChunkBudget budget;
     private final ThreadPoolExecutor exec;
-    private final Map<String, Job> jobs = new ConcurrentHashMap<>();
+    private final IsoQueue queue = new IsoQueue(QUEUE_LIMIT, LARGE_LIMIT);
     private final Map<String, Long> failures = new ConcurrentHashMap<>();
     private final Set<String> dirty = ConcurrentHashMap.newKeySet();
     /** Chunks a render loaded, as world|cx|cz to the time until which their saves are ignored. */
     private final Map<String, Long> ownLoads = new ConcurrentHashMap<>();
     private final AtomicLong ignoredSaves = new AtomicLong();
     private volatile boolean dirtyOverflow;
-    private final AtomicInteger browserJobs = new AtomicInteger();
-    private final AtomicInteger largeJobs = new AtomicInteger();
     private final AtomicLong done = new AtomicLong();
     private final AtomicLong failed = new AtomicLong();
-    private final AtomicLong invalidated = new AtomicLong();
+    private final AtomicLong markedStale = new AtomicLong();
+    private final AtomicLong redrawnAfterChange = new AtomicLong();
+    private final AtomicLong redrawnWithoutPrint = new AtomicLong();
+    private final AtomicLong checkedUnchanged = new AtomicLong();
     private final List<ScheduledFuture<?>> tasks = new ArrayList<>();
     private volatile Palette palette;
     private volatile boolean paletteStale = true;
@@ -146,9 +164,9 @@ public final class IsoService {
         });
     }
 
-    /** The chunk image budget of the tile service, taken from as background work. */
+    /** The chunk image budget of the tile service, taken from as foreground or background work. */
     public static IsoRenderer.ChunkBudget budgetOf(TileService tiles) {
-        return () -> tiles.budget().tryTake(true);
+        return background -> tiles.budget().tryTake(background);
     }
 
     private static long mb(int megabytes) {
@@ -178,8 +196,8 @@ public final class IsoService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        for (Job j : jobs.values()) {
-            j.future.cancel(false);
+        for (IsoQueue.Entry e : queue.all()) {
+            ((Job) e).future.cancel(false);
         }
     }
 
@@ -205,11 +223,12 @@ public final class IsoService {
         dirty.add(key);
     }
 
-    /** Drops cached views that hold a chunk saved since the last call. */
+    /** Marks cached views that hold a chunk saved since the last call as stale. */
     void drainDirty() {
         if (dirtyOverflow) {
             dirtyOverflow = false;
             dirty.clear();
+            // Too many saves to track, so the whole cache is dropped rather than kept with unknown changes.
             for (String w : new ArrayList<>(atlas.tiles().exploredCounts().keySet())) {
                 cache.dropWorld(w);
             }
@@ -224,8 +243,8 @@ public final class IsoService {
             int b = k.lastIndexOf('|');
             int a = k.lastIndexOf('|', b - 1);
             try {
-                invalidated.addAndGet(cache.invalidate(k.substring(0, a), Integer.parseInt(k.substring(a + 1, b)),
-                        Integer.parseInt(k.substring(b + 1))));
+                markedStale.addAndGet(cache.markStale(k.substring(0, a), Integer.parseInt(k.substring(a + 1, b)),
+                        Integer.parseInt(k.substring(b + 1)), System.currentTimeMillis()));
             } catch (NumberFormatException ignored) {
                 // Not a key this class wrote.
             }
@@ -286,138 +305,194 @@ public final class IsoService {
     // ---- requests ----------------------------------------------------------
 
     /**
-     * Answers a browser request. A cached view is READY, a view being drawn is QUEUED with an
-     * estimate. Otherwise admit is asked whether this address may start a render, LIMITED when not,
-     * and the render is queued unless the queue is full (BUSY). A view that just failed is FAILED.
+     * Answers a browser request from the address with the rate key address. A cached view is READY,
+     * a view being drawn or waiting is QUEUED with an estimate. Otherwise the view is offered to the
+     * queue, which may replace the oldest waiting view of the same address, admit is asked whether
+     * this address may start a render (LIMITED when not), and BUSY is answered only when the queue is
+     * full of other views. A view that just failed is FAILED.
      */
-    public Answer request(IsoView v, java.util.function.LongSupplier admit) {
+    public Answer request(IsoView v, String address, java.util.function.LongSupplier admit) {
         drainDirty();
         long now = System.currentTimeMillis();
         long b = bucket(now);
         IsoCache.Entry e = cache.get(v, b, now);
-        if (e != null) {
-            return new Answer(Kind.READY, e, 0, 0);
-        }
         String key = IsoCache.key(IsoCache.folder(v.world()), v, b);
-        Job running = jobs.get(key);
-        if (running != null) {
-            return new Answer(Kind.QUEUED, null, eta(running), 0);
+        if (e != null) {
+            boolean stale = cache.isStale(v, b);
+            if (stale) {
+                refresh(v, b, key, now);
+            }
+            return new Answer(Kind.READY, e, 0, 0, 0, stale);
+        }
+        IsoQueue.Entry waiting = queue.get(key);
+        if (waiting != null) {
+            return queued(waiting);
         }
         Long failedAt = failures.get(key);
         if (failedAt != null && now - failedAt < FAILURE_MS) {
-            return new Answer(Kind.FAILED, null, 0, (int) Math.max(1, (FAILURE_MS - (now - failedAt)) / 1000));
+            return new Answer(Kind.FAILED, null, 0, (int) Math.max(1, (FAILURE_MS - (now - failedAt)) / 1000), 0);
         }
         synchronized (this) {
-            running = jobs.get(key);
-            if (running != null) {
-                return new Answer(Kind.QUEUED, null, eta(running), 0);
-            }
-            if (browserJobs.get() >= QUEUE_LIMIT || (v.large() && largeJobs.get() >= LARGE_LIMIT)) {
-                return new Answer(Kind.BUSY, null, 0, Math.max(2, etaAll()));
-            }
-            long wait = admit.getAsLong();
-            if (wait > 0) {
-                return new Answer(Kind.LIMITED, null, 0, (int) Math.min(Integer.MAX_VALUE, wait));
+            waiting = queue.get(key);
+            if (waiting != null) {
+                return queued(waiting);
             }
             e = cache.get(v, b, now);
             if (e != null) {
                 // Drawn and cached between the first look and here.
-                return new Answer(Kind.READY, e, 0, 0);
+                return new Answer(Kind.READY, e, 0, 0, 0);
             }
-            Job j = new Job(v, b, true);
-            if (!submit(key, j)) {
-                return new Answer(Kind.BUSY, null, 0, 5);
+            Job j = new Job(key, v, b, address == null ? "?" : address);
+            List<IsoQueue.Entry> before = queue.aheadOfNew();
+            IsoQueue.Offer o = queue.offer(j, admit);
+            switch (o.outcome()) {
+                case BUSY -> {
+                    int ahead = before.size();
+                    return new Answer(Kind.BUSY, null, seconds(before, true), Math.max(2, firstFree(before)), ahead);
+                }
+                case LIMITED -> {
+                    return new Answer(Kind.LIMITED, null, seconds(before, true),
+                            (int) Math.min(Integer.MAX_VALUE, o.waitSeconds()), before.size());
+                }
+                default -> {
+                }
             }
-            return new Answer(Kind.QUEUED, null, eta(j), 0);
+            for (IsoQueue.Entry c : o.cancelled()) {
+                Job cj = (Job) c;
+                if (cj.task != null) {
+                    exec.remove(cj.task);
+                }
+                cj.future.cancel(false);
+            }
+            for (IsoQueue.Entry p : o.promoted()) {
+                execute((Job) p);
+            }
+            if (!j.deferred() && !execute(j)) {
+                return new Answer(Kind.BUSY, null, 0, 5, 0);
+            }
+            return queued(j);
         }
+    }
+
+    /** Queues the check of a stale view once, unless it failed a moment ago. */
+    private void refresh(IsoView v, long b, String key, long now) {
+        Long failedAt = failures.get(key);
+        if (failedAt != null && now - failedAt < FAILURE_MS) {
+            return;
+        }
+        synchronized (this) {
+            if (queue.get(key) != null) {
+                return;
+            }
+            Job j = new Job(key, v, b, null, true);
+            queue.addDirect(j);
+            execute(j);
+        }
+    }
+
+    private Answer queued(IsoQueue.Entry j) {
+        List<IsoQueue.Entry> ahead = queue.ahead(j);
+        return new Answer(Kind.QUEUED, null, seconds(ahead, j.browser()), 0, Math.max(0, ahead.size() - 1));
     }
 
     /** Renders a view for a command or a snapshot, without the browser limits, and caches it too. */
     public CompletableFuture<Done> render(IsoView v) {
         long b = bucket(System.currentTimeMillis());
-        Job j = new Job(v, b, false);
         String key = IsoCache.key(IsoCache.folder(v.world()), v, b) + "#direct" + System.nanoTime();
-        if (!submit(key, j)) {
+        Job j = new Job(key, v, b, null);
+        queue.addDirect(j);
+        if (!execute(j)) {
             j.future.completeExceptionally(new RejectedExecutionException("Atlas is stopping"));
         }
         return j.future;
     }
 
-    private boolean submit(String key, Job j) {
-        jobs.put(key, j);
-        if (j.browser) {
-            browserJobs.incrementAndGet();
-        }
-        if (j.view.large()) {
-            largeJobs.incrementAndGet();
-        }
+    /** Hands a queued job to the render thread. False when the thread is stopping. */
+    private boolean execute(Job j) {
+        j.task = new Task(j);
         try {
-            exec.execute(new Task(key, j));
+            exec.execute(j.task);
             return true;
         } catch (RejectedExecutionException e) {
-            finish(key, j);
+            finish(j);
             return false;
         }
     }
 
-    /** A queued render. Browser views come first, then everything in the order it was queued. */
+    /** A queued render, in the order of IsoQueue. */
     private final class Task implements Runnable, Comparable<Task> {
-        final String key;
         final Job job;
 
-        Task(String key, Job job) {
-            this.key = key;
+        Task(Job job) {
             this.job = job;
         }
 
         @Override
         public void run() {
-            IsoService.this.run(key, job);
+            IsoService.this.run(job);
         }
 
         @Override
         public int compareTo(Task o) {
-            if (job.browser != o.job.browser) {
-                return job.browser ? -1 : 1;
-            }
-            return Long.compare(job.seq, o.job.seq);
+            return IsoQueue.ORDER.compare(job, o.job);
         }
     }
 
-    private void finish(String key, Job j) {
-        if (jobs.remove(key, j)) {
-            if (j.browser) {
-                browserJobs.decrementAndGet();
-            }
-            if (j.view.large()) {
-                largeJobs.decrementAndGet();
-            }
+    private void finish(Job j) {
+        for (IsoQueue.Entry p : queue.finish(j)) {
+            execute((Job) p);
         }
     }
 
-    private void run(String key, Job j) {
+    private void run(Job j) {
         try {
             long rest = cooldownUntil - System.currentTimeMillis();
             if (rest > 0) {
                 Thread.sleep(rest);
             }
-            j.startedAt = System.currentTimeMillis();
+            if (!queue.start(j, System.currentTimeMillis())) {
+                // Replaced by a newer view of the same address.
+                return;
+            }
+            long startedAt = j.startedAt();
             World world = Universe.get() == null ? null : Universe.get().getWorld(j.view.world());
             if (world == null) {
                 throw new IllegalStateException("the world " + j.view.world() + " is not loaded");
             }
-            IsoRenderer.Result r = IsoRenderer.render(world, j.view, filter(j.view.world()), budget,
-                    j.startedAt + DEADLINE_MS, palette(), idx -> ownLoads.put(j.view.world() + "|"
+            if (j.refresh) {
+                Map<Long, Long> saved = cache.staleChunks(j.view, j.bucket);
+                if (saved.isEmpty()) {
+                    j.future.complete(null);
+                    return;
+                }
+                IsoCache.Print print = cache.print(j.view, j.bucket);
+                if (print != null && IsoRenderer.unchanged(world, j.view, print, saved.keySet(), filter(j.view.world()),
+                        budget, palette())) {
+                    cache.clearStale(j.view, j.bucket, saved);
+                    checkedUnchanged.incrementAndGet();
+                    j.future.complete(null);
+                    return;
+                }
+                (print == null ? redrawnWithoutPrint : redrawnAfterChange).incrementAndGet();
+            }
+            IsoRenderer.Result r = IsoRenderer.render(world, j.view, filter(j.view.world()), budget, !j.browser() && !j.refresh,
+                    startedAt + DEADLINE_MS, palette(), idx -> ownLoads.put(j.view.world() + "|"
                             + com.hypixel.hytale.math.util.ChunkUtil.xOfChunkIndex(idx) + "|"
                             + com.hypixel.hytale.math.util.ChunkUtil.zOfChunkIndex(idx), System.currentTimeMillis() + OWN_LOAD_MS));
             long at = System.currentTimeMillis();
+            if (j.refresh && r.partial()) {
+                // The old complete picture stays and stays stale, the next request after a pause tries again.
+                failures.put(j.key, at);
+                j.future.complete(null);
+                return;
+            }
             IsoCache.Entry e = new IsoCache.Entry(r.png(), TileService.etag(r.png()), at, r.partial());
             try {
-                cache.put(j.view, j.bucket, e, cfg().isoDiskMb() > 0);
+                cache.put(j.view, j.bucket, e, cfg().isoDiskMb() > 0, r.print(), startedAt);
             } catch (IOException io) {
                 logger.at(Level.WARNING).log("Atlas could not write an isometric view to disk, %s", io.getMessage());
             }
-            long ms = at - j.startedAt;
+            long ms = at - startedAt;
             msPerChunk = 0.7 * msPerChunk + 0.3 * ((double) ms / Math.max(1, j.view.chunks()));
             if (j.view.large()) {
                 cooldownUntil = at + LARGE_COOLDOWN_MS;
@@ -427,14 +502,14 @@ public final class IsoService {
                     + r.png().length / 1024 + " KB, " + r.read() + " of " + r.wanted() + " chunks read"
                     + (r.partial() ? ", partial" : "") + " (read " + r.readMs() + " ms, draw " + r.drawMs()
                     + " ms, encode " + r.encodeMs() + " ms)";
-            logger.at(j.browser ? Level.FINE : Level.INFO).log("Atlas drew the isometric view %s", last);
+            logger.at(j.browser() || j.refresh ? Level.FINE : Level.INFO).log("Atlas drew the isometric view %s", last);
             j.future.complete(new Done(j.view, e, r));
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             j.future.cancel(false);
         } catch (Throwable t) {
             failed.incrementAndGet();
-            failures.put(key, System.currentTimeMillis());
+            failures.put(j.key, System.currentTimeMillis());
             long now = System.currentTimeMillis();
             if (now - lastFailureLog > 5 * 60_000L) {
                 lastFailureLog = now;
@@ -442,7 +517,7 @@ public final class IsoService {
             }
             j.future.completeExceptionally(t);
         } finally {
-            finish(key, j);
+            finish(j);
         }
     }
 
@@ -467,59 +542,51 @@ public final class IsoService {
 
     // ---- estimates ---------------------------------------------------------
 
-    /** True when o is drawn before j or is j, the running render and the queue order of Task. */
-    private static boolean ahead(Job o, Job j) {
-        if (o == j || o.startedAt > 0) {
-            return true;
-        }
-        if (o.browser != j.browser) {
-            return o.browser;
-        }
-        return o.seq < j.seq;
-    }
-
-    /** Seconds until the job is likely done, counting the jobs drawn before it. */
-    private int eta(Job j) {
+    /**
+     * Seconds until the last of these views is likely done, the running one counted with what is
+     * left of it. foreground tells whether the chunk reads may use the full budget.
+     */
+    private int seconds(List<IsoQueue.Entry> views, boolean foreground) {
         long now = System.currentTimeMillis();
         double ms = 0;
         int chunks = 0;
-        for (Job o : jobs.values()) {
-            if (!ahead(o, j)) {
-                continue;
-            }
+        for (IsoQueue.Entry o : views) {
             double est = estimate(o.view);
-            if (o.startedAt > 0) {
-                est = Math.max(200, est - (now - o.startedAt));
+            long started = o.startedAt();
+            if (started > 0) {
+                est = Math.max(200, est - (now - started));
             } else {
                 chunks += o.view.chunks();
             }
             ms += est;
         }
-        ms += budgetWaitMs(chunks);
+        ms += budgetWaitMs(chunks, foreground);
         return (int) Math.max(1, Math.ceil(ms / 1000.0));
     }
 
-    private int etaAll() {
-        double ms = 0;
-        for (Job o : jobs.values()) {
-            ms += estimate(o.view);
-        }
-        return (int) Math.max(1, Math.ceil(ms / 1000.0));
+    /** Seconds until the first of these views is likely done and frees a place in the queue. */
+    private int firstFree(List<IsoQueue.Entry> views) {
+        List<IsoQueue.Entry> l = new ArrayList<>(views);
+        l.sort(IsoQueue.ORDER);
+        return l.isEmpty() ? 1 : seconds(l.subList(0, 1), true);
     }
 
     private double estimate(IsoView v) {
         return 300 + v.chunks() * msPerChunk + (v.large() ? LARGE_COOLDOWN_MS : 0);
     }
 
-    /** How long the background half of the chunk budget needs to cover that many reads. */
-    private double budgetWaitMs(int chunks) {
+    /**
+     * How long the chunk budget needs to cover that many reads, the full bucket for foreground
+     * work and the upper half for background work.
+     */
+    private double budgetWaitMs(int chunks, boolean foreground) {
         TileService t = atlas.tiles();
         int rate = t.budgetPerMinute();
         int left = t.budgetLeft();
         if (rate <= 0 || left < 0) {
             return 0;
         }
-        int usable = Math.max(0, left - rate / 2);
+        int usable = Math.max(0, foreground ? left : left - rate / 2);
         int shortBy = Math.max(0, chunks - usable);
         return shortBy * 60_000.0 / rate;
     }
@@ -533,15 +600,21 @@ public final class IsoService {
         AtlasConfig c = cfg();
         out.add("Isometric views are " + (c.isoEnabled() ? "on" : "off") + ", radius up to " + c.isoMaxRadius()
                 + " chunks, " + c.isoRequestsPerMinute() + " new renders per minute and address.");
-        Job current = null;
-        for (Job j : jobs.values()) {
-            if (j.startedAt > 0) {
+        IsoQueue.Entry current = null;
+        for (IsoQueue.Entry j : queue.all()) {
+            if (j.startedAt() > 0) {
                 current = j;
             }
         }
-        out.add("Queue " + jobs.size() + " (" + browserJobs.get() + " from browsers, " + largeJobs.get() + " large), "
+        out.add("Queue " + queue.size() + " (" + queue.browserCount() + " from browsers at " + queue.addresses()
+                + (queue.addresses() == 1 ? " address, " : " addresses, ") + queue.largeCount() + " large, "
+                + queue.deferredCount() + " waiting for a large slot), "
                 + (current == null ? "nothing drawing now." : "drawing " + describe(current.view) + "."));
-        out.add("Done " + done.get() + ", failed " + failed.get() + ", dropped by chunk saves " + invalidated.get() + ", saves of chunks a render loaded ignored "
+        out.add("Done " + done.get() + ", failed " + failed.get() + ", replaced by newer views " + queue.cancelledTotal()
+                + ", marked stale by chunk saves " + markedStale.get() + ", re-rendered after a real change "
+                + redrawnAfterChange.get() + ", re-rendered without a fingerprint " + redrawnWithoutPrint.get()
+                + ", found unchanged " + checkedUnchanged.get()
+                + ", saves of chunks a render loaded ignored "
                 + ignoredSaves.get()
                 + ", about " + String.format(java.util.Locale.ROOT, "%.1f", msPerChunk) + " ms per chunk.");
         out.add("Last render " + last + ".");

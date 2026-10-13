@@ -139,14 +139,20 @@ public final class IsoRoutes {
             return;
         }
         boolean exempt = exempt(ex);
-        IsoService.Answer a = service.request(view, () -> exempt ? 0
-                : limiter.acquire(LinkService.rateKey(address), c.isoRequestsPerMinute()));
+        String key = LinkService.rateKey(address);
+        IsoService.Answer a = service.request(view, key, () -> exempt ? 0 : limiter.acquire(key, c.isoRequestsPerMinute()));
         Headers h = ex.getResponseHeaders();
         h.set("X-Atlas-Iso", view.world() + "," + view.blockX() + "," + view.blockZ() + "," + view.radius() + ","
                 + view.azimuth() + "," + view.scale());
         switch (a.kind()) {
-            case READY -> png(ex, a.entry().png(), a.entry().etag(), a.entry().partial() ? "no-store" : "public, max-age=300",
-                    a.entry().partial());
+            case READY -> {
+                // A stale view may be drawn again in a moment, so browsers ask again soon.
+                if (a.stale()) {
+                    h.set("X-Atlas-Stale", "1");
+                }
+                png(ex, a.entry().png(), a.entry().etag(), a.entry().partial() ? "no-store"
+                        : a.stale() ? "public, max-age=10" : "public, max-age=300", a.entry().partial());
+            }
             case QUEUED -> {
                 h.set("Retry-After", Integer.toString(a.etaSeconds()));
                 h.set("Cache-Control", "no-store");
@@ -154,16 +160,19 @@ public final class IsoRoutes {
                 o.addProperty("ok", true);
                 o.addProperty("queued", true);
                 o.addProperty("etaSeconds", a.etaSeconds());
+                o.addProperty("ahead", a.ahead());
                 o.add("view", viewJson(view));
                 json(ex, 202, o);
             }
             case LIMITED -> {
                 h.set("Retry-After", Integer.toString(a.retryAfter()));
-                error(ex, 429, "Too many new views from this address. Wait a little and try again.");
+                waitError(ex, "Too many new views from this address. Try again in " + seconds(a.retryAfter()) + ". "
+                        + queueLine(a), a);
             }
             case BUSY -> {
                 h.set("Retry-After", Integer.toString(a.retryAfter()));
-                error(ex, 429, "The server is drawing too many views right now. Try again shortly.");
+                waitError(ex, "The server is drawing too many views right now. " + queueLine(a) + " Try again in "
+                        + seconds(a.retryAfter()) + ".", a);
             }
             case FAILED -> {
                 h.set("Retry-After", Integer.toString(a.retryAfter()));
@@ -349,6 +358,28 @@ public final class IsoRoutes {
             }
         }
         return false;
+    }
+
+    static String seconds(int n) {
+        return n == 1 ? "1 second" : n + " seconds";
+    }
+
+    /** The sentence about the queue for a view that was not queued. */
+    static String queueLine(IsoService.Answer a) {
+        if (a.ahead() <= 0) {
+            return "Nothing else is waiting.";
+        }
+        return (a.ahead() == 1 ? "1 view is" : a.ahead() + " views are") + " ahead, about " + seconds(a.etaSeconds())
+                + " of drawing.";
+    }
+
+    /** A 429 answer that also names the views ahead and the estimate in seconds. */
+    private static void waitError(HttpExchange ex, String message, IsoService.Answer a) throws IOException {
+        JsonObject o = dev.ryvrook.atlas.data.Payloads.error(message);
+        o.addProperty("ahead", a.ahead());
+        o.addProperty("etaSeconds", a.etaSeconds());
+        o.addProperty("retryAfter", a.retryAfter());
+        json(ex, 429, o);
     }
 
     private static void error(HttpExchange ex, int status, String message) throws IOException {

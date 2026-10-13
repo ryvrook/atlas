@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class IsoCacheTest {
@@ -55,7 +56,7 @@ class IsoCacheTest {
     }
 
     @Test
-    void aSavedChunkDropsEveryViewThatHoldsIt(@TempDir Path dir) throws Exception {
+    void aSavedChunkMarksEveryViewThatHoldsItStaleAndKeepsIt(@TempDir Path dir) throws Exception {
         IsoCache c = new IsoCache(dir, 1 << 20);
         IsoView near = new IsoView("default", 0, 0, 2, 0, 2);
         IsoView far = new IsoView("default", 20, 20, 2, 0, 2);
@@ -63,12 +64,36 @@ class IsoCacheTest {
         c.put(near, 1, entry(10, 1, false), true);
         c.put(far, 1, entry(11, 1, false), true);
         c.put(other, 1, entry(12, 1, false), true);
-        assertEquals(1, c.invalidate("default", 2, -2));
-        assertNull(c.get(near, 1, 2));
-        assertNotNull(c.get(far, 1, 2));
-        assertNotNull(c.get(other, 1, 2));
-        assertEquals(2, c.diskFiles());
-        assertFalse(Files.exists(dir.resolve("default").resolve(near.fileName(1))));
+        assertEquals(1, c.markStale("default", 2, -2, 100));
+        assertEquals(0, c.markStale("default", 2, -2, 101));
+        assertNotNull(c.get(near, 1, 2));
+        assertTrue(c.isStale(near, 1));
+        assertFalse(c.isStale(far, 1));
+        assertFalse(c.isStale(other, 1));
+        assertEquals(3, c.diskFiles());
+        assertTrue(Files.exists(dir.resolve("default").resolve(near.fileName(1))));
+        assertEquals(java.util.Map.of(IsoCache.chunk(2, -2), 101L), c.staleChunks(near, 1));
+    }
+
+    @Test
+    void aCheckOrARenderClearsOnlyTheMarksItSaw(@TempDir Path dir) throws Exception {
+        IsoCache c = new IsoCache(dir, 1 << 20);
+        IsoView v = new IsoView("default", 0, 0, 2, 0, 2);
+        IsoCache.Print p = new IsoCache.Print(new long[25], new long[25]);
+        c.put(v, 1, entry(10, 1, false), true, p, 0);
+        assertSame(p, c.print(v, 1));
+        c.markStale("default", 1, 1, 100);
+        java.util.Map<Long, Long> seen = c.staleChunks(v, 1);
+        c.markStale("default", -1, 0, 200);
+        c.clearStale(v, 1, seen);
+        assertEquals(java.util.Map.of(IsoCache.chunk(-1, 0), 200L), c.staleChunks(v, 1));
+        c.markStale("default", 0, 0, 300);
+        c.put(v, 1, entry(11, 2, false), true, p, 250);
+        assertEquals(java.util.Map.of(IsoCache.chunk(0, 0), 300L), c.staleChunks(v, 1));
+        c.put(v, 1, entry(12, 3, false), true, p, 400);
+        assertFalse(c.isStale(v, 1));
+        assertEquals(-5, IsoCache.chunkX(IsoCache.chunk(-5, -7)));
+        assertEquals(-7, IsoCache.chunkZ(IsoCache.chunk(-5, -7)));
     }
 
     @Test
@@ -134,5 +159,23 @@ class IsoCacheTest {
         c.put(new IsoView("default", 1, 0, 16, 0, 1), 1, entry(500, 1000, true), false);
         assertNull(c.get(big, 1, 1000));
         assertEquals(1, c.memoryEntries());
+    }
+
+    @Test
+    void aChunkFingerprintFollowsWhatIsDrawn() {
+        Columns big = new Columns(64, 0, 0);
+        Columns one = new Columns(32, 32, 0);
+        for (int z = 0; z < 32; z++) {
+            for (int x = 0; x < 32; x++) {
+                big.ground(z * 64 + 32 + x, 60, 5, 6);
+                one.ground(z * 32 + x, 60, 5, 6);
+            }
+        }
+        long h = one.hashChunk(0, 0);
+        assertEquals(h, big.hashChunk(32, 0));
+        assertFalse(h == big.hashChunk(0, 0));
+        assertFalse(0 == h);
+        one.ground(33, 61, 5, 6);
+        assertFalse(h == one.hashChunk(0, 0));
     }
 }

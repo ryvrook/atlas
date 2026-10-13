@@ -20,7 +20,13 @@ import java.util.Map;
  * Rendered views in memory, least recently used first out, and on disk under iso/{world}/ with
  * the oldest files removed first once the disk budget is used. The key is the world, the centre
  * chunk, the radius, the direction, the scale and a time bucket, so a view is drawn again at least
- * once per bucket. A chunk saved inside a view removes that view from both places.
+ * once per bucket.
+ *
+ * <p>A chunk saved inside a view never removes the view. The engine saves the chunks around players
+ * every few minutes whether or not a block changed, so the view is only marked stale with the chunks
+ * saved since it was drawn. A stale view is still served, and IsoService checks the fingerprint kept
+ * with it to tell whether the area really changed before it draws the view again. Fingerprints live
+ * in memory only, a view read back from disk after a restart has none and is drawn again once stale.
  *
  * <p>A partial view, drawn while chunks were missing or the chunk budget ran dry, stays in memory for
  * PARTIAL_MS only and is never written to disk.
@@ -32,6 +38,10 @@ final class IsoCache {
     record Entry(byte[] png, String etag, long renderedAt, boolean partial) {
     }
 
+    /** The fingerprint of every chunk of a view as drawn, row by row, see IsoRenderer.slot. 0 is not known. */
+    record Print(long[] terrain, long[] image) {
+    }
+
     /** What the cache holds about one key, kept for invalidation and the disk budget. */
     private record Known(String folder, IsoView view, long bucket, long diskBytes, long diskAt) {
     }
@@ -39,6 +49,9 @@ final class IsoCache {
     private final Path dir;
     private final LinkedHashMap<String, Entry> memory = new LinkedHashMap<>(64, 0.75f, true);
     private final Map<String, Known> known = new HashMap<>();
+    private final Map<String, Print> prints = new HashMap<>();
+    /** Chunks saved inside a view since it was drawn, packed by chunk, to the time of the save. */
+    private final Map<String, Map<Long, Long>> stale = new HashMap<>();
     private long memoryBytes;
     private long memoryMax;
     private long diskBytes;
@@ -54,6 +67,25 @@ final class IsoCache {
 
     static String folder(String world) {
         return TileKeys.safe(world);
+    }
+
+    static long chunk(int cx, int cz) {
+        return ((long) cx << 32) | (cz & 0xFFFFFFFFL);
+    }
+
+    static int chunkX(long packed) {
+        return (int) (packed >> 32);
+    }
+
+    static int chunkZ(long packed) {
+        return (int) packed;
+    }
+
+    /** Removes a key from the index with its fingerprint and stale chunks. */
+    private Known forget(String key) {
+        prints.remove(key);
+        stale.remove(key);
+        return known.remove(key);
     }
 
     Path dir() {
@@ -127,7 +159,7 @@ final class IsoCache {
             png = Files.readAllBytes(f);
         } catch (IOException e) {
             synchronized (this) {
-                Known gone = known.remove(key);
+                Known gone = forget(key);
                 if (gone != null) {
                     diskBytes -= gone.diskBytes();
                 }
@@ -145,6 +177,14 @@ final class IsoCache {
 
     /** Keeps a rendered view in memory and, when it is complete and disk is allowed, on disk. */
     void put(IsoView v, long bucket, Entry e, boolean toDisk) throws IOException {
+        put(v, bucket, e, toDisk, null, Long.MAX_VALUE);
+    }
+
+    /**
+     * Keeps a rendered view with its fingerprint. Chunks marked stale before since, when the render
+     * started, are drawn in it and forgotten, later ones keep the view stale.
+     */
+    void put(IsoView v, long bucket, Entry e, boolean toDisk, Print print, long since) throws IOException {
         String folder = folder(v.world());
         String key = key(folder, v, bucket);
         long size = 0;
@@ -161,34 +201,72 @@ final class IsoCache {
                 diskBytes -= old.diskBytes();
             }
             diskBytes += size;
+            if (print != null) {
+                prints.put(key, print);
+            } else {
+                prints.remove(key);
+            }
+            Map<Long, Long> marks = stale.get(key);
+            if (marks != null) {
+                marks.values().removeIf(t -> t < since);
+                if (marks.isEmpty()) {
+                    stale.remove(key);
+                }
+            }
             putMemory(key, e);
         }
     }
 
-    /** Removes every view whose square holds the chunk. Returns how many went. */
-    int invalidate(String world, int cx, int cz) {
+    /** The chunks saved inside the view since it was drawn, to the time of the save, empty when it is fresh. */
+    synchronized Map<Long, Long> staleChunks(IsoView v, long bucket) {
+        Map<Long, Long> m = stale.get(key(folder(v.world()), v, bucket));
+        return m == null ? Map.of() : new HashMap<>(m);
+    }
+
+    synchronized boolean isStale(IsoView v, long bucket) {
+        Map<Long, Long> m = stale.get(key(folder(v.world()), v, bucket));
+        return m != null && !m.isEmpty();
+    }
+
+    /** The fingerprint kept with the view, or null. */
+    synchronized Print print(IsoView v, long bucket) {
+        return prints.get(key(folder(v.world()), v, bucket));
+    }
+
+    /** Forgets the stale marks a check found unchanged, those made at or before checkedAt. */
+    synchronized void clearStale(IsoView v, long bucket, Map<Long, Long> checked) {
+        String key = key(folder(v.world()), v, bucket);
+        Map<Long, Long> m = stale.get(key);
+        if (m == null) {
+            return;
+        }
+        for (Map.Entry<Long, Long> c : checked.entrySet()) {
+            m.remove(c.getKey(), c.getValue());
+        }
+        if (m.isEmpty()) {
+            stale.remove(key);
+        }
+    }
+
+    /**
+     * Marks every view whose square holds the chunk as stale, at the time at. Nothing is removed.
+     * Returns how many views were fresh before.
+     */
+    synchronized int markStale(String world, int cx, int cz, long at) {
         String folder = folder(world);
-        List<Known> gone = new ArrayList<>();
-        int removed = 0;
-        synchronized (this) {
-            for (Iterator<Map.Entry<String, Known>> it = known.entrySet().iterator(); it.hasNext(); ) {
-                Map.Entry<String, Known> e = it.next();
-                Known k = e.getValue();
-                if (k.folder().equals(folder) && k.view().covers(cx, cz)) {
-                    it.remove();
-                    removed++;
-                    removeMemory(e.getKey());
-                    diskBytes -= k.diskBytes();
-                    if (k.diskBytes() > 0) {
-                        gone.add(k);
-                    }
+        int marked = 0;
+        long c = chunk(cx, cz);
+        for (Map.Entry<String, Known> e : known.entrySet()) {
+            Known k = e.getValue();
+            if (k.folder().equals(folder) && k.view().covers(cx, cz)) {
+                Map<Long, Long> m = stale.computeIfAbsent(e.getKey(), x -> new HashMap<>());
+                if (m.isEmpty()) {
+                    marked++;
                 }
+                m.put(c, at);
             }
         }
-        for (Known k : gone) {
-            delete(k);
-        }
-        return removed;
+        return marked;
     }
 
     /** Drops every view of a world, in memory and on disk. */
@@ -200,6 +278,8 @@ final class IsoCache {
                 Map.Entry<String, Known> e = it.next();
                 if (e.getValue().folder().equals(folder)) {
                     it.remove();
+                    prints.remove(e.getKey());
+                    stale.remove(e.getKey());
                     removeMemory(e.getKey());
                     diskBytes -= e.getValue().diskBytes();
                     gone.add(e.getValue());
@@ -228,7 +308,7 @@ final class IsoCache {
                     }
                     boolean drop = pass == 0 ? k.bucket() < currentBucket - 1 : k.diskBytes() > 0 && diskBytes > maxBytes;
                     if (drop) {
-                        known.remove(e.getKey());
+                        forget(e.getKey());
                         removeMemory(e.getKey());
                         diskBytes -= k.diskBytes();
                         if (k.diskBytes() > 0) {
@@ -289,7 +369,7 @@ final class IsoCache {
     private void forgetIfMemoryOnly(String key) {
         Known k = known.get(key);
         if (k != null && k.diskBytes() <= 0) {
-            known.remove(key);
+            forget(key);
         }
     }
 
