@@ -4,6 +4,43 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
+## 1.1.0 - 2026-10-13
+
+This is Atlas 1.1.0, dated 2026-10-13. It lets the separate Chronicle stats plugin share one login with
+the map and adds a Chronicle tab.
+
+### Upgrading
+
+- The session cookie is now called `ryvrook_session`, the name Chronicle uses too. Browsers linked on
+  1.0.0 stay linked. Atlas 1.1.0 still accepts the old `atlas_session` cookie and on its next answer
+  sets the same session again as `ryvrook_session` and clears the old cookie. Accepting `atlas_session`
+  ends with the next release, so a browser that does not visit the map before then has to link again.
+- New settings are added with their defaults on the first start. They are `cookieName`
+  (`ryvrook_session`), `cookieDomain` (empty), `chronicleExport`
+  (`mods/Ryvrook_Chronicle/export/stats.json`) and `chronicleUrl` (empty).
+- To share the login, serve Atlas and Chronicle from one host name under two base paths, such as
+  `https://example.com/map/` and `https://example.com/stats/`, with the same `cookieName` in both. This
+  is the documented reverse proxy setup. Atlas sets its cookie with Path `/`, so both base paths see
+  it. Set `cookieDomain` only when the two run on sibling host names instead.
+
+### Added
+
+- `dev.ryvrook.atlas.api.SessionApi`, a session API for other plugins, versioned on its own as
+  version 1. It issues and redeems link codes, resolves and revokes sessions by the SHA-256 hash of
+  their token, takes in sessions another plugin redeemed with `adopt`, shares the hidden player list
+  and reports every redeemed, adopted and revoked session to listeners on the Atlas scheduler.
+- A Chronicle tab with the server totals, players online and the top players of each board from the
+  Chronicle export, a link to the Chronicle dashboard when `chronicleUrl` is set, and "A player" for
+  hidden players. It shows only while the export exists. The Stats tab stays as it was.
+- `GET /api/chronicle`, which follows the `stats` visibility, and the `chronicle` stream event.
+- `cookieName` and `cookieDomain`. A `cookieDomain` adds the Domain attribute to the session cookie.
+- `chronicleExport` and `chronicleUrl`.
+
+### Changed
+
+- The session cookie is `ryvrook_session` instead of `atlas_session`, see Upgrading.
+- Signing out also ends the session of an old `atlas_session` cookie and clears it.
+
 ## 1.0.0 - 2026-10-13
 
 This is Atlas 1.0.0, dated 2026-10-13. The version number changes when it ships.

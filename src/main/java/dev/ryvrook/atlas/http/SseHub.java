@@ -35,7 +35,7 @@ import java.util.function.Supplier;
  * viewer key and share the bytes across every client with that key.
  *
  * <p>When a client's queue is full the oldest data frame is dropped. Control frames (hello,
- * markers, tiles, worlds, leaderboard and snapshot) tell the browser to fetch something again and
+ * markers, tiles, worlds, leaderboard, chronicle and snapshot) tell the browser to fetch something again and
  * are never dropped that way. A client that does not take a write for WRITE_TIMEOUT_MS is closed.
  *
  * <p>Every frame carries an id made of this hub's run id, the client id and a sequence number.
@@ -65,7 +65,7 @@ public final class SseHub {
     static final long REPLAY_BUDGET_BYTES = 32L * 1024 * 1024;
     /** Events that tell the browser to fetch something again. Never dropped from a full queue. */
     static final Set<String> CONTROL = Set.of("hello", "markers", "tiles", "worlds", "leaderboard", "snapshot",
-            "layers", "timeline");
+            "layers", "timeline", "chronicle");
     /** Events whose payload names a world in a top level world field, checked against the world gate. */
     static final Set<String> WORLD_SCOPED = Set.of("kill", "feed", "worldevent", "markers", "tiles", "layers",
             "timeline");

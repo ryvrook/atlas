@@ -17,6 +17,7 @@
     chat: { label: "Chat", icon: "chat" },
     leaderboard: { label: "Leaderboard", icon: "trophy" },
     stats: { label: "Stats", icon: "stats" },
+    chronicle: { label: "Chronicle", icon: "book" },
     admin: { label: "Admin", icon: "admin" }
   };
   state.tab = null;
@@ -37,6 +38,8 @@
     chat: () => A.layerOn("chat"),
     leaderboard: () => A.layerOn("leaderboard"),
     stats: () => A.layerOn("stats"),
+    // Shown only while the server finds a Chronicle export.
+    chronicle: () => A.layerOn("stats") && !!(state.chronicle && state.chronicle.available),
     admin: () => !!(state.viewer && (state.viewer.admin || state.viewer.viewingAs))
   };
   A.canTab = (t) => !!(can[t] && can[t]());
@@ -164,6 +167,7 @@
       case "chat": return renderChat();
       case "leaderboard": return renderLeaderboard(live);
       case "stats": return renderStats(live);
+      case "chronicle": return renderChronicle(live);
       case "admin": return renderAdmin(live);
       default: return undefined;
     }
@@ -923,6 +927,60 @@
       wireOpen(body);
       wireFactionLinks(body);
     }).catch((e) => { if (live()) body.innerHTML = head("Stats") + failState(e, "stats", "Stats", "are", live); });
+  }
+
+  // ---- chronicle ----------------------------------------------------------
+  // The Chronicle export holds server totals and the top players of each board. The tab shows while it exists.
+  A.loadChronicle = () => {
+    if (!A.layerOn("stats")) { state.chronicle = null; A.buildTabs(); return Promise.resolve(null); }
+    return A.api("api/chronicle").then((d) => { state.chronicle = d; A.buildTabs(); return d; });
+  };
+  // Values come as whole seconds, metres or counts. Long times read as hours and long ways as kilometres.
+  const statValue = (v, unit) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return "none";
+    if (unit === "seconds") return n >= 3600 ? num(n / 3600, 1) + " h" : num(n / 60, 0) + " min";
+    if (unit === "metres") return n >= 1000 ? num(n / 1000, 1) + " km" : num(n, 0) + " m";
+    return num(n, 0);
+  };
+  const dashboardUrl = (u) => typeof u === "string" && /^(https?:\/\/|\/)/i.test(u) ? u : null;
+  function chronicleBoard(b) {
+    const rows = Array.isArray(b.rows) ? b.rows.slice(0, 5) : [];
+    const max = Math.max(1, ...rows.map((r) => Number(r.value) || 0));
+    const medal = ["var(--tier-gold)", "var(--tier-silver)", "var(--tier-bronze)"];
+    return "<h3 class='sub'>" + esc(b.label || A.pretty(b.key)) + "</h3>" + rows.map((r, i) => {
+      const rank = Number(r.rank) > 0 ? Number(r.rank) : i + 1;
+      return "<div class='row lb-row'>" + (rank <= 3 ? "<span class='medal' style='background:" + medal[rank - 1] + "'>" + rank + "</span>" : "<span class='rank' style='width:24px'>" + rank + "</span>") +
+        "<div class='grow'><div class='title'><b>" + esc(r.name) + "</b></div><div class='bar'><i style='width:" + ((Number(r.value) || 0) / max * 100).toFixed(1) + "%'></i></div></div>" +
+        "<span class='pts'>" + esc(statValue(r.value, b.unit)) + "</span></div>";
+    }).join("");
+  }
+  function renderChronicle(live) {
+    const draw = (d) => {
+      if (!live() || !d) return;
+      if (d.available === false) {
+        body.innerHTML = head("Chronicle") + emptyState("book", "No Chronicle stats yet", "This tab fills in once the server runs Chronicle and has written its first export.");
+        return;
+      }
+      let h = head("Chronicle", d.updatedAt ? "<span class='muted' style='font-size:12px'>Updated " + esc(A.rel(d.updatedAt)) + "</span>" : "");
+      const totals = Array.isArray(d.totals) ? d.totals : [];
+      const tiles = [];
+      if (d.online != null) tiles.push([num(d.online, 0), "Online"]);
+      for (const t of totals) if (t.headline) tiles.push([statValue(t.value, t.unit), t.label || A.pretty(t.key)]);
+      if (tiles.length) h += "<div class='tiles'>" + tiles.map(([v, l]) => "<div class='tile'><b>" + esc(v) + "</b><span>" + esc(l) + "</span></div>").join("") + "</div>";
+      const boards = Array.isArray(d.boards) ? d.boards : [];
+      if (!boards.length) h += "<p class='muted'>No player is on a board yet.</p>";
+      h += boards.slice(0, 4).map(chronicleBoard).join("");
+      if (boards.length > 4) h += "<details class='fold'><summary>" + A.icon("chevron", "sm") + "More boards</summary>" + boards.slice(4).map(chronicleBoard).join("") + "</details>";
+      const rest = totals.filter((t) => !t.headline);
+      if (rest.length) h += "<details class='fold'><summary>" + A.icon("chevron", "sm") + "Every server total</summary><dl class='kv'>" +
+        rest.map((t) => "<dt>" + esc(t.label || A.pretty(t.key)) + "</dt><dd>" + esc(statValue(t.value, t.unit)) + "</dd>").join("") + "</dl></details>";
+      const url = dashboardUrl(d.url);
+      if (url) h += "<p><a class='btn small' href='" + esc(url) + "' target='_blank' rel='noopener'>" + A.icon("book", "sm") + "Open the Chronicle dashboard</a></p>";
+      body.innerHTML = h;
+    };
+    if (state.chronicle) draw(state.chronicle); else body.innerHTML = head("Chronicle") + loading();
+    A.loadChronicle().then(draw).catch((e) => { if (live() && !state.chronicle) body.innerHTML = head("Chronicle") + failState(e, "book", "Chronicle stats", "are", live); });
   }
 
   // ---- admin --------------------------------------------------------------

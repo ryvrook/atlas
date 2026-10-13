@@ -2,7 +2,9 @@
 
 This is the reference for the JSON API and the event stream that the Atlas web client uses. Scripts,
 bots and other sites may use it too. Every payload is built by Atlas from an explicit field list.
-Nothing from the factions snapshot file or the Feats export is passed through as a raw object.
+Nothing from the factions snapshot file, the Feats export or the Chronicle export is passed through as
+a raw object. The Java session API for other plugins is described at the end, under
+[Session API for plugins](#session-api-for-plugins).
 
 ## Versioning
 
@@ -37,7 +39,10 @@ The web client in the jar always matches the server it came with. A client that 
 
 A request is public unless it carries a link session or the admin token.
 
-- A browser linked with `/atlas link` sends the `atlas_session` cookie.
+- A browser linked with `/atlas link` sends the session cookie named by `cookieName`,
+  `ryvrook_session` by default. Atlas 1.1.0 also accepts the `atlas_session` cookie of 1.0.0 and
+  answers it with a `Set-Cookie` that stores the same session under the new name and clears the old
+  cookie. Accepting `atlas_session` ends with the next release.
 - Scripts send the `adminToken` from `atlas.json` as `X-Atlas-Token` or `Authorization: Bearer <token>`.
 - An admin may add `?as=TAG` to any route to see what a member of that faction sees.
 
@@ -365,6 +370,28 @@ EventRow {name: string, status: string|null, holder: string|null, control: strin
 The top lists are null when factions are hidden or limited to the viewer's own. `events` is null when
 the `events` layer is hidden.
 
+### GET /api/chronicle
+
+Follows `stats`. Answers 200 with `available: false` and empty lists when no Chronicle export exists.
+Added in Atlas 1.1.0.
+
+```
+{available: bool, updatedAt: ms|null, online: int|null, chronicleVersion: string|null, url: string|null,
+ totals: [Total], boards: [Board]}
+
+Total     {key: string, label: string, unit: string, value: number, headline: bool}
+Board     {key: string, label: string, unit: string, rows: [BoardRow]}
+BoardRow  {rank: int, uuid: string|null, name: string, value: number}
+```
+
+`url` is `chronicleUrl` from `atlas.json`, or null when it is empty. `totals` are the server totals of
+the export, the headline ones first. `headline` marks players ever seen, time played, kills, deaths,
+blocks broken, blocks placed, distance travelled and items crafted. `unit` is `count`, `seconds`,
+`metres` or `hitPoints`. Stats Atlas does not know have a label made from their key and the unit
+`count`. `boards` holds the top ten of each board that has rows, time played, kills and blocks broken
+first, then the rest in the order of the file. A player hidden from the viewer, by Atlas or by
+Chronicle, has the name `"A player"` and a null uuid.
+
 ### GET /api/changes/{world}
 
 Takes `since`, an hour ago by default and at most seven days back. Follows `terrain`.
@@ -629,6 +656,7 @@ worldevent   {world: string, id: string, name: string, displayName: string, stat
 tiles        {world: string, at: ms, tiles: [[zoom, x, z]]}
 snapshot     {sections: [string], at: ms|null, present: bool}
 leaderboard  {updatedAt: ms|null}
+chronicle    {available: bool, updatedAt: ms|null}
 worlds       {updatedAt: ms}
 timeline     {world: string, date: string}
 ```
@@ -644,13 +672,15 @@ timeline     {world: string, date: string}
   A named layer missing from the answer was removed or is no longer visible.
 - `snapshot.sections` names the factions snapshot sections that changed, from territories, points,
   factions, nations, events, feed and chat. Refetch the matching routes.
-- `leaderboard`, `worlds` and `timeline` say to refetch `/api/leaderboard`, `/api/worlds` and
-  `/api/timeline/{world}`. `worlds` is also sent when `/atlas reload` changes a world setting.
+- `leaderboard`, `chronicle`, `worlds` and `timeline` say to refetch `/api/leaderboard`,
+  `/api/chronicle`, `/api/worlds` and `/api/timeline/{world}`. `chronicle` goes to viewers who may see
+  `stats` when the export appears, changes or goes away, and after a reload that changed
+  `chronicleUrl`. `worlds` is also sent when `/atlas reload` changes a world setting.
 - `hello` is sent again without a reconnect when the viewer changes, for example after a revoke, a
   new permission or a new faction. Streams check this every 30 seconds.
 
-**Control frames.** `hello`, `markers`, `tiles`, `worlds`, `leaderboard`, `snapshot`, `layers` and
-`timeline` are never dropped from a slow client's queue. When the queue is full the oldest data frame
+**Control frames.** `hello`, `markers`, `tiles`, `worlds`, `leaderboard`, `chronicle`, `snapshot`,
+`layers` and `timeline` are never dropped from a slow client's queue. When the queue is full the oldest data frame
 goes instead. A client that takes no data for 15 seconds is closed.
 
 **Resume.** A browser that reconnects with `Last-Event-ID` within a minute, as the same viewer and
@@ -659,6 +689,69 @@ replayed as they were built during that minute. Any other reconnect starts over 
 
 **Limits.** Each address may hold `sseClientsPerIp` streams (8 by default) and more get 429 with
 `Retry-After: 30`. Past 500 streams in total the answer is 503.
+
+## Session API for plugins
+
+`dev.ryvrook.atlas.api.SessionApi` lets a plugin that serves a web page of its own, such as Chronicle,
+share one login with the map. It is a Java API in the Atlas jar, versioned on its own and apart from
+`apiVersion` and `AtlasApi`. `SessionApi.VERSION` and `version()` are `1` in Atlas 1.1.0.
+
+**Stability.** Within version 1 methods, record components and event kinds are only ever added. None
+is removed, renamed or given another meaning. A plugin that binds by reflection checks `version()`
+once, looks up only the methods it knows and resolves them again when the Atlas plugin object changes.
+
+**Threads.** Every method may be called from any thread and runs on the caller's thread. None blocks on
+IO or touches a world thread. Listeners run on an `Atlas-scheduler` thread, one at a time and in the
+order of the changes, never on the caller's thread. A listener that throws is logged and the others
+still run.
+
+**Tokens and hashes.** A session token is the cookie value. Atlas keeps only its SHA-256 hash, as 64
+lower case hex characters, and every method names a session by that hash. Sessions last 30 days after
+they were last seen. Sessions changed through the API are written with the rest of `sessions.json`,
+every five minutes and when Atlas stops.
+
+| Member | Descriptor | Thread | What it does |
+| --- | --- | --- | --- |
+| `static int VERSION` | `I` | Any | The version of the class, `1` |
+| `static SessionApi get()` | `()Ldev/ryvrook/atlas/api/SessionApi;` | Any | The running API, null before Atlas starts and after it stops |
+| `int version()` | `()I` | Any | The version the running Atlas implements |
+| `String issueCode(UUID uuid, String name)` | `(Ljava/util/UUID;Ljava/lang/String;)Ljava/lang/String;` | Any | A six character code, valid five minutes and single use. A null uuid throws `IllegalArgumentException` |
+| `Linked redeem(String code)` | `(Ljava/lang/String;)Ldev/ryvrook/atlas/api/SessionApi$Linked;` | Any | The token and session for a code, or null. Fires `REDEEMED` |
+| `Session resolve(String tokenHash)` | `(Ljava/lang/String;)Ldev/ryvrook/atlas/api/SessionApi$Session;` | Any | The session of a hash, or null. Refreshes its last seen time at most hourly |
+| `boolean revoke(String tokenHash)` | `(Ljava/lang/String;)Z` | Any | Ends a session. True when it existed. Fires `REVOKED` only then |
+| `void adopt(Session session, String tokenHash)` | `(Ldev/ryvrook/atlas/api/SessionApi$Session;Ljava/lang/String;)V` | Any | Takes in a session the other plugin redeemed. Fires `ADOPTED` only for a new hash |
+| `Set<UUID> hidden()` | `()Ljava/util/Set;` | Any | An unmodifiable copy of every player whose name Atlas hides |
+| `Runnable onChange(Consumer<SessionEvent> listener)` | `(Ljava/util/function/Consumer;)Ljava/lang/Runnable;` | Any, listener on `Atlas-scheduler` | Registers a listener and returns the handle that removes it |
+
+```
+record Session(UUID uuid, String name, long createdAt, long lastSeen)
+record Linked(String token, Session session)
+record SessionEvent(SessionEvent.Kind kind, String tokenHash, UUID uuid)
+enum SessionEvent.Kind { REDEEMED, ADOPTED, REVOKED }
+```
+
+- `REDEEMED` fires when a code is redeemed on the map or through `redeem`, `ADOPTED` when `adopt` added
+  a session and `REVOKED` when a browser signs out of the map, `/atlas unlink` runs or `revoke` ended a
+  session. A session that expires fires nothing.
+- `adopt` ignores a hash that is not 64 lower case hex characters, a null session or player and a
+  session last seen more than 30 days ago. A session Atlas already holds keeps the later last seen
+  time. Since only a new hash fires `ADOPTED`, two stores that copy each other's changes never loop.
+- `hidden()` holds the `/atlas hide` list, players hidden through `AtlasApi.setHidden` and players the
+  factions snapshot file marks hidden. The crouching and invisible rules hide only a position and are
+  left out.
+- `redeem` does not rate limit. The caller limits attempts per address as Atlas does, 10 a minute.
+- Listeners are dropped when Atlas stops. Register again once `get()` returns an API after a start.
+
+```java
+SessionApi api = SessionApi.get();
+if (api != null && api.version() >= 1) {
+    Runnable stop = api.onChange(e -> {
+        if (e.kind() == SessionApi.SessionEvent.Kind.REVOKED) {
+            myStore.revokeHash(e.tokenHash());
+        }
+    });
+}
+```
 
 ## Removed in version 1
 

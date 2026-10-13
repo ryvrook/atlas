@@ -178,6 +178,11 @@ public final class MarkerService {
         return player == null ? null : apiHidden.get(player);
     }
 
+    /** The players hidden through the API, as a copy. */
+    public java.util.Set<UUID> apiHiddenPlayers() {
+        return java.util.Set.copyOf(apiHidden.keySet());
+    }
+
     // ---- drop folder ------------------------------------------------------------
 
     /**

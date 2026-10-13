@@ -42,7 +42,8 @@ import java.util.zip.GZIPOutputStream;
  * connection is closed, through the sun.net.httpserver.maxReqTime property of the JDK server.
  */
 public final class ApiServer {
-    public static final String COOKIE = "atlas_session";
+    /** The cookie name of Atlas 1.0.0 and older. Still read in 1.1.0 and moved to cookieName on the next answer. */
+    public static final String LEGACY_COOKIE = AtlasConfig.LEGACY_COOKIE;
     /** Ordinary requests handled at the same time. Event streams do not count. */
     static final int MAX_IN_FLIGHT = 64;
     /** Seconds a client may take to send a whole request. */
@@ -751,7 +752,7 @@ public final class ApiServer {
                 // A wrong admin token counts against the same per address limit as link codes.
                 atlas.links().rateLimited(address);
             }
-            Viewer viewer = atlas.viewer(atlas.links().session(cookie(ex.getRequestHeaders(), COOKIE)), tokenAdmin, query.get("as"));
+            Viewer viewer = atlas.viewer(session(ex), tokenAdmin, query.get("as"));
             String namedWorld = parts.size() >= 2 && WORLD_IN_PATH.contains(head) ? parts.get(1)
                     : WORLD_IN_QUERY.contains(head) ? query.get("world") : null;
             if (worldHidden(viewer, namedWorld)) {
@@ -889,10 +890,68 @@ public final class ApiServer {
 
     /**
      * Path is always the root so the cookie works with and without the basePath prefix, and logout
-     * clears cookies set by any earlier version.
+     * clears cookies set by any earlier version. With cookieDomain set the cookie carries that Domain, so
+     * Atlas and Chronicle on sibling host names share it.
      */
     private String cookieAttributes(HttpExchange ex) {
-        return "; Path=/; HttpOnly; SameSite=Lax" + (overHttps(ex) ? "; Secure" : "");
+        return cookieAttributes(overHttps(ex), atlas.config().cookieDomain);
+    }
+
+    static String cookieAttributes(boolean secure, String domain) {
+        return "; Path=/; HttpOnly; SameSite=Lax" + (domain == null || domain.isBlank() ? "" : "; Domain=" + domain.trim())
+                + (secure ? "; Secure" : "");
+    }
+
+    /**
+     * The session token a request carries. legacy is true when it came in the 1.0.0 cookie because the
+     * current one is missing, and legacyPresent when the 1.0.0 cookie was sent at all.
+     */
+    record SessionCookie(String token, boolean legacy, boolean legacyPresent) {
+    }
+
+    /** Reads the session cookie under the configured name, falling back to the cookie of 1.0.0. */
+    static SessionCookie readSession(Headers h, String name) {
+        String current = cookie(h, name);
+        String old = LEGACY_COOKIE.equals(name) ? null : cookie(h, LEGACY_COOKIE);
+        boolean oldPresent = old != null;
+        if (current != null && !current.isEmpty()) {
+            return new SessionCookie(current, false, oldPresent);
+        }
+        if (old != null && !old.isEmpty()) {
+            return new SessionCookie(old, true, true);
+        }
+        return new SessionCookie(null, false, oldPresent);
+    }
+
+    /**
+     * The Set-Cookie lines that move a 1.0.0 cookie over. A valid session found only under the old name is
+     * set again under the current name, and the old cookie is cleared whenever it was sent. The old cookie
+     * never carried a Domain, so it is cleared without one.
+     */
+    static List<String> migrateCookie(SessionCookie read, boolean valid, String name, boolean secure, String domain) {
+        List<String> out = new ArrayList<>();
+        if (read == null || !read.legacyPresent()) {
+            return out;
+        }
+        if (read.legacy() && valid) {
+            out.add(name + "=" + read.token() + "; Max-Age=" + LinkService.SESSION_TTL_MS / 1000 + cookieAttributes(secure, domain));
+        }
+        out.add(LEGACY_COOKIE + "=; Max-Age=0" + cookieAttributes(secure, null));
+        return out;
+    }
+
+    /**
+     * The session of the request, or null. Moves a 1.0.0 cookie to the current name on this answer. Every
+     * route that resolves the viewer goes through here once, before its headers are sent.
+     */
+    private LinkService.Session session(HttpExchange ex) {
+        AtlasConfig cfg = atlas.config();
+        SessionCookie read = readSession(ex.getRequestHeaders(), cfg.cookieName);
+        LinkService.Session s = atlas.links().session(read.token());
+        for (String line : migrateCookie(read, s != null, cfg.cookieName, overHttps(ex), cfg.cookieDomain)) {
+            ex.getResponseHeaders().add("Set-Cookie", line);
+        }
+        return s;
     }
 
     /** Endpoints whose second path part names a world. */
@@ -995,13 +1054,19 @@ public final class ApiServer {
         } catch (RuntimeException e) {
             code = null;
         }
+        String cookieName = atlas.config().cookieName;
         if ("logout".equals(action)) {
-            atlas.links().revoke(cookie(ex.getRequestHeaders(), COOKIE));
-            ex.getResponseHeaders().add("Set-Cookie", COOKIE + "=; Max-Age=0" + cookieAttributes(ex));
+            atlas.links().revoke(cookie(ex.getRequestHeaders(), cookieName));
+            ex.getResponseHeaders().add("Set-Cookie", cookieName + "=; Max-Age=0" + cookieAttributes(ex));
+            if (!LEGACY_COOKIE.equals(cookieName)) {
+                // The cookie of 1.0.0 may still be there. It ends the same session or an older one.
+                atlas.links().revoke(cookie(ex.getRequestHeaders(), LEGACY_COOKIE));
+                ex.getResponseHeaders().add("Set-Cookie", LEGACY_COOKIE + "=; Max-Age=0" + cookieAttributes(overHttps(ex), null));
+            }
             String base = atlas.config().basePath;
             if (!base.isEmpty()) {
                 // Earlier versions scoped the cookie to the basePath. Clear that one as well.
-                ex.getResponseHeaders().add("Set-Cookie", COOKIE + "=; Max-Age=0; Path=" + base + "/; HttpOnly; SameSite=Lax");
+                ex.getResponseHeaders().add("Set-Cookie", LEGACY_COOKIE + "=; Max-Age=0; Path=" + base + "/; HttpOnly; SameSite=Lax");
             }
             JsonObject ok = new JsonObject();
             ok.addProperty("ok", true);
@@ -1019,7 +1084,10 @@ public final class ApiServer {
             return;
         }
         long maxAge = LinkService.SESSION_TTL_MS / 1000;
-        ex.getResponseHeaders().add("Set-Cookie", COOKIE + "=" + linked.token() + "; Max-Age=" + maxAge + cookieAttributes(ex));
+        ex.getResponseHeaders().add("Set-Cookie", cookieName + "=" + linked.token() + "; Max-Age=" + maxAge + cookieAttributes(ex));
+        if (!LEGACY_COOKIE.equals(cookieName) && cookie(ex.getRequestHeaders(), LEGACY_COOKIE) != null) {
+            ex.getResponseHeaders().add("Set-Cookie", LEGACY_COOKIE + "=; Max-Age=0" + cookieAttributes(overHttps(ex), null));
+        }
         Viewer v = atlas.viewer(linked.session(), false, null);
         JsonObject out = new JsonObject();
         out.addProperty("ok", true);
@@ -1166,7 +1234,8 @@ public final class ApiServer {
         // The stream keeps the cookie and admin token it was opened with and checks both again every
         // half minute against the current sessions and settings, so a revoked session, a changed
         // adminToken, a new faction or a changed permission applies live.
-        String token = cookie(ex.getRequestHeaders(), COOKIE);
+        // dispatch already moved a 1.0.0 cookie over on this answer, so this only reads.
+        String token = readSession(ex.getRequestHeaders(), atlas.config().cookieName).token();
         SseHub.Identity identity = new SseHub.Identity() {
             @Override
             public Viewer resolve() {

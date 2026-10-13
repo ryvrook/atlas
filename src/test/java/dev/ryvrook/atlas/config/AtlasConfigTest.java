@@ -168,4 +168,38 @@ class AtlasConfigTest {
         assertEquals("/map", AtlasConfig.normalizeBasePath("map"));
         assertEquals("", AtlasConfig.normalizeBasePath(null));
     }
+
+    @Test
+    void cookieAndChronicleKeys() throws Exception {
+        AtlasConfig d = AtlasConfig.parse(null);
+        assertEquals("ryvrook_session", d.cookieName);
+        assertEquals("", d.cookieDomain);
+        assertEquals("mods/Ryvrook_Chronicle/export/stats.json", d.chronicleExport);
+        assertEquals("", d.chronicleUrl);
+        assertTrue(d.addedKeys.contains("cookieName"));
+        assertTrue(d.addedKeys.contains("chronicleExport"));
+
+        AtlasConfig c = AtlasConfig.parse("{\"cookieName\": \"atlas_session\", \"cookieDomain\": \" .example.com \", "
+                + "\"chronicleUrl\": \" https://example.com/stats/ \", \"chronicleExport\": \"\"}");
+        assertEquals("atlas_session", c.cookieName);
+        assertEquals(".example.com", c.cookieDomain);
+        assertEquals("https://example.com/stats/", c.chronicleUrl);
+        assertEquals("mods/Ryvrook_Chronicle/export/stats.json", c.chronicleExport);
+        assertEquals("/stats/", AtlasConfig.parse("{\"chronicleUrl\": \"/stats/\"}").chronicleUrl);
+        assertEquals("ryvrook_session", AtlasConfig.parse("{\"cookieName\": \"\"}").cookieName);
+
+        String[] bad = {
+                "{\"cookieName\": \"my cookie\"}",
+                "{\"cookieName\": \"" + "x".repeat(33) + "\"}",
+                "{\"cookieName\": \"a;b\"}",
+                "{\"cookieDomain\": \"example.com; Secure\"}",
+                "{\"cookieDomain\": \"exa mple.com\"}",
+                "{\"chronicleUrl\": \"javascript:alert(1)\"}",
+                "{\"chronicleUrl\": \"stats\"}",
+                "{\"cookieName\": 5}",
+        };
+        for (String text : bad) {
+            assertThrows(AtlasConfig.InvalidConfigException.class, () -> AtlasConfig.parse(text), text);
+        }
+    }
 }

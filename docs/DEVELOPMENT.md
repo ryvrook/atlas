@@ -12,11 +12,11 @@ Everything lives under `src/main/java/dev/ryvrook/atlas`.
 | Package | What it holds |
 | --- | --- |
 | root | `AtlasPlugin`, the plugin entry and scheduler, and `Atlas`, the shared state and the JSON routes |
-| `api` | The public marker API for other plugins. The only package other mods may compile against |
-| `auth` | Link codes, sessions, viewers and the rate key of an address |
+| `api` | The public marker API and the session API for other plugins. The only package other mods may compile against |
+| `auth` | Link codes, sessions, the session API behind `SessionApi`, viewers and the rate key of an address |
 | `command` | `/atlas` and its sub commands |
 | `config` | `atlas.json` parsing, validation and visibility levels |
-| `data` | Engine reads, the factions snapshot, Feats, kills, heat, last seen and the payload builders |
+| `data` | Engine reads, the factions snapshot, Feats, the Chronicle export, kills, heat, last seen and the payload builders |
 | `iso` | 3D views, the chunk reader, the raster, the colour table, the PNG encoder, the cache, daily views and the routes |
 | `http` | The embedded HTTP server, the event stream hub, rate limits, trusted proxies and marker icons |
 | `markers` | Marker layers behind the API, the drop folder, the admin layer and the layer route |
@@ -65,10 +65,10 @@ pure logic and use the Hytale server jar only for types.
 
 | Package | Tests |
 | --- | --- |
-| `auth` | Rate keys, revoke, linked name lookup and the attempt limit |
-| `config` | Parsing, defaults, added keys, the fail closed cases and per world settings |
-| `data` | Marker merging, the hidden player rule, payload field lists and Feats diffs |
-| `http` | Path safety, rate limits, rate keys, trusted proxies and the event stream queue |
+| `auth` | Rate keys, revoke, linked name lookup, the attempt limit and the session API with its events and threads |
+| `config` | Parsing, defaults, added keys, the fail closed cases, the cookie and Chronicle keys and per world settings |
+| `data` | Marker merging, the hidden player rule, payload field lists, Feats diffs and the Chronicle export reader |
+| `http` | Path safety, rate limits, rate keys, trusted proxies, the event stream queue and the move from the old session cookie |
 | `iso` | View parameters, the cache keys and prune, the raster on synthetic columns and the iso config |
 | `markers` | The drop folder parser, the layer payload and tiers, popup escaping and timeline visibility |
 | `tiles` | Tile key math, the explored index, chunk image decoding, the render queue and the token bucket |
@@ -139,6 +139,24 @@ What to expect.
   snapshot on the same day writes no new blobs.
 - The 3D view answers 202 with `etaSeconds` first and 200 with a PNG when asked again after that time.
 - `boot.log` holds the Atlas start lines and no stack trace that mentions `dev.ryvrook`.
+
+To check linking without a browser, post a code to `api/link` and send the cookie back. A code comes
+from `/atlas link` in game. `/atlas link` needs a player, so on a headless server use a small test
+plugin that calls `SessionApi.get().issueCode(uuid, name)` from a console command of its own. `$CODE`
+is that code and `$TOKEN2` the cookie value the link answer set.
+
+```sh
+curl -s -D - -c cookies.txt -H 'Content-Type: application/json' -d "{\"code\":\"$CODE\"}" http://127.0.0.1:8190/api/link
+curl -s -b cookies.txt http://127.0.0.1:8190/api/worlds | grep -o '"linked":[a-z]*'
+curl -s -D - -o /dev/null -H "Cookie: atlas_session=$TOKEN2" http://127.0.0.1:8190/api/worlds | grep -i set-cookie
+curl -s http://127.0.0.1:8190/api/chronicle
+```
+
+- The link answer sets `ryvrook_session`, and the worlds answer with that cookie says `"linked":true`.
+- A request that carries the same token as `atlas_session` is linked too and its answer sets
+  `ryvrook_session` and clears `atlas_session`.
+- After a `stats.json` in the shape Chronicle writes is copied into `mods/Ryvrook_Chronicle/export`,
+  `api/chronicle` answers `"available":true` with its totals and boards within five seconds.
 
 To check that a broken config fails closed, put `{"port": "x"}` in `atlas.json` before boot and expect
 one SEVERE line and no web server, then fix the file and run `atlas reload` on the console. To check
@@ -219,6 +237,9 @@ waiting for a refresh when the server stops are removed from disk so the next st
   cached for the other threads.
 - A failing periodic task is logged once with its stack trace and then at most every five minutes
   while it keeps failing.
+- Session API calls run on the caller's thread and never block on IO. Changes are queued and handed
+  to the listeners by one task at a time on `Atlas-scheduler`, so listeners see them in order. The API
+  is withdrawn first when the plugin stops.
 
 The periodic tasks and their intervals.
 
@@ -231,6 +252,7 @@ The periodic tasks and their intervals.
 | World events | 5 seconds |
 | Shared and personal markers | 5 seconds |
 | Feats export check | 5 seconds |
+| Chronicle export check | 5 seconds |
 | BetterMap settings check | 15 seconds |
 | Marker layer drop folder | 5 seconds, with the shared markers |
 | Idle pre render | 5 seconds, after 30 seconds without a tile request |
@@ -301,6 +323,19 @@ write `admin.json` atomically, and refuse to write while the file holds an error
 
 `AtlasApi` publishes the running instance through `enable` and `disable`. Hooks registered with
 `onEnable` and `onDisable` live in static lists, so they survive a reload of Atlas.
+
+## Session API
+
+`SessionApi` in `api` is versioned on its own, so its version only moves when the session surface
+grows. `SessionService` in `auth` implements it on top of `LinkService` and is published from the
+plugin's start until its shutdown. `LinkService` reports each redeemed, adopted and revoked session to
+one listener on the thread that made the change, and `SessionService` queues those events for the
+scheduler. Sessions taken in with `adopt` live in the same map as every other session and are written
+by the usual save of `sessions.json`, so nothing else touches the disk.
+
+`ApiServer` reads the cookie named by `cookieName` and falls back to `atlas_session`, the name before
+1.1.0. A valid session found only under the old name is set again under the new one on the same
+answer and the old cookie is cleared. That fallback is meant to go in the release after 1.1.0.
 
 ## Timeline
 

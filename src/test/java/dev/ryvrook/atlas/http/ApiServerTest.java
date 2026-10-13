@@ -1,8 +1,14 @@
 package dev.ryvrook.atlas.http;
 
+import com.sun.net.httpserver.Headers;
+import dev.ryvrook.atlas.auth.LinkService;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.net.InetAddress;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -91,5 +97,72 @@ class ApiServerTest {
         assertEquals(ApiServer.CSP, ApiServer.indexCsp("<p>no scripts</p>"));
         String csp = ApiServer.indexCsp("<script>var a=1;</script>");
         assertTrue(csp.startsWith(ApiServer.CSP + "; script-src 'self' 'sha256-"));
+    }
+
+    private static Headers cookies(String line) {
+        Headers h = new Headers();
+        h.add("Cookie", line);
+        return h;
+    }
+
+    @Test
+    void oldSessionCookieIsAcceptedAndRewritten(@TempDir Path dir) {
+        LinkService links = new LinkService(dir);
+        LinkService.Linked linked = links.redeem(links.issueCode(UUID.randomUUID(), "Ann"));
+        ApiServer.SessionCookie read = ApiServer.readSession(cookies("theme=dark; atlas_session=" + linked.token()), "ryvrook_session");
+        assertEquals(linked.token(), read.token());
+        assertTrue(read.legacy());
+        assertNotNull(links.session(read.token()), "a browser linked on 1.0.0 stays linked");
+        List<String> lines = ApiServer.migrateCookie(read, true, "ryvrook_session", false, "");
+        assertEquals(List.of(
+                "ryvrook_session=" + linked.token() + "; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax",
+                "atlas_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"), lines);
+    }
+
+    @Test
+    void rewriteCarriesDomainAndSecure() {
+        ApiServer.SessionCookie read = ApiServer.readSession(cookies("atlas_session=tok"), "ryvrook_session");
+        List<String> lines = ApiServer.migrateCookie(read, true, "ryvrook_session", true, "example.com");
+        assertEquals("ryvrook_session=tok; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax; Domain=example.com; Secure", lines.get(0));
+        // The old cookie never had a Domain, so it is cleared without one.
+        assertEquals("atlas_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax; Secure", lines.get(1));
+    }
+
+    @Test
+    void oldCookieWithoutSessionIsOnlyCleared() {
+        ApiServer.SessionCookie read = ApiServer.readSession(cookies("atlas_session=gone"), "ryvrook_session");
+        assertEquals(List.of("atlas_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"),
+                ApiServer.migrateCookie(read, false, "ryvrook_session", false, ""));
+    }
+
+    @Test
+    void currentCookieWinsAndNothingMovesWithoutTheOldOne() {
+        ApiServer.SessionCookie both = ApiServer.readSession(cookies("atlas_session=old; ryvrook_session=new"), "ryvrook_session");
+        assertEquals("new", both.token());
+        assertFalse(both.legacy());
+        assertTrue(both.legacyPresent());
+        assertEquals(List.of("atlas_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"),
+                ApiServer.migrateCookie(both, true, "ryvrook_session", false, ""));
+
+        ApiServer.SessionCookie current = ApiServer.readSession(cookies("ryvrook_session=new"), "ryvrook_session");
+        assertEquals("new", current.token());
+        assertTrue(ApiServer.migrateCookie(current, true, "ryvrook_session", false, "").isEmpty());
+
+        ApiServer.SessionCookie none = ApiServer.readSession(new Headers(), "ryvrook_session");
+        assertNull(none.token());
+        assertTrue(ApiServer.migrateCookie(none, false, "ryvrook_session", false, "").isEmpty());
+
+        // An owner who keeps the old name has nothing to move.
+        ApiServer.SessionCookie kept = ApiServer.readSession(cookies("atlas_session=tok"), "atlas_session");
+        assertEquals("tok", kept.token());
+        assertFalse(kept.legacy());
+        assertTrue(ApiServer.migrateCookie(kept, true, "atlas_session", false, "").isEmpty());
+    }
+
+    @Test
+    void cookieAttributes() {
+        assertEquals("; Path=/; HttpOnly; SameSite=Lax", ApiServer.cookieAttributes(false, ""));
+        assertEquals("; Path=/; HttpOnly; SameSite=Lax; Domain=.example.com", ApiServer.cookieAttributes(false, ".example.com"));
+        assertEquals("; Path=/; HttpOnly; SameSite=Lax; Secure", ApiServer.cookieAttributes(true, null));
     }
 }

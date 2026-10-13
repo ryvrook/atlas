@@ -11,6 +11,7 @@ import com.hypixel.hytale.server.core.universe.world.World;
 import dev.ryvrook.atlas.auth.LinkService;
 import dev.ryvrook.atlas.auth.Viewer;
 import dev.ryvrook.atlas.config.AtlasConfig;
+import dev.ryvrook.atlas.data.ChronicleExport;
 import dev.ryvrook.atlas.data.DominionSnapshot;
 import dev.ryvrook.atlas.data.EngineData;
 import dev.ryvrook.atlas.data.HeatTracker;
@@ -72,6 +73,9 @@ public final class Atlas {
     private final KillLog kills;
     private final LastSeen lastSeen;
     private final Leaderboard leaderboard;
+    private final ChronicleExport chronicle;
+    /** The session API for the Chronicle web app, published from start until shutdown. */
+    private final dev.ryvrook.atlas.auth.SessionService sessionApi;
     private final EngineData engine = new EngineData();
     private final PersonalMarkers personal = new PersonalMarkers();
     private final MapModSettings mapMod;
@@ -98,9 +102,11 @@ public final class Atlas {
         this.kills = new KillLog(dataDir);
         this.lastSeen = new LastSeen(dataDir);
         this.leaderboard = new Leaderboard(resolveFeats(config));
+        this.chronicle = new ChronicleExport(resolveChronicle(config));
         this.mapMod = new MapModSettings(resolveMapMod(config));
         this.markers = new MarkerService(this, dataDir);
         this.markerRoutes = new MarkerRoutes(this, markers);
+        this.sessionApi = new dev.ryvrook.atlas.auth.SessionService(links, this::hiddenPlayers);
         live.setHideRules(config.hidePlayersCrouching, config.hidePlayersInvisible);
         // Timeline events. Names are recorded as they are, the hidden rule is applied when they are served.
         live.onJoin(p -> EventLog.record(p.world(), System.currentTimeMillis(), "join", null, null, p.name(), p.uuid(),
@@ -129,6 +135,11 @@ public final class Atlas {
         return Path.of(cfg.featsExport).toAbsolutePath().normalize();
     }
 
+    /** The Chronicle stats export path resolved against the server working directory. */
+    public static Path resolveChronicle(AtlasConfig cfg) {
+        return Path.of(cfg.chronicleExport).toAbsolutePath().normalize();
+    }
+
     /** The BetterMap folder resolved against the server working directory. */
     public static Path resolveMapMod(AtlasConfig cfg) {
         return Path.of(cfg.betterMapDir).toAbsolutePath().normalize();
@@ -151,6 +162,7 @@ public final class Atlas {
         this.config = cfg;
         snapshot.setPath(resolveSnapshot(cfg));
         leaderboard.setPath(resolveFeats(cfg));
+        chronicle.setPath(resolveChronicle(cfg));
         mapMod.setDir(resolveMapMod(cfg));
         tiles.setCacheMb(cfg.tileCacheMb);
         proxies = TrustedProxies.parse(cfg.trustedProxies);
@@ -206,6 +218,16 @@ public final class Atlas {
         return leaderboard;
     }
 
+    /** The Chronicle stats export. */
+    public ChronicleExport chronicle() {
+        return chronicle;
+    }
+
+    /** The session API object, published while Atlas runs. */
+    public dev.ryvrook.atlas.auth.SessionService sessionApi() {
+        return sessionApi;
+    }
+
     public EngineData engine() {
         return engine;
     }
@@ -226,6 +248,7 @@ public final class Atlas {
 
     /** Withdraws the marker API so other plugins run their disable hooks. Called when the plugin stops. */
     public void shutdown() {
+        sessionApi.stop();
         markers.stop();
     }
 
@@ -571,6 +594,28 @@ public final class Atlas {
             return "dominion";
         }
         return live.autoHideReason(uuid);
+    }
+
+    /**
+     * Every player whose name is hidden, for the session API. That is the hide list, players hidden through the
+     * API and players the factions snapshot marks hidden, now or before they left it. The crouching and
+     * invisible rules only hide positions and are left out.
+     */
+    public java.util.Set<UUID> hiddenPlayers() {
+        java.util.Set<UUID> out = new java.util.HashSet<>(links.hiddenPlayers());
+        out.addAll(markers.apiHiddenPlayers());
+        snapshotHidden.forEach((uuid, flag) -> {
+            if (Boolean.TRUE.equals(flag)) {
+                out.add(uuid);
+            }
+        });
+        for (Map.Entry<String, JsonObject> e : snapshot.view().playerByUuid.entrySet()) {
+            UUID uuid = Payloads.uuid(e.getKey());
+            if (uuid != null && Json.bool(e.getValue(), "hidden")) {
+                out.add(uuid);
+            }
+        }
+        return out;
     }
 
     /** Hides or shows a player for everyone but admins and themself, saved in the hide list. True when it changed. */
@@ -1987,6 +2032,15 @@ public final class Atlas {
         return Payloads.leaderboard(leaderboard.root(), leaderboard.updatedAt(), uuid -> hiddenFrom(v, uuid));
     }
 
+    /** The Chronicle stats from its export, with hidden players renamed for this viewer. */
+    public JsonObject chroniclePayload(Viewer v) {
+        String url = config.chronicleUrl == null || config.chronicleUrl.isBlank() ? null : config.chronicleUrl.trim();
+        if (!v.canSee(config, "stats")) {
+            return ChronicleExport.empty(url);
+        }
+        return ChronicleExport.payload(chronicle.root(), chronicle.updatedAt(), url, uuid -> hiddenFrom(v, uuid));
+    }
+
     /** Records where a player was when they left. Called from the disconnect event. */
     public void recordLastSeen(UUID uuid, String name, String world, double x, double y, double z) {
         if (uuid == null || world == null) {
@@ -2024,7 +2078,7 @@ public final class Atlas {
             case "points" -> v.canSee(config, "points") || v.canSee(config, "events") || v.canSee(config, "zones");
             case "factions" -> v.canSee(config, "factions");
             case "nations" -> v.canSee(config, "nations");
-            case "stats" -> v.canSee(config, "stats");
+            case "stats", "chronicle" -> v.canSee(config, "stats");
             case "changes" -> v.canSee(config, "terrain");
             case "heat" -> v.canSee(config, "heat");
             default -> true;
@@ -2059,7 +2113,8 @@ public final class Atlas {
         }
         String head = parts.get(0);
         java.util.Set<String> mine = java.util.Set.of("worlds", "players", "markers", "worldevents", "kills",
-                "leaderboard", "territories", "points", "factions", "nations", "stats", "changes", "heat", "bosses");
+                "leaderboard", "territories", "points", "factions", "nations", "stats", "changes", "heat", "bosses",
+                "chronicle");
         if (!mine.contains(head)) {
             return null;
         }
@@ -2099,6 +2154,7 @@ public final class Atlas {
             }
             case "nations" -> ApiResult.ok(nationsPayload(v));
             case "stats" -> ApiResult.ok(statsPayload(v));
+            case "chronicle" -> parts.size() == 1 ? ApiResult.ok(chroniclePayload(v)) : NOT_FOUND;
             case "changes" -> ApiResult.ok(changesPayload(v, world, since));
             case "heat" -> ApiResult.ok(heatPayload(v, world, since));
             default -> NOT_FOUND;

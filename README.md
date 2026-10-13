@@ -25,6 +25,7 @@ and admins see everything.
 - A staff hide toolkit. Hide any player, hide players automatically while they crouch or are invisible, and let vanish plugins hide players through the API.
 - Active world events such as Goblin Breaches, a kill feed with boss kills, public chat and an activity heat overlay.
 - A leaderboard tab with the Feats top list, recent unlocks with how rare each feat is, milestones, server firsts and the last unlock of every player.
+- A Chronicle tab with the server totals and top players from the Chronicle stats plugin, and one shared login with the Chronicle web page.
 - Territory, faction and nation layers fed by an optional factions snapshot file that a separate plugin writes. Atlas runs fully without it.
 - Follows BetterMap's server wide map rules, world border and waypoint heights when BetterMap's files are present.
 - Light and dark themes, a phone layout, search, follow, measure and shareable view links.
@@ -45,7 +46,7 @@ mod.
 
 ## Install
 
-1. Build `Atlas-1.0.0.jar` from source (see below), or download it from the Releases page once one is published.
+1. Build `Atlas-1.1.0.jar` from source (see below), or download it from the Releases page once one is published.
 2. On a dedicated server, put the jar in the `mods` folder inside the server's working directory, the folder you start `HytaleServer.jar` from. For a singleplayer world, use the `Mods` folder in Hytale's `UserData` folder.
 3. Start the server. On first start Atlas creates its data folder `mods/Ryvrook_Atlas`, writes `atlas.json` there and listens on port 8123.
 4. Open `http://<server address>:8123/` in a browser.
@@ -148,12 +149,16 @@ map down the same way, so a setting you meant to tighten can never stay loose. F
 | `publicTitle` | `Atlas` | Title shown in the browser |
 | `publicUrl` | empty | Address printed by `/atlas` and sent to browsers |
 | `basePath` | empty | Sub path stripped from requests behind a reverse proxy, such as `/map` |
+| `cookieName` | `ryvrook_session` | Name of the session cookie, 1 to 32 letters, digits or underscores. Chronicle uses the same name |
+| `cookieDomain` | empty | Domain attribute of the session cookie, such as `example.com`. Empty sends none |
 | `showPlayers` | `true` | Show players to non admins at all |
 | `showPlayerHealth` | `false` | Include health in player data for non admins |
 | `hideBelowY` | `0` | Players below this height count as underground and non admins get no position for them |
 | `playerUpdateHz` | `1` | Player pushes per second over the event stream, above 0 and clamped to 0.1 to 10 |
 | `showPortalWorlds` | `false` | Show portal and instance worlds to non admins |
 | `featsExport` | see below | Optional leaderboard export written by the separate Feats plugin |
+| `chronicleExport` | see below | Optional stats export written by the separate Chronicle plugin |
+| `chronicleUrl` | empty | Address of the Chronicle web page, linked from the Chronicle tab. Starts with `http://`, `https://` or `/` |
 | `sseClientsPerIp` | `8` | Event stream connections per address, next to a global limit of 500. At least 1 |
 | `apiRequestsPerMinute` | `600` | API requests per minute and address. 0 means unlimited |
 | `tileRequestsPerMinute` | `3000` | Tile and marker icon requests per minute and address, timeline tiles included. 0 means unlimited |
@@ -183,8 +188,9 @@ map down the same way, so a setting you meant to tighten can never stay loose. F
 `hidePlayersInOwnTerritory` (default `true`) hides players standing in their own faction land from
 other factions. It needs the factions snapshot file.
 
-`featsExport` defaults to `mods/Ryvrook_Feats/export/feats.json` and `dominionSnapshot` to
-`mods/Ryvrook_Dominion/export/snapshot.json`, both relative to the server working directory.
+`featsExport` defaults to `mods/Ryvrook_Feats/export/feats.json`, `chronicleExport` to
+`mods/Ryvrook_Chronicle/export/stats.json` and `dominionSnapshot` to
+`mods/Ryvrook_Dominion/export/snapshot.json`, all relative to the server working directory.
 
 `adminToken` is filled with a random 32 character value when empty. A value shorter than 24
 characters is replaced with a random one and a warning is logged.
@@ -482,6 +488,10 @@ itself and never for text players typed. The map's Content Security Policy still
 for as long as Atlas runs. It is not saved, so call it again after a restart. Admins see the reason
 on the map. `api.isHidden(uuid)` says whether a player is hidden for any reason.
 
+**Sessions.** `dev.ryvrook.atlas.api.SessionApi` is a separate API with its own version for plugins
+that serve a web page of their own and want to share the map's login. It is described in
+[docs/API.md](docs/API.md#session-api-for-plugins).
+
 ### Admin markers
 
 `/atlas marker` keeps the layer `atlas:admin`, labelled Server markers, in `markers/admin.json`.
@@ -576,8 +586,10 @@ limited per address, since behind an unlisted proxy every browser would share th
 Link codes and wrong admin tokens share a separate limit of 10 attempts per minute and address. At
 most 64 requests are handled at once, event streams aside, and more get 503.
 
-**Sessions and revoke.** Linking stores an `atlas_session` cookie that lasts 30 days after the last
-visit. It is HttpOnly, SameSite=Lax and Path `/`, and Secure when a trusted proxy reports https.
+**Sessions and revoke.** Linking stores a session cookie named by `cookieName`, `ryvrook_session` by
+default, that lasts 30 days after the last visit. It is HttpOnly, SameSite=Lax and Path `/`, Secure
+when a trusted proxy reports https, and carries a Domain only when `cookieDomain` is set. Atlas 1.1.0
+still accepts the `atlas_session` cookie of 1.0.0 and moves it to the new name on its next answer.
 `sessions.json` keeps only a SHA-256 hash of each session token. Link codes are single use and
 last five minutes. The clickable link in `/atlas link` carries the code as `?code=`. The map fills it
 into the link dialog, sends it at once and takes it out of the address bar straight away, so a reload
@@ -628,6 +640,23 @@ off response buffering for `/api/events` in the proxy.
 ```
 
 > **Warning** Behind a reverse proxy, always list it in `trustedProxies`. Otherwise every browser shares the proxy's address for rate limits and logs.
+
+**One login with Chronicle.** Serve Atlas and Chronicle from one host name under two base paths,
+such as `https://example.com/map/` and `https://example.com/stats/`. Give both the same `cookieName`,
+which is the default, and leave `cookieDomain` empty. The session cookie is sent to both paths, and
+Chronicle looks it up through the session API, so a browser linked on one page is linked on the other.
+Set `cookieDomain` to the shared parent domain only when the two run on sibling host names such as
+`map.example.com` and `stats.example.com`.
+
+```json
+{
+  "bind": "127.0.0.1",
+  "publicUrl": "https://example.com/map/",
+  "basePath": "/map",
+  "trustedProxies": ["127.0.0.1"],
+  "chronicleUrl": "https://example.com/stats/"
+}
+```
 
 ## How it works
 
@@ -704,7 +733,7 @@ The endpoints are listed here. Shapes, events and the visibility rules are in
 [docs/API.md](docs/API.md).
 
 - `GET /api/worlds`, `/api/players`, `/api/markers/{world}`, `/api/layers/{world}`
-- `GET /api/worldevents`, `/api/kills`, `/api/leaderboard`, `/api/stats`
+- `GET /api/worldevents`, `/api/kills`, `/api/leaderboard`, `/api/stats`, `/api/chronicle`
 - `GET /api/territories/{world}`, `/api/points/{world}`, `/api/factions`, `/api/factions/{tag}`, `/api/nations`
 - `GET /api/changes/{world}`, `/api/heat/{world}`
 - `GET /api/tiles/{world}/{zoom}/{x}/{z}.png`, `/api/marker-icons/{Name}.png`
@@ -725,6 +754,19 @@ feat and a rare tag under 5 percent, the world milestones and the server firsts.
 milestones and firsts are written to the timeline event log, and each day's stats carry a Feats
 summary. Atlas reads the file only. A file that cannot be read is logged once and the last good copy
 stays on the map. Without the file the tab stays hidden.
+
+## Chronicle
+
+When the separate Chronicle plugin writes its stats export at `chronicleExport`, a Chronicle tab
+appears next to the Stats tab with the players online, the headline server totals such as time
+played, kills and blocks broken, and the top players of each board. With `chronicleUrl` set the tab
+links to the Chronicle web page. Hidden players are shown as "A player", whether Atlas or Chronicle
+hides them. The tab follows the `stats` visibility. Atlas checks the file every five seconds by its
+modification time and size, reads it only, logs a file that cannot be read once and keeps the last
+good copy. Without the file the tab stays hidden and the Stats tab is unchanged.
+
+Chronicle can also share the login with Atlas through `dev.ryvrook.atlas.api.SessionApi`, see
+[docs/API.md](docs/API.md#session-api-for-plugins) and [Reverse proxy](#reverse-proxy).
 
 ## BetterMap compatibility
 

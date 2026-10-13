@@ -30,6 +30,14 @@ public final class AtlasConfig {
     public static final String FILE_NAME = "atlas.json";
     /** Shortest adminToken accepted. A shorter one is replaced with a new random token. */
     public static final int MIN_ADMIN_TOKEN = 24;
+    /** The session cookie name since 1.1.0, the same name Chronicle uses. */
+    public static final String DEFAULT_COOKIE = "ryvrook_session";
+    /** The session cookie name of 1.0.0 and older, still accepted in 1.1.0. */
+    public static final String LEGACY_COOKIE = "atlas_session";
+    public static final String DEFAULT_CHRONICLE_EXPORT = "mods/Ryvrook_Chronicle/export/stats.json";
+    private static final java.util.regex.Pattern COOKIE_NAME = java.util.regex.Pattern.compile("[A-Za-z0-9_]{1,32}");
+    private static final java.util.regex.Pattern COOKIE_DOMAIN = java.util.regex.Pattern.compile(
+            "\\.?[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*");
 
     public String bind = "0.0.0.0";
     public int port = 8123;
@@ -38,6 +46,10 @@ public final class AtlasConfig {
     public String publicUrl = "";
     /** Prefix stripped from request paths when a reverse proxy mounts the map under a sub path, such as /map. */
     public String basePath = "";
+    /** Name of the session cookie, shared with Chronicle. 1 to 32 letters, digits or underscores. */
+    public String cookieName = DEFAULT_COOKIE;
+    /** Domain attribute of the session cookie. Empty sends none, so the cookie stays with this host. */
+    public String cookieDomain = "";
     public boolean showPlayers = true;
     public boolean showPlayerHealth = false;
     public boolean hidePlayersInOwnTerritory = true;
@@ -48,6 +60,10 @@ public final class AtlasConfig {
     public boolean showPortalWorlds = false;
     /** Path of the Feats leaderboard export, relative to the server working directory. */
     public String featsExport = "mods/Ryvrook_Feats/export/feats.json";
+    /** Path of the Chronicle stats export, relative to the server working directory. */
+    public String chronicleExport = DEFAULT_CHRONICLE_EXPORT;
+    /** Address of the Chronicle dashboard linked from the Chronicle tab. Empty hides the link. */
+    public String chronicleUrl = "";
     /** Event stream connections allowed per address. */
     public int sseClientsPerIp = 8;
     /** API requests per minute and address. 0 means unlimited. */
@@ -501,6 +517,21 @@ public final class AtlasConfig {
         }
         if (cfg.featsExport == null || cfg.featsExport.isBlank()) {
             cfg.featsExport = "mods/Ryvrook_Feats/export/feats.json";
+        }
+        if (cfg.chronicleExport == null || cfg.chronicleExport.isBlank()) {
+            cfg.chronicleExport = DEFAULT_CHRONICLE_EXPORT;
+        }
+        cfg.chronicleUrl = cfg.chronicleUrl == null ? "" : cfg.chronicleUrl.trim();
+        if (!cfg.chronicleUrl.isEmpty() && !cfg.chronicleUrl.matches("(?i)(https?://|/)[^\\s\"'<>]*")) {
+            throw new InvalidConfigException("chronicleUrl must be empty or an address that starts with http://, https:// or /");
+        }
+        cfg.cookieName = cfg.cookieName == null || cfg.cookieName.isBlank() ? DEFAULT_COOKIE : cfg.cookieName.trim();
+        if (!COOKIE_NAME.matcher(cfg.cookieName).matches()) {
+            throw new InvalidConfigException("cookieName must be 1 to 32 letters, digits or underscores");
+        }
+        cfg.cookieDomain = cfg.cookieDomain == null ? "" : cfg.cookieDomain.trim();
+        if (!cfg.cookieDomain.isEmpty() && (cfg.cookieDomain.length() > 253 || !COOKIE_DOMAIN.matcher(cfg.cookieDomain).matches())) {
+            throw new InvalidConfigException("cookieDomain must be empty or a host name such as example.com");
         }
         if (cfg.trustedProxies == null) {
             cfg.trustedProxies = new ArrayList<>();

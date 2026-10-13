@@ -19,6 +19,7 @@ import dev.ryvrook.atlas.config.AtlasConfig;
 import dev.ryvrook.atlas.data.DominionSnapshot;
 import dev.ryvrook.atlas.data.EngineData;
 import dev.ryvrook.atlas.data.LiveState;
+import dev.ryvrook.atlas.data.Payloads;
 import dev.ryvrook.atlas.http.ApiServer;
 import dev.ryvrook.atlas.iso.IsoChunkSaveSystem;
 import dev.ryvrook.atlas.iso.IsoRoutes;
@@ -191,6 +192,8 @@ public final class AtlasPlugin extends JavaPlugin {
         ex.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
         scheduler = ex;
         atlas.useExecutor(r -> runAsync(r));
+        // Session listeners of other plugins run on this scheduler, never on the thread that made the change.
+        atlas.sessionApi().start(ex);
 
         Path snap = atlas.snapshot().path();
         if (!Files.isRegularFile(snap)) {
@@ -201,6 +204,7 @@ public final class AtlasPlugin extends JavaPlugin {
         pollMapMod();
         atlas.seedFeed();
         atlas.leaderboard().poll();
+        atlas.chronicle().poll();
         timeline.start(ex);
         iso.start(ex);
         tasks.add(ex.scheduleWithFixedDelay(guard("iso sweep",
@@ -218,6 +222,7 @@ public final class AtlasPlugin extends JavaPlugin {
         java.util.concurrent.Executor markerWork = r -> ex.execute(guard("markers", r));
         tasks.add(ex.scheduleWithFixedDelay(guard("markers", () -> atlas.pollMarkers(markerWork)), 6, 5, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("leaderboard", this::pollLeaderboard), 5, 5, TimeUnit.SECONDS));
+        tasks.add(ex.scheduleWithFixedDelay(guard("chronicle", () -> pollChronicle(false)), 5, 5, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("map settings", this::pollMapMod), 15, 15, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("explored", () -> atlas.tiles().refreshExplored()), 5, 600, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("tiles", () -> {
@@ -238,6 +243,10 @@ public final class AtlasPlugin extends JavaPlugin {
 
     @Override
     protected void shutdown() {
+        if (atlas != null) {
+            // Withdrawn first, so no session listener is handed a change while the scheduler goes down.
+            atlas.sessionApi().stop();
+        }
         for (ScheduledFuture<?> f : tasks) {
             f.cancel(false);
         }
@@ -455,6 +464,21 @@ public final class AtlasPlugin extends JavaPlugin {
         JsonObject o = new JsonObject();
         o.addProperty("updatedAt", atlas.leaderboard().updatedAt());
         atlas.sse().broadcastAll("leaderboard", Json.GSON.toJson(o), c -> c.viewer().canSee(atlas.config(), "leaderboard"));
+    }
+
+    /**
+     * Checks the Chronicle export and tells browsers that may see stats to fetch api/chronicle again when it
+     * appeared, changed or went away, or always when force is set, as after a reload that may have changed
+     * chronicleUrl.
+     */
+    private void pollChronicle(boolean force) {
+        if (!atlas.chronicle().poll() && !force) {
+            return;
+        }
+        JsonObject o = new JsonObject();
+        o.addProperty("available", atlas.chronicle().available());
+        Payloads.put(o, "updatedAt", atlas.chronicle().available() ? (Number) atlas.chronicle().updatedAt() : null);
+        atlas.sse().broadcastAll("chronicle", Json.GSON.toJson(o), c -> c.viewer().canSee(atlas.config(), "stats"));
     }
 
     /**
@@ -777,6 +801,7 @@ public final class AtlasPlugin extends JavaPlugin {
         pollSnapshot();
         pollMapMod();
         atlas.leaderboard().poll();
+        pollChronicle(!java.util.Objects.equals(before == null ? null : before.chronicleUrl, next.chronicleUrl));
         schedulePlayers();
         String problem;
         if (server.running()) {

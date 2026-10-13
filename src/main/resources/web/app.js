@@ -238,6 +238,7 @@
   // Data that does not depend on the world. The faction list is fetched by the views and search that use it.
   function loadShared(render) {
     A.loadNations();
+    if (A.loadChronicle) A.loadChronicle().catch(() => { /* the tab keeps its last answer */ });
     if (A.loadIsoCaps) A.loadIsoCaps();
     loadActivity();
     state.factionsStale = true;
@@ -429,6 +430,8 @@
       if (d.state !== "end" && d.world === state.world) A.toast((d.displayName || A.pretty(d.name)) + " opened");
     });
     on("leaderboard", () => { state.leaderboard = null; if (state.tab === "leaderboard" && !state.detail) A.render(); });
+    // The Chronicle export appeared, changed or went away. The tab follows the answer.
+    on("chronicle", () => { A.loadChronicle().then(() => { if (state.tab === "chronicle" && !state.detail) A.render(); }).catch(() => { /* the tab keeps its last answer */ }); });
     on("worlds", () => refetchWorlds());
     // The shared marker set of a world changed, or with own set the viewer's own markers did.
     on("markers", (d) => { if (!d.world || d.world === state.world) markersSoon(); });
