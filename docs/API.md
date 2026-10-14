@@ -470,8 +470,8 @@ follow `terrain`, every other timeline route follows `timeline`. A malformed slo
 ### GET /api/timeline/{world}
 
 ```
-{world: string, enabled: bool, hour: int, perDay: int, hours: [int], nextRunAt: ms|null, retainDays: int,
- today: string, currentSlot: string, days: [Slot]}
+{world: string, enabled: bool, hour: int, perDay: int, skipUnchanged: bool, hours: [int], nextRunAt: ms|null,
+ retainDays: int, today: string, currentSlot: string, days: [Slot]}
 
 Slot    {slot: string, date: string, hour: int|null, window: [int, int], snapshot: bool, pruned: bool,
          takenAt: ms|null, tiles: int, carried: int, changed: int, partial: bool, events: int, stats: bool,
@@ -498,10 +498,20 @@ covers midnight up to the first of them. Alone on its day it covers the whole da
 therefore belongs to exactly one row.
 
 `isoViews` lists the 3D views of the slot's day, empty when there are none or the slot was pruned. They
-are drawn once a day with the first slot, and every slot of the day lists them. `file` is the relative
+are drawn once a day with the first slot kept that day, and every slot of the day lists them. `file` is the relative
 address of the image, `api/timeline/{world}/{slot}/iso/{label}.png`, with the slot that holds it. Labels
 are lower case letters, digits, dashes and underscores. Views of server markers are labelled
 `marker-<id>`.
+
+`skipUnchanged` is `timeline.skipUnchanged` (added in 1.5). While it is true, a scheduled snapshot
+with no block change and no event since the snapshot before is dropped, so a slot hour from `hours`
+may be missing from `days`. A block change is a zoom 0 tile whose image differs from the slot before
+or that the slot before lacked, see the README. A dropped slot leaves nothing on disk and no `snapshot`
+event. The `window` of the slot held before it that day then reaches up to the next slot held, so it
+covers the hours of the dropped one with the map they had, and the next slot's window starts at its own
+hour. When the dropped slot was the first of its day, the next slot held that day starts at midnight
+instead, so those early hours show its later map. A day with every slot dropped and no events has no
+row, and no `isoViews` either. Stats do not depend on the windows, see below.
 
 Up to 1.1 the list held one row per day. It still does with `timeline.perDay` at 1, apart from days
 kept before the change of a setting.
@@ -551,7 +561,12 @@ FeatsSummary {updatedAt: ms|null, totalFeats: int, totalPoints: int, players: in
               top: [{rank: int, uuid: string|null, name: string, points: int, unlocked: int}]}
 ```
 
-`windowSeconds` is 86400, the 24 hours before `takenAt`. `kills` counts deaths with a player killer
+`windowSeconds` is the span before `takenAt` the stats cover, 86400 for the 24 hours before it. When
+the snapshot kept before it is more than 24 hours older, as after dropped snapshots or a server that
+was down, the span reaches back to that snapshot, up to 604800, seven days, which is what the heat
+data keeps. Snapshots taken by releases before 1.5 always hold 86400. The span does not follow the
+slot windows, so the stats of slots of one day overlap, and after dropped snapshots no hour falls
+outside every stats file. `events` counts the stored events of the whole day. `kills` counts deaths with a player killer
 and `deaths` deaths of players, both in this world. `blocksBroken` and `blocksPlaced` come from the
 heat data. `feats` is null without a Feats export or when `leaderboard` is hidden from the viewer.
 `top` holds at most ten rows in Feats rank order.
@@ -699,7 +714,7 @@ when no visible marker has that id.
 
 ## Key places, admins only
 
-The curated places drawn from all four directions with the first snapshot of every day, kept in
+The curated places drawn from all four directions with the first snapshot kept each day, kept in
 `iso.keyPlaces` of `atlas.json`. Admins only, by the admin token or a linked session with the admin
 permission. `as` is ignored here. Everyone else gets 403. A `POST` or `DELETE` sent with a session
 cookie must come from the map itself, so one whose `Origin` names another host gets 403. Every answer

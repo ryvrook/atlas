@@ -63,4 +63,17 @@ class ManifestTest {
         assertEquals(2, m.summary().get("tiles").getAsInt());
         assertEquals(1, m.summary().get("carried").getAsInt());
     }
+
+    @Test
+    void onlyBaseZoomTilesCountAsBlockChanges() {
+        Map<String, String> prev = Map.of("0/0/0", A, "0/1/0", B, "1/0/0", C);
+        // An upper tile drawn anew, a lower tile a browser asked for and an upper tile with new bytes are no block change.
+        Map<String, String> same = Map.of("0/0/0", A, "0/1/0", B, "1/0/0", A, "2/0/0", A, "-1/0/0", C);
+        assertEquals(0, Manifest.blockChanges(prev, same));
+        assertEquals(3, Manifest.diff(prev, same).size(), "diff still lists the new and redrawn keys");
+        // A redrawn base tile and newly explored ground are.
+        Map<String, String> next = Map.of("0/0/0", C, "0/1/0", B, "0/5/5", A, "1/0/0", C);
+        assertEquals(2, Manifest.blockChanges(prev, next));
+        assertEquals(2, Manifest.blockChanges(null, Map.of("0/0/0", A, "0/1/0", B, "1/0/0", C)));
+    }
 }

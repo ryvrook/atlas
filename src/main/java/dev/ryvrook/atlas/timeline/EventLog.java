@@ -44,6 +44,8 @@ public final class EventLog {
     static final int MAX_TEXT = 300;
     static final int MAX_WHO = 64;
     public static final String DROPPED = "dropped";
+    /** The kind of the line the timeline writes for each snapshot it keeps. */
+    public static final String SNAPSHOT = "snapshot";
     private static final Pattern KIND = Pattern.compile("[a-z0-9][a-z0-9._-]{0,39}");
 
     private static volatile EventLog current;
@@ -282,6 +284,30 @@ public final class EventLog {
                 return 0;
             }
         });
+    }
+
+    /**
+     * Stored events of the world with at after the first time and before the second, both exclusive,
+     * read from the day files of every date in between. The snapshot lines are not counted, since
+     * they are not something that happened in the world. The dropped line is, since it stands for the
+     * events of a full day that were not kept, at the time of the first of them. Events still on the
+     * queue are not seen, so a caller flushes first.
+     */
+    public int countBetween(String world, long after, long before) {
+        if (after <= 0 || before <= after) {
+            return 0;
+        }
+        LocalDate first = LocalDate.parse(dateOf(after));
+        LocalDate last = LocalDate.parse(dateOf(before));
+        int n = 0;
+        for (LocalDate d = first; !d.isAfter(last); d = d.plusDays(1)) {
+            for (Line l : read(world, d.toString())) {
+                if (l.at() > after && l.at() < before && !SNAPSHOT.equals(l.kind())) {
+                    n++;
+                }
+            }
+        }
+        return n;
     }
 
     /** Every stored event of the world on that day, oldest first as written. Damaged lines are skipped. */

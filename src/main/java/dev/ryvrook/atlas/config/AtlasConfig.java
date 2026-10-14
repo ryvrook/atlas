@@ -144,8 +144,14 @@ public final class AtlasConfig {
         public int maxDiskMb = 2048;
         /** Write the daily event log. */
         public boolean events = true;
+        /**
+         * Drop a scheduled snapshot when no block changed since the snapshot before and no event happened
+         * in between. A snapshot an admin takes is always kept.
+         */
+        public boolean skipUnchanged = true;
 
-        static final List<String> KEYS = List.of("enabled", "hour", "perDay", "retainDays", "maxDiskMb", "events");
+        static final List<String> KEYS = List.of("enabled", "hour", "perDay", "retainDays", "maxDiskMb", "events",
+                "skipUnchanged");
     }
 
     /** The iso object of atlas.json. */
@@ -346,6 +352,11 @@ public final class AtlasConfig {
     /** Whether the daily event log is written. */
     public boolean timelineEvents() {
         return timeline.events;
+    }
+
+    /** Whether a scheduled snapshot with no block change and no event since the one before is dropped. */
+    public boolean timelineSkipUnchanged() {
+        return timeline.skipUnchanged;
     }
 
     /** Whether api/iso serves isometric views. */
@@ -828,6 +839,7 @@ public final class AtlasConfig {
             checkValue(o, "retainDays", "timeline.retainDays", int.class, false);
             checkValue(o, "maxDiskMb", "timeline.maxDiskMb", int.class, false);
             checkValue(o, "events", "timeline.events", boolean.class, false);
+            checkValue(o, "skipUnchanged", "timeline.skipUnchanged", boolean.class, false);
             return;
         }
         if (t == Iso.class) {

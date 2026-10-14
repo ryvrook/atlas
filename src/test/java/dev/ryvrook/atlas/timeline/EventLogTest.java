@@ -102,4 +102,34 @@ class EventLogTest {
         assertEquals(1, log.read("default", "2026-10-13").size());
         assertEquals("C", log.read("default", "2026-10-13").get(0).who());
     }
+
+    @Test
+    void countBetweenSpansDaysAndIgnoresSnapshots() throws Exception {
+        TimelineStore store = new TimelineStore(dir);
+        EventLog log = new EventLog(store, ZoneOffset.UTC, 3, () -> true);
+        long hour = 60L * 60 * 1000;
+        long prev = DAY + 22 * hour;
+        log.add("default", prev, EventLog.SNAPSHOT, null, null, null, null, "The scheduled snapshot of the map was taken.");
+        log.add("default", prev + 1000, EventLog.SNAPSHOT, null, null, null, null, "An admin took a snapshot of the map.");
+        log.flush();
+        long next = DAY + 28 * hour;
+        assertEquals(0, log.count("default", "2026-10-14"));
+        assertEquals(0, log.countBetween("default", prev, next), "snapshot lines are no events");
+        log.add("default", DAY + 27 * hour, "join", null, null, "Alice", null, "Alice joined");
+        log.add("other", DAY + 27 * hour, "join", null, null, "Bob", null, "Bob joined");
+        log.flush();
+        assertEquals(1, log.countBetween("default", prev, next), "an event of the next day counts");
+        assertEquals(0, log.countBetween("default", next, next + hour));
+        assertEquals(0, log.countBetween("default", DAY + 27 * hour, next), "the bounds are exclusive");
+        assertEquals(0, log.countBetween("default", 0, next), "no snapshot before means no span");
+        // A full day ends with the dropped line at the time of the first event not kept, and it counts.
+        for (int i = 0; i < 3; i++) {
+            log.add("busy", DAY + hour + i, "leave", null, null, "Alice", null, "Alice left");
+        }
+        log.add("busy", DAY + 5 * hour, "join", null, null, "Alice", null, "Alice joined");
+        log.flush();
+        assertEquals(EventLog.DROPPED, log.read("busy", "2026-10-13").get(3).kind());
+        assertEquals(4, log.countBetween("busy", DAY, DAY + 6 * hour));
+        assertEquals(1, log.countBetween("busy", DAY + 4 * hour, DAY + 6 * hour), "a slot whose window hit the cap is kept");
+    }
 }

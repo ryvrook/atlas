@@ -196,4 +196,22 @@ class SlotsTest {
         assertNull(new TimelineStore(dir).previousSlot("none", "2026-10-13T16"));
         assertTrue(Files.notExists(dir.resolve("worlds").resolve("none")));
     }
+
+    @Test
+    void aSkippedSlotLeavesItsHoursToTheSlotsHeldAroundIt() throws Exception {
+        // 13:00 was skipped, so it has no folder and the day list holds 10:00 and 16:00 only.
+        TimelineStore s = new TimelineStore(dir);
+        slot(s, "w", "2026-10-14T10", new byte[]{1});
+        slot(s, "w", "2026-10-14T16", new byte[]{2});
+        List<String> held = TimelineRoutes.heldSlots(s, "w", "2026-10-14");
+        assertEquals(List.of("2026-10-14T10", "2026-10-14T16"), held);
+        assertArrayEquals(new int[]{0, 16}, Slots.window("2026-10-14T10", held));
+        assertArrayEquals(new int[]{16, 24}, Slots.window("2026-10-14T16", held));
+        assertEquals("2026-10-14T10", s.previousSlot("w", "2026-10-14T16"), "the next snapshot compares with the one kept");
+        // When the first slot of a day is skipped, the next one held starts at midnight.
+        slot(s, "w", "2026-10-15T10", new byte[]{3});
+        List<String> next = TimelineRoutes.heldSlots(s, "w", "2026-10-15");
+        assertEquals(List.of("2026-10-15T10"), next);
+        assertArrayEquals(new int[]{0, 24}, Slots.window("2026-10-15T10", next));
+    }
 }

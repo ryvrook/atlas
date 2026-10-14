@@ -40,6 +40,11 @@ import java.util.logging.Level;
  * was down runs CATCH_UP_DELAY_MS after the start, only the latest one missed. An admin snapshot
  * goes into the slot of the moment and replaces what that slot held.
  *
+ * <p>With timeline.skipUnchanged a scheduled snapshot, the catch up included, is dropped when no
+ * block changed since the slot before and no event happened in between, see decide. Nothing of it is
+ * written. The slot before then covers the hours of the dropped one on the timeline, and the stats of
+ * the next snapshot kept reach back to the one before, see statsWindowMs.
+ *
  * <p>Everything runs on the Atlas scheduler. A snapshot reads and hashes BATCH tiles per step with
  * STEP_DELAY_MS between steps, so the scheduler stays free for the live map. Nothing here touches a
  * world thread.
@@ -63,7 +68,7 @@ public final class Timeline {
     private final List<ScheduledFuture<?>> tasks = new ArrayList<>();
     private volatile ScheduledExecutorService scheduler;
 
-    private record Request(String world, Consumer<String> reply, boolean daily, String slot) {
+    record Request(String world, Consumer<String> reply, boolean daily, String slot) {
     }
 
     /** Guarded by this. */
@@ -75,6 +80,24 @@ public final class Timeline {
     /** The last slot the schedule ran, or a plain date as Atlas 1.0 and 1.1 saved it. */
     private String lastSlot;
     private long lastFlushFailureLog;
+    /** Scheduled snapshots dropped since the start because nothing changed. Guarded by this. */
+    private int skippedUnchanged;
+
+    /** What becomes of a finished snapshot. */
+    enum Outcome {
+        /** Blocks changed, or there is no slot before to compare with. Kept. */
+        CHANGED,
+        /** No block changed but it is kept, as an admin took it, the slot held a snapshot already or skipUnchanged is off. */
+        UNCHANGED,
+        /** A scheduled snapshot with no block change, kept for the events since the slot before. */
+        KEPT_FOR_EVENTS,
+        /** As KEPT_FOR_EVENTS while the event log is off, kept for the activity counters instead. */
+        KEPT_FOR_ACTIVITY,
+        /** A scheduled snapshot with no block change, kept because the event log could not be written. */
+        KEPT_EVENTS_UNKNOWN,
+        /** A scheduled snapshot with no block change and no event since the slot before. Nothing is written. */
+        SKIPPED
+    }
 
     public Timeline(Atlas atlas, Path dataDir, HytaleLogger logger) {
         this.atlas = atlas;
@@ -166,15 +189,18 @@ public final class Timeline {
         };
     }
 
-    private void flushEvents() {
+    /** Writes the queued events. False when that failed, and then some of them may be lost. */
+    private boolean flushEvents() {
         try {
             events.flush();
+            return true;
         } catch (IOException e) {
             long now = System.currentTimeMillis();
             if (now - lastFlushFailureLog > 5 * 60 * 1000L) {
                 lastFlushFailureLog = now;
                 logger.at(Level.WARNING).log("Atlas could not write the timeline event log because %s", e.getMessage());
             }
+            return false;
         }
     }
 
@@ -217,11 +243,79 @@ public final class Timeline {
 
     private synchronized boolean dailyDue(long now) {
         AtlasConfig c = cfg();
-        if (!c.timelineEnabled() || now - startedAt < CATCH_UP_DELAY_MS) {
+        return c.timelineEnabled() && due(now, startedAt, lastSlot, zone, c.timelineHour(), c.timelinePerDay());
+    }
+
+    /**
+     * True when the slot of now has not run yet and the start is CATCH_UP_DELAY_MS behind. That covers
+     * a new slot while the server runs and the slot missed while it was down, which runs once as the
+     * slot of the moment. Both are scheduled snapshots and both may be dropped, see decide.
+     */
+    static boolean due(long now, long startedAt, String lastSlot, ZoneId zone, int hour, int perDay) {
+        if (now - startedAt < CATCH_UP_DELAY_MS) {
             return false;
         }
         ZonedDateTime t = Instant.ofEpochMilli(now).atZone(zone);
-        return !Slots.current(t, c.timelineHour(), c.timelinePerDay()).equals(lastSlot);
+        return !Slots.current(t, hour, perDay).equals(lastSlot);
+    }
+
+    /**
+     * What becomes of a finished snapshot. blockChanges is the count of Manifest.blockChanges against
+     * the slot before. A snapshot with no slot before, one an admin took, one whose slot already held a
+     * snapshot and every snapshot while skipUnchanged is off is kept. Any other scheduled snapshot with
+     * no block change asks events for the events between the two snapshots, see EventLog.countBetween,
+     * while the event log is on. It is dropped when there were none, kept for the events when there
+     * were some and kept when the count is below 0, which means the log could not be written. While the
+     * event log is off, activity gives the counters of the same span instead, see activityCount, and the
+     * snapshot is kept when it is above 0. Each supplier is only asked when the answer depends on it.
+     */
+    static Outcome decide(boolean scheduled, boolean skipUnchanged, boolean hasPrevious, boolean slotHeld,
+                          int blockChanges, boolean eventLog, java.util.function.IntSupplier events,
+                          java.util.function.LongSupplier activity) {
+        if (!hasPrevious || blockChanges > 0) {
+            return Outcome.CHANGED;
+        }
+        if (!scheduled || !skipUnchanged || slotHeld) {
+            return Outcome.UNCHANGED;
+        }
+        if (!eventLog) {
+            return activity.getAsLong() > 0 ? Outcome.KEPT_FOR_ACTIVITY : Outcome.SKIPPED;
+        }
+        int n = events.getAsInt();
+        return n < 0 ? Outcome.KEPT_EVENTS_UNKNOWN : n > 0 ? Outcome.KEPT_FOR_EVENTS : Outcome.SKIPPED;
+    }
+
+    /** True for a request of the schedule, false for one an admin made. */
+    static boolean scheduled(Request r) {
+        return r.daily() && r.reply() == null;
+    }
+
+    /** Players seen, kills, deaths, world events and blocks broken and placed in a span, added up. */
+    static long activityCount(ActivityTracker.Window w, long blocksBroken, long blocksPlaced) {
+        return (long) w.playersSeen() + w.kills() + w.deaths() + w.worldEvents() + blocksBroken + blocksPlaced;
+    }
+
+    /**
+     * The span the stats of a snapshot cover. That is the 24 hours before it, or back to the snapshot
+     * kept before it when that is longer ago, as after dropped snapshots, so no hour is left out of
+     * every stats file. It never goes past ActivityTracker.MAX_WINDOW_MS, the seven days the heat data
+     * keeps. previousTakenAt is 0 when there is no snapshot before.
+     */
+    static long statsWindowMs(long takenAt, long previousTakenAt) {
+        long since = previousTakenAt > 0 ? takenAt - previousTakenAt : 0;
+        return Math.min(ActivityTracker.MAX_WINDOW_MS, Math.max(ActivityTracker.WINDOW_MS, since));
+    }
+
+    /** Blocks broken and placed in the world since the given time, from the heat data, as {broken, placed}. */
+    private long[] blocks(String world, long since) {
+        long broken = 0;
+        long placed = 0;
+        for (JsonElement e : atlas.heat().query(world, since)) {
+            JsonArray row = e.getAsJsonArray();
+            broken += row.get(2).getAsLong();
+            placed += row.get(3).getAsLong();
+        }
+        return new long[]{broken, placed};
     }
 
     private void runDaily() {
@@ -232,9 +326,21 @@ public final class Timeline {
         saveState();
         List<String> worlds = dailyWorlds();
         logger.at(Level.INFO).log("Atlas takes the timeline snapshot of %s for the slot %s", String.join(", ", worlds), slot);
-        for (String w : worlds) {
-            enqueue(new Request(w, null, true, slot));
+        for (Request r : scheduledRequests(worlds, slot)) {
+            enqueue(r);
         }
+    }
+
+    /**
+     * The requests of a scheduled run, the catch up included. They are daily and have no reply, so
+     * finish hands decide scheduled true and an unchanged one may be dropped.
+     */
+    static List<Request> scheduledRequests(List<String> worlds, String slot) {
+        List<Request> out = new ArrayList<>();
+        for (String w : worlds) {
+            out.add(new Request(w, null, true, slot));
+        }
+        return out;
     }
 
     /** Loaded worlds that are plain worlds, enabled and have tiles. Portal and instance worlds come and go. */
@@ -430,17 +536,58 @@ public final class Timeline {
     private void finish(SnapshotJob j, Request r) throws IOException {
         long takenAt = System.currentTimeMillis();
         Manifest m = j.result(takenAt);
-        JsonObject stats = stats(j.world, j.date, takenAt, m);
+        String prev = j.previousSlot();
+        boolean hasPrevious = prev != null && j.previousTakenAt() > 0;
+        long prevAt = j.previousTakenAt();
+        int[] counted = {-1};
+        Outcome outcome = decide(scheduled(r), cfg().timelineSkipUnchanged(), hasPrevious,
+                store.slotHasSnapshot(j.world, j.date), hasPrevious ? j.blockChanges() : 0, cfg().timelineEvents(), () -> {
+                    // Events of the last few seconds are still on the queue. A failed write may have lost some.
+                    if (!flushEvents()) {
+                        return -1;
+                    }
+                    counted[0] = events.countBetween(j.world, prevAt, takenAt);
+                    return counted[0];
+                }, () -> {
+                    // The span is capped like the stats, as the heat data keeps seven days.
+                    long from = Math.max(prevAt, takenAt - ActivityTracker.MAX_WINDOW_MS);
+                    long[] b = blocks(j.world, from);
+                    return activityCount(activity.since(j.world, from, takenAt), b[0], b[1]);
+                });
+        if (outcome == Outcome.SKIPPED) {
+            synchronized (this) {
+                skippedUnchanged++;
+            }
+            // Images the snapshot stored that no slot uses are collected by the prune after the queue.
+            logger.at(Level.INFO).log("Atlas skipped the timeline snapshot of %s for %s, nothing changed since %s and %s",
+                    j.world, j.date, prev, cfg().timelineEvents() ? "no events happened"
+                            : "there was no activity while the event log is off");
+            done(j);
+            return;
+        }
+        JsonObject stats = stats(j.world, j.date, takenAt, m, statsWindowMs(takenAt, hasPrevious ? prevAt : 0));
         store.write(m, stats);
         dev.ryvrook.atlas.iso.IsoSnapshots.dayTaken(j.world, j.date, store.dayDir(j.world, j.date));
         String text = r.daily() ? "The scheduled snapshot of the map was taken." : "An admin took a snapshot of the map.";
-        EventLog.record(j.world, takenAt, "snapshot", null, null, null, text);
+        EventLog.record(j.world, takenAt, EventLog.SNAPSHOT, null, null, null, text);
         long seconds = Math.max(0, (takenAt - j.startedAt) / 1000);
-        logger.at(Level.INFO).log("Atlas took the timeline snapshot of %s for %s with %d tiles, %d changed, %d new images, %d skipped, %d carried over and %d drawn in %d s",
-                j.world, j.date, m.tiles().size(), m.changed().size(), j.newBlobs(), j.skipped(), j.carried(), j.composed(), seconds);
+        String why = switch (outcome) {
+            case KEPT_FOR_EVENTS -> ", kept for the " + counted[0] + (counted[0] == 1 ? " event" : " events") + " since " + prev
+                    + " although no blocks changed";
+            case KEPT_FOR_ACTIVITY -> ", kept for the activity since " + prev
+                    + " although no blocks changed, the event log is off";
+            case KEPT_EVENTS_UNKNOWN -> ", kept although no blocks changed since " + prev
+                    + " because the event log could not be written";
+            case UNCHANGED -> ", no blocks changed since " + prev;
+            default -> "";
+        };
+        logger.at(Level.INFO).log("Atlas took the timeline snapshot of %s for %s with %d tiles, %d changed, %d new images, %d skipped, %d carried over and %d drawn in %d s%s",
+                j.world, j.date, m.tiles().size(), m.changed().size(), j.newBlobs(), j.skipped(), j.carried(), j.composed(), seconds, why);
         reply(r, "Snapshot of " + j.world + " for " + slotText(j.date) + " done with " + m.tiles().size() + " tiles, "
                 + m.changed().size() + " changed, " + j.newBlobs() + " new images" + (m.partial()
-                ? ", " + j.skipped() + " tiles were being redrawn and keep their earlier image." : "."));
+                ? ", " + j.skipped() + " tiles were being redrawn and keep their earlier image." : ".")
+                + (outcome == Outcome.UNCHANGED ? " No blocks changed since " + slotText(prev)
+                + ". The snapshot is kept because an admin took it." : ""));
         JsonObject o = new JsonObject();
         o.addProperty("world", j.world);
         o.addProperty("date", Slots.date(j.date));
@@ -513,19 +660,19 @@ public final class Timeline {
 
     // ---- stats -------------------------------------------------------------
 
-    JsonObject stats(String world, String slot, long takenAt, Manifest m) {
+    JsonObject stats(String world, String slot, long takenAt, Manifest m, long windowMs) {
         String date = Slots.date(slot);
         JsonObject o = new JsonObject();
         o.addProperty("world", world);
         o.addProperty("date", date);
         o.addProperty("slot", slot);
         o.addProperty("takenAt", takenAt);
-        o.addProperty("windowSeconds", ActivityTracker.WINDOW_MS / 1000);
+        o.addProperty("windowSeconds", windowMs / 1000);
         Integer explored = atlas.tiles().exploredCounts().get(world);
         o.addProperty("exploredChunks", explored == null ? 0 : explored);
         o.addProperty("tiles", m.tiles().size());
         o.addProperty("changed", m.changed().size());
-        ActivityTracker.Window w = activity.window(world, takenAt);
+        ActivityTracker.Window w = activity.window(world, takenAt, windowMs);
         int now = 0;
         for (LiveState.PlayerSample p : atlas.live().players()) {
             if (world.equals(p.world())) {
@@ -537,15 +684,9 @@ public final class Timeline {
         o.addProperty("onlineNow", now);
         o.addProperty("kills", w.kills());
         o.addProperty("deaths", w.deaths());
-        long broken = 0;
-        long placed = 0;
-        for (JsonElement e : atlas.heat().query(world, takenAt - ActivityTracker.WINDOW_MS)) {
-            JsonArray row = e.getAsJsonArray();
-            broken += row.get(2).getAsLong();
-            placed += row.get(3).getAsLong();
-        }
-        o.addProperty("blocksBroken", broken);
-        o.addProperty("blocksPlaced", placed);
+        long[] b = blocks(world, takenAt - windowMs);
+        o.addProperty("blocksBroken", b[0]);
+        o.addProperty("blocksPlaced", b[1]);
         o.addProperty("worldEvents", w.worldEvents());
         o.addProperty("events", events.count(world, date));
         o.add("feats", featsSummary());
@@ -627,6 +768,18 @@ public final class Timeline {
                 out.add("Snapshot of " + job.world + " running, " + job.done() + " of " + job.total() + " tiles read"
                         + (pending.isEmpty() ? "." : ", " + pending.size() + " more queued."));
             }
+        }
+        int skipped;
+        synchronized (this) {
+            skipped = skippedUnchanged;
+        }
+        if (c.timelineSkipUnchanged()) {
+            out.add("Scheduled snapshots with no block change and no events are skipped, " + skipped
+                    + (skipped == 1 ? " snapshot" : " snapshots") + " skipped since the start.");
+        } else {
+            out.add("timeline.skipUnchanged is off, so every scheduled snapshot is kept." + (skipped > 0
+                    ? " Before it was turned off " + skipped + (skipped == 1 ? " snapshot was" : " snapshots were")
+                    + " skipped since the start." : ""));
         }
         if (!c.timelineEvents()) {
             out.add("The event log is turned off.");

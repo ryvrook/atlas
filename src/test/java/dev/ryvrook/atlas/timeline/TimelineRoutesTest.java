@@ -61,4 +61,16 @@ class TimelineRoutesTest {
         assertTrue(TimelineRoutes.isTile(List.of("timeline", "default", "2026-10-13", "tiles", "0", "1", "2.png")));
         assertFalse(TimelineRoutes.isTile(List.of("timeline", "default", "2026-10-13", "stats")));
     }
+
+    @Test
+    void theDayListNamesSkipUnchangedNextToPerDay() throws Exception {
+        com.google.gson.JsonObject o = new com.google.gson.JsonObject();
+        TimelineRoutes.settings(o, dev.ryvrook.atlas.config.AtlasConfig.parse("{\"timeline\": {\"perDay\": 8}}"));
+        assertEquals(List.of("enabled", "hour", "perDay", "skipUnchanged"), List.copyOf(o.keySet()));
+        assertEquals(8, o.get("perDay").getAsInt());
+        assertTrue(o.get("skipUnchanged").getAsBoolean());
+        com.google.gson.JsonObject off = new com.google.gson.JsonObject();
+        TimelineRoutes.settings(off, dev.ryvrook.atlas.config.AtlasConfig.parse("{\"timeline\": {\"skipUnchanged\": false}}"));
+        assertFalse(off.get("skipUnchanged").getAsBoolean());
+    }
 }

@@ -38,7 +38,7 @@
   // gap) or missing (nothing was kept that day, also a gap).
   // Playback speeds in milliseconds a step. A stored speed that is not one of them falls back to one second.
   const SPEEDS = [500, 1000, 2000, 3000, 5000, 10000];
-  const speedName = (v) => (v / 1000) + " s a snapshot";
+  const speedName = (v) => (v / 1000) + " sec/snapshot";
   const SPEED_TIP = "How long each snapshot stays on screen";
   const storedSpeed = Number(A.store.get("tlSpeed", 1000));
   // shownSeq counts the pictures asked for, so a late answer for a slot no longer wanted is ignored. shown is the
@@ -1109,9 +1109,8 @@
       body.innerHTML = A.head("Timeline", "<span class='badge' id='tl-badge'></span>") + "<div id='tl-msg'></div>" +
         "<div id='tl-main'><div class='tl-ctl'>" +
         "<button class='icon-btn' id='tl-t-prev' aria-label='One step back' title='One step back (left arrow)'>" + A.icon("back") + "</button>" +
-        "<button class='btn small primary' id='tl-t-play' aria-pressed='false'><svg class='ic sm' aria-hidden='true'><use href='#i-play'/></svg><span class='lbl'>Play</span></button>" +
         "<button class='icon-btn' id='tl-t-next' aria-label='One step forward' title='One step forward (right arrow)'>" + A.icon("next") + "</button>" +
-        "<select id='tl-t-speed' class='tl-select' aria-label='" + SPEED_TIP + "' title='" + SPEED_TIP + "'>" + speedOpts() + "</select>" +
+        "<select id='tl-t-speed' class='tl-select tl-phone-only' aria-label='" + SPEED_TIP + "' title='" + SPEED_TIP + "'>" + speedOpts() + "</select>" +
         "<button class='fchip' id='tl-t-changed'><span class='sw tl-sw'></span>Changed tiles</button>" +
         "<button class='btn small' id='tl-t-live'>" + A.icon("history", "sm") + "Live</button></div>" +
         legendHtml("tl-legend in-tab") + "<div id='tl-sum'></div><div id='tl-keys' class='kp-list' hidden></div><div id='tl-sum2'></div>" +
@@ -1121,7 +1120,6 @@
         "<h3 class='sub' id='tl-feed-h'></h3><div class='chips' id='tl-chips' style='padding:0 0 10px'></div><div id='tl-feed-msg'></div><ul class='feed' id='tl-feed'></ul>";
       $("tl-t-prev").addEventListener("click", () => step(-1));
       $("tl-t-next").addEventListener("click", () => step(1));
-      $("tl-t-play").addEventListener("click", play);
       $("tl-t-speed").addEventListener("change", (e) => setSpeed(e.target.value));
       $("tl-t-changed").addEventListener("click", () => setChanged(!T.changedOn));
       $("tl-t-live").addEventListener("click", () => goLive());

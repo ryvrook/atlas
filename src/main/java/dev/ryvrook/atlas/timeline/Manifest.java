@@ -55,6 +55,31 @@ public record Manifest(String world, String date, long takenAt, String previous,
         return out;
     }
 
+    /** The zoom the live renderer draws from the chunk images and keeps on disk. Every other zoom is drawn from it. */
+    public static final int BASE_ZOOM = 0;
+
+    /**
+     * Tiles of next that show a block change against prev. Only tiles of BASE_ZOOM count, one whose
+     * hash differs from prev or that prev lacks, which is newly explored ground. The tiles of the other
+     * zooms are drawn from the base zoom, so a block change always shows there too, while a tile of
+     * another zoom can appear or get new bytes without any block change, because the snapshot drew it
+     * to fill a gap or a browser asked for it for the first time. A null prev counts every base tile.
+     */
+    public static int blockChanges(Map<String, String> prev, Map<String, String> next) {
+        int n = 0;
+        for (Map.Entry<String, String> e : next.entrySet()) {
+            int[] p = parseKey(e.getKey());
+            if (p == null || p[0] != BASE_ZOOM) {
+                continue;
+            }
+            String old = prev == null ? null : prev.get(e.getKey());
+            if (!e.getValue().equals(old)) {
+                n++;
+            }
+        }
+        return n;
+    }
+
     public static String key(int zoom, int x, int z) {
         return zoom + "/" + x + "/" + z;
     }

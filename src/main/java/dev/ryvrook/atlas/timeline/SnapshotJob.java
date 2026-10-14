@@ -67,6 +67,7 @@ final class SnapshotJob {
     private final Map<String, String> tiles = new HashMap<>();
     private int next;
     private int skipped;
+    private int skippedBase;
     private int newBlobs;
     private boolean listed;
 
@@ -218,6 +219,10 @@ final class SnapshotJob {
 
     private void skip(String key) {
         skipped++;
+        int[] p = Manifest.parseKey(key);
+        if (p != null && p[0] == Manifest.BASE_ZOOM) {
+            skippedBase++;
+        }
         String h = sameDay != null ? sameDay.tiles().get(key) : null;
         if (h == null && previous != null) {
             h = previous.tiles().get(key);
@@ -367,6 +372,26 @@ final class SnapshotJob {
         List<String> changed = Manifest.diff(previous == null ? null : previous.tiles(), tiles);
         return new Manifest(world, date, takenAt, previousDate, skipped > 0, skipped,
                 newBlobs, tiles, changed, carried, composed, true);
+    }
+
+    /**
+     * Base zoom tiles that show a block change against the slot before, see Manifest.blockChanges. A
+     * base tile that was being redrawn while it was read counts too, since the redraw may be a change.
+     * Counts every base tile when there is no slot before.
+     */
+    int blockChanges() {
+        carryOver();
+        return Manifest.blockChanges(previous == null ? null : previous.tiles(), tiles) + skippedBase;
+    }
+
+    /** The slot this snapshot was compared with, or null when there was none. Known after list. */
+    String previousSlot() {
+        return previousDate;
+    }
+
+    /** When the slot before was taken, or 0 when there was none. Known after list. */
+    long previousTakenAt() {
+        return previous == null ? 0 : previous.takenAt();
     }
 
     int carried() {

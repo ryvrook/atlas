@@ -4,6 +4,46 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
+## 1.5.0 - 2026-10-14
+
+This is Atlas 1.5.0, dated 2026-10-14. The timeline skips a scheduled snapshot when nothing changed, so
+more snapshots a day cost nothing on quiet hours.
+
+### Upgrading
+
+- One new setting is added with its default on the first start, `timeline.skipUnchanged` (`true`). It
+  fails closed like the rest, see Configuration in the README. Set it to `false` to keep every
+  scheduled snapshot as before.
+- Snapshots already held stay as they are. Nothing is removed from earlier slots.
+
+### Changed
+
+- A scheduled snapshot, the catch up after a restart included, is dropped when no block changed since
+  the snapshot before and no event happened in between. A block change is a zoom 0 tile whose image
+  differs from the slot before, or one the slot before lacked, which is newly explored ground. Tiles of
+  the other zooms, which are drawn from zoom 0, and tiles carried over do not count. A zoom 0 tile that
+  was being redrawn while it was read counts. Nothing of a dropped snapshot is kept, no slot, no stats
+  and no `snapshot` event, and the server log says Atlas skipped it in one line.
+- A snapshot with no block change but with events since the one before is kept for the events, and its
+  log line says so. Snapshot lines do not count as events, the line that says a full day dropped
+  further events does. While `timeline.events` is off the activity counters decide instead, players
+  seen, kills, deaths, world events and blocks broken or placed, and a snapshot with any is kept for
+  activity. When the event log could not be written just before the check, the snapshot is kept.
+- The stats of a snapshot cover the 24 hours before it, or back to the snapshot kept before it when
+  that is longer ago, up to seven days, and `windowSeconds` holds the span. So skipped snapshots leave
+  no hours out of the stats. The activity counters keep eight days instead of two.
+- Daily 3D views and key places are drawn with the first snapshot kept each day. A day with every
+  snapshot skipped has none, since they would have been unchanged.
+- `/atlas snapshot` is always kept. When no blocks changed since the slot before, the reply and the log
+  say so.
+- The speed menu reads 0.5 sec/snapshot to 10 sec/snapshot. Play and the speed menu live in the bar
+  only. The Timeline tab keeps the step arrows, Changed tiles and Live, and on phones the speed menu,
+  since the bar has no room for it there.
+- `/atlas timeline status` says whether unchanged snapshots are skipped and how many were skipped since
+  the start.
+- The day list of `GET /api/timeline/{world}` gains `skipUnchanged` next to `perDay`. A slot hour may be
+  missing from the list because its snapshot was skipped, and the slot held before it covers its hours.
+
 ## 1.4.0 - 2026-10-14
 
 This is Atlas 1.4.0, dated 2026-10-14. The timeline is rebuilt. Snapshots are complete at every zoom,

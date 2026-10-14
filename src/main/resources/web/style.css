@@ -671,6 +671,8 @@ button.tile:hover { border-color: color-mix(in srgb, var(--accent) 55%, transpar
 
 /* Timeline tab */
 .tl-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 10px; }
+/* Play and the speed live in the bar. The speed select is shown in the tab only on phones, where the bar has no room for it. */
+.tl-phone-only { display: none; }
 .tl-ctl .btn.primary .ic { fill: currentColor; }
 .tl-ctl .btn.primary[aria-pressed="true"] .ic { fill: none; stroke-width: 2.6; }
 .tl-ctl .icon-btn { border: 1px solid var(--border); }
@@ -878,6 +880,7 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: 3px; }
   body.tl-open #stage { bottom: 0; }
   body.tl-open #panel { bottom: 0; }
   #tl-speed, #tl-changed { display: none; }
+  .tl-phone-only { display: inline-block; }
   .tl-label { display: none; }
   body.tl-open #hud { bottom: calc(var(--peek-h) + env(safe-area-inset-bottom) + var(--tl-h) + 10px); }
   body.tl-open:not(.panel-closed) #hud { bottom: calc(var(--sheet-h) + var(--tl-h) + 10px); }

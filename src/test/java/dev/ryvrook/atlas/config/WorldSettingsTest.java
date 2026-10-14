@@ -21,6 +21,7 @@ class WorldSettingsTest {
         assertEquals(90, c.timelineRetainDays());
         assertEquals(2048, c.timelineMaxDiskMb());
         assertTrue(c.timelineEvents());
+        assertTrue(c.timelineSkipUnchanged());
         assertEquals(Visibility.PUBLIC, c.visibilityOf("timeline"));
         assertEquals(Visibility.PUBLIC, c.visibilityOf("layers"));
         assertFalse(c.hidePlayersCrouching);
@@ -58,6 +59,22 @@ class WorldSettingsTest {
         assertEquals(2048, c.timelineMaxDiskMb());
         assertTrue(c.addedKeys.contains("timeline.maxDiskMb"));
         assertTrue(c.addedKeys.contains("timeline.events"));
+        assertTrue(c.addedKeys.contains("timeline.skipUnchanged"));
+        assertTrue(c.timelineSkipUnchanged());
+    }
+
+    @Test
+    void skipUnchangedIsFilledInAndRead() throws Exception {
+        // A file from 1.4.0 gets the new key with its default, and an owner can turn it off.
+        AtlasConfig old = AtlasConfig.parse("{\"timeline\": {\"enabled\": true, \"hour\": 4, \"perDay\": 8, "
+                + "\"retainDays\": 90, \"maxDiskMb\": 2048, \"events\": true}}");
+        assertTrue(old.timelineSkipUnchanged());
+        assertEquals(java.util.List.of("timeline.skipUnchanged"), old.addedKeys.stream()
+                .filter(k -> k.startsWith("timeline")).toList());
+        AtlasConfig off = AtlasConfig.parse("{\"timeline\": {\"skipUnchanged\": false}}");
+        assertFalse(off.timelineSkipUnchanged());
+        assertFalse(off.addedKeys.contains("timeline.skipUnchanged"));
+        assertFalse(off.unknownKeys.contains("timeline.skipUnchanged"));
     }
 
     @Test
@@ -83,6 +100,9 @@ class WorldSettingsTest {
                 "{\"timeline\": {\"retainDays\": -1}}",
                 "{\"timeline\": {\"maxDiskMb\": -5}}",
                 "{\"timeline\": {\"events\": \"true\"}}",
+                "{\"timeline\": {\"skipUnchanged\": \"false\"}}",
+                "{\"timeline\": {\"skipUnchanged\": 0}}",
+                "{\"timeline\": {\"skipUnchanged\": null}}",
                 "{\"hidePlayersCrouching\": \"yes\"}",
         };
         for (String text : bad) {

@@ -242,9 +242,7 @@ public final class TimelineRoutes {
         TimelineStore store = t.store();
         JsonObject o = new JsonObject();
         o.addProperty("world", world);
-        o.addProperty("enabled", cfg().timelineEnabled());
-        o.addProperty("hour", cfg().timelineHour());
-        o.addProperty("perDay", cfg().timelinePerDay());
+        settings(o, cfg());
         JsonArray hours = new JsonArray();
         for (int h : t.slotHours()) {
             hours.add(h);
@@ -283,6 +281,14 @@ public final class TimelineRoutes {
         }
         o.add("days", days);
         return o;
+    }
+
+    /** The schedule settings at the top of the day list. */
+    static void settings(JsonObject o, AtlasConfig c) {
+        o.addProperty("enabled", c.timelineEnabled());
+        o.addProperty("hour", c.timelineHour());
+        o.addProperty("perDay", c.timelinePerDay());
+        o.addProperty("skipUnchanged", c.timelineSkipUnchanged());
     }
 
     /**

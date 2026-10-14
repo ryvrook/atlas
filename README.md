@@ -14,7 +14,7 @@ and admins see everything.
 - A timeline of every world. Scrub back through snapshots of the map taken several times a day, play them as a timelapse, see what changed between them and what happened where.
 - View in 3D. Any marker, waypoint, admin marker or spot on the map opens an isometric picture of the area around it, block by block with trees, water and plants, from four directions and at four sizes, ready to download or share as a link.
 - Daily 3D views in the timeline, with a slider that compares the same place on two days.
-- Key places. Up to three places drawn every day from all four directions, kept in the timeline with a player that steps through the days, and reused when nothing was built.
+- Key places. Up to three places drawn from all four directions with the first snapshot kept each day, kept in the timeline with a player that steps through the days, and reused when nothing was built.
 - Timeline exports. Save the map on screen as a dated image, record the days as a WebM video, and, for admins, download the timeline data as a zip.
 - One click linking. The link code message in game opens the map and links the browser at once.
 - Marker layers from other plugins through a Java API, from JSON files in a drop folder and from the `/atlas marker` commands, each with its own switch in the layers menu.
@@ -47,7 +47,7 @@ mod.
 
 ## Install
 
-1. Build `Atlas-1.4.0.jar` from source (see below), or download it from the Releases page once one is published.
+1. Build `Atlas-1.5.0.jar` from source (see below), or download it from the Releases page once one is published.
 2. On a dedicated server, put the jar in the `mods` folder inside the server's working directory, the folder you start `HytaleServer.jar` from. For a singleplayer world, use the `Mods` folder in Hytale's `UserData` folder.
 3. Start the server. On first start Atlas creates its data folder `mods/Ryvrook_Atlas`, writes `atlas.json` there and listens on port 8123.
 4. Open `http://<server address>:8123/` in a browser.
@@ -104,8 +104,8 @@ and also work from the server console.
 | `/atlas marker area add` | Adds a rectangle between two corners, or replaces the one with that id | `atlas.admin` |
 | `/atlas marker remove` | Removes a server marker or area | `atlas.admin` |
 | `/atlas marker list` | Lists the server markers of a world, at most 50 lines | `atlas.admin` |
-| `/atlas snapshot` | Takes a timeline snapshot of every world now, or of one world, into the slot of the moment | `atlas.admin` |
-| `/atlas timeline status` | Prints the schedule, the days and slots held, the disk used and the next snapshot | `atlas.admin` |
+| `/atlas snapshot` | Takes a timeline snapshot of every world now, or of one world, into the slot of the moment. It is always kept and says when no blocks changed since the slot before | `atlas.admin` |
+| `/atlas timeline status` | Prints the schedule, the days and slots held, the disk used, the next snapshot and the snapshots skipped because nothing changed | `atlas.admin` |
 | `/atlas iso` | Draws a 3D view of an area into `iso/exports` and prints the file | `atlas.admin` |
 | `/atlas iso status` | Shows the 3D view queue and its allowances, the last render, the caches and the chunk budget | `atlas.admin` |
 | `/atlas key add` | Adds a key place, or moves the one with that label | `atlas.admin` |
@@ -261,7 +261,30 @@ disabled worlds are left out. Each snapshot fills a slot named by its date and h
 `2026-10-13T16`. If the server was down when a slot began, the latest slot it missed is taken five
 minutes after the next start. Admins can take one at any time with `/atlas snapshot [world]`. It goes
 into the slot of the moment and replaces what that slot held. Snapshots are never started from a web
-page. `/atlas timeline status` prints the schedule.
+page. `/atlas timeline status` prints the schedule and how many snapshots were skipped since the start.
+
+**Unchanged snapshots are skipped.** With `timeline.skipUnchanged` (on by default) a scheduled
+snapshot, the catch up after a restart included, is dropped when no block changed since the slot
+before and no event happened in between. Nothing of it is kept, no slot, no stats and no snapshot
+event, and the server log says so in one line. A block change means a tile of zoom 0, the zoom the
+map is drawn at from the chunks, whose image differs from the slot before, or that the slot before
+did not have, which is newly explored ground. Tiles of the other zooms are drawn from zoom 0 and do
+not count, nor do tiles carried over from the slot before. A zoom 0 tile that was being redrawn while
+the snapshot read it counts as a change. When no block changed but events happened between the two
+snapshots, the snapshot is kept for the events and the log says so. Snapshot lines do not count as
+events. The line that says a full day dropped further events does, so a busy slot is never skipped.
+While `timeline.events` is off there is no event log to ask, so Atlas looks at its activity counters
+for the same span instead, players seen, kills, deaths, world events and blocks broken or placed, and
+keeps the snapshot when any of them is above zero, at most seven days back. The log then says it was
+kept for activity. When the event log could not be written just before the check, the snapshot is
+kept too. The first snapshot of a world, a slot that already holds a snapshot and every snapshot an
+admin takes with `/atlas snapshot` are always kept, and the reply and the log say when no blocks
+changed since the slot before. A skipped slot leaves no gap on the timeline. The slot held before it
+that day covers its hours and shows the map they had, since nothing changed. When the first slot of a
+day is skipped, the next slot held that day covers the hours from midnight instead, so those early
+hours show its later map. A quiet day with every slot skipped and no events has no mark on the track,
+and it has no key place pictures or daily 3D views either, so the key places day strip skips it. Those
+pictures would have been unchanged.
 
 **Upgrading from 1.1 or older.** Day folders written before 1.2 stay as they are and count as one slot
 of their day. A plain date such as `2026-10-13` still works in every address and share link. It means
@@ -272,10 +295,15 @@ reachable, and otherwise the last slot of that day.
 image. Each image is stored once and shared by every slot it appears in, so a slot where little
 changed costs a few kilobytes. Changed tiles are counted against the slot before. Tiles that are being
 redrawn while the snapshot runs keep their image from the slot before and the slot is marked partial.
-Each slot also gets stats for the 24 hours before the snapshot, which are explored chunks, tiles,
+Each slot also gets stats for the 24 hours before the snapshot, not for the hours of its slot. When
+the snapshot kept before it is longer ago, as after skipped snapshots, the stats reach back to it, up
+to seven days, so within those seven days no hour is left out and none is counted twice by the
+activity counters. They are
+explored chunks, tiles,
 players seen, peak and current online, kills, deaths, blocks broken and placed, world events, and a
 Feats summary with the top ten when a Feats export exists. Daily 3D views are drawn once a day, with the
-first slot of the day, and the other slots of the day show them, see [3D views](#3d-views).
+first slot kept that day, and the other slots of the day show them, see [3D views](#3d-views). A day
+with every snapshot skipped has none.
 
 **Events.** Through the day Atlas writes an event log per world with joins and leaves, deaths and
 kills, world events, Feats unlocks, milestones and firsts, factions events, markers placed and
@@ -296,6 +324,7 @@ hatched gap.
 | `retainDays` | `90` | Days kept. 0 keeps only the newest day |
 | `maxDiskMb` | `2048` | Disk the timeline may use in MB. 0 means no cap |
 | `events` | `true` | Write the daily event log |
+| `skipUnchanged` | `true` | Drop a scheduled snapshot when no block changed and no event happened since the one before. With `events` off the activity counters decide instead |
 
 **In the browser.** The Timeline tab and the clock button under the map controls open a track along
 the bottom of the page. It is a time axis from the oldest day held to the live map at the right end, with
@@ -310,7 +339,7 @@ close ones share a badge with their count until the map is zoomed in, and the li
 by hour with filters by kind and a Show button. Hovering a row lights up its marker. The diamond button
 tints the tiles that changed since the slot before. A day with events but no snapshot shows the map of
 the snapshot before it and says so.
-The play button steps through the slots at 0.5, 1, 2, 3, 5 or 10 seconds a snapshot. The next slot
+The play button in the bar steps through the slots at 0.5, 1, 2, 3, 5 or 10 seconds a snapshot (the menu reads 2 sec/snapshot). The next slot
 loads out of sight and fades in once every tile on screen has answered, so no gap opens, and each
 snapshot's time on screen starts once it is fully shown. The playhead slides to the next mark while
 playing, the ring around Play fills while a snapshot is on screen, and the chip names the slot with its
@@ -319,7 +348,7 @@ at the oldest slot held. A slot with events only that shows the same map as the 
 half the time and says events only, same map. After the newest slot the live map returns and a toast
 says what was played. Play needs at least two snapshots, and until then its tooltip says when the next
 snapshot is due.
-The tab starts with the controls and the figures of the shown slot, a strip of its 3D views, the key
+The tab starts with the step arrows, the Changed tiles switch and Live, then the figures of the shown slot, a strip of its 3D views, the key
 places, the slot's stats, small charts over every slot held (a click jumps to that slot) and the events.
 While the bar is open, the left and right arrows step a slot, space plays and pauses, and Home or Esc
 return to the live map. When a snapshot finishes, open pages add the new slot by themselves.
@@ -372,7 +401,7 @@ asking again about a queued view are free. Like the other limits it does not app
 private addresses while `trustedProxies` is empty.
 
 **Daily views.** List areas in `iso.snapshots` and each one is drawn into the timeline with the first
-snapshot of the day of its world. The Timeline tab shows them for the picked day. Labels are lower case
+snapshot kept that day in its world, so a day with every snapshot skipped has none. The Timeline tab shows them for the picked day. Labels are lower case
 letters, digits, dashes and underscores, unique per world, and the radius defaults to 4. With
 `iso.snapshotAdminMarkers` set, every server marker of the world is drawn too, as `marker-<id>`, but
 only while the server marker layer is public, so private marker positions never reach the timeline.
@@ -386,7 +415,7 @@ A world gets at most 64 daily views. They are kept and pruned with the day they 
 ```
 
 **Key places.** Up to three places (`isoKeyPlaceLimit`, 1 to 10) are the curated set on top of
-`iso.snapshots`. With the first snapshot of each day every key place of the world is drawn from all four
+`iso.snapshots`. With the first snapshot kept each day every key place of the world is drawn from all four
 directions, at scale 2 (scale 1 above radius 8), into the timeline as `iso/<label>-<azimuth>.png`. The
 renders take the background path of the daily views. Before drawing a place that was drawn before, Atlas
 reads its chunks without drawing them and compares their fingerprint with the one kept with the last

@@ -72,7 +72,7 @@ pure logic and use the Hytale server jar only for types.
 | `iso` | View parameters, the cache keys and prune, the raster on synthetic columns and the iso config |
 | `markers` | The drop folder parser, the layer payload and tiers, popup escaping and timeline visibility |
 | `tiles` | Tile key math, the explored index, chunk image decoding, the render queue and the token bucket |
-| `timeline` | The blob store, manifest diffs, carried and drawn snapshot tiles, slots filled in from earlier slots, the export contents, slot windows, pruning with tombstones, the event log bound, event places, route parsing and the export range |
+| `timeline` | The blob store, manifest diffs, block changes, the skip decision and the catch up, carried and drawn snapshot tiles, slots filled in from earlier slots, the export contents, slot windows, pruning with tombstones, the event log bound, event places, route parsing and the export range |
 
 Add a test next to the code you change. A change to a payload needs a case in `PayloadsTest` or
 `LayerJsonTest` that pins the field list.
@@ -135,8 +135,9 @@ What to expect.
 - The page carries the Content Security Policy, `Referrer-Policy` and `X-Content-Type-Options`, and
   `app.js` comes back gzipped.
 - `api/layers/default` lists any layer you dropped into `mods/Ryvrook_Atlas/markers`.
-- `api/timeline/default` lists a day with `snapshot` true once `atlas snapshot default` ran. A second
-  snapshot on the same day writes no new blobs.
+- `api/timeline/default` lists a day with `snapshot` true once `atlas snapshot default` ran, and
+  `skipUnchanged` true. A second snapshot on the same day writes no new blobs, and its reply says no
+  blocks changed since the slot before.
 - The 3D view answers 202 with `etaSeconds` first and 200 with a PNG when asked again after that time.
 - `boot.log` holds the Atlas start lines and no stack trace that mentions `dev.ryvrook`.
 
@@ -357,6 +358,26 @@ missing then keeps its hash and is counted in `carried`, since explored ground n
 -1 and -2 are always carried, drawing them for a whole world would be too heavy. Such a manifest is
 `complete`.
 
+When a job finishes, `Timeline.decide` says what becomes of it, a pure function with its tests in
+`TimelineTest`. `Manifest.blockChanges` counts the zoom 0 tiles whose hash differs from the slot before
+or that the slot before lacked, and `SnapshotJob.blockChanges` adds the zoom 0 tiles that were skipped
+mid write. Only zoom 0 counts because every other zoom is drawn from it. A tile drawn by the job,
+newly asked for by a browser or redrawn by the live renderer with other bytes is a new key or hash to
+`Manifest.diff` without any block change. With no block change, a scheduled run (the catch up
+included, see `scheduledRequests`) while `timeline.skipUnchanged` is on flushes the event log and asks
+`EventLog.countBetween` for the events after the slot before's `takenAt` and before its own, across
+every day file in between, `snapshot` lines left out. The `dropped` line counts, it stands for the
+events past the cap. A failed flush may have lost events, so the run is kept. While `timeline.events`
+is off, `activityCount` adds up `ActivityTracker.since` and the heat data over the same span, capped
+at seven days, and any activity keeps the run. None means the run is dropped
+before `TimelineStore.write`, so no folder, summary, stats, iso views or `snapshot` event is written,
+and images it stored that no slot uses go at the prune after the queue. The schedule still records the
+slot as run in `state.json`. The first snapshot of a world, a slot that already holds a snapshot and an
+admin snapshot are always kept, the last two with a note when no block changed. `skippedUnchanged`
+counts the dropped runs for `/atlas timeline status`. The slot windows need nothing for a dropped
+slot, `Slots.window` already ends a slot at the next slot held. The stats of the next run kept reach
+back to the run kept before, see `Timeline.statsWindowMs`.
+
 `Manifest` maps each tile key to its hash and lists the keys that changed against the previous day.
 Manifests written by older releases are not complete. `TimelineStore.effectiveTiles` fills them in
 from the slots before, walking back along `previous` (or the slot list where that slot is gone) up to a
@@ -378,7 +399,11 @@ or invisible, or in the player's own territory, are stored as null when the even
 through `Atlas.placeWithheld`, since y is never stored. `Slots.window` gives each slot of a day its hours, a plain date
 slot taking the hours before the first slot with an hour, and the day list and the events route both
 use it with the slots held that day. `ActivityTracker` counts activity
-per world in hourly buckets for the daily stats and keeps 48 hours in `activity.json`.
+per world in hourly buckets for the daily stats and keeps eight days in `activity.json`. The stats of a
+slot cover the 24 hours before its `takenAt`, or back to the `takenAt` of the snapshot kept before when
+that is longer ago, up to `ActivityTracker.MAX_WINDOW_MS` of seven days, the heat data retention. The
+span is stored as `windowSeconds`. It does not follow the slot window, so the stats of the slots of one
+day overlap, while two spans that meet never count an hour twice.
 
 ## 3D views
 

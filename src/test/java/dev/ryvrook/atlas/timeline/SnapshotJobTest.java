@@ -18,6 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SnapshotJobTest {
@@ -139,5 +140,65 @@ class SnapshotJobTest {
         assertEquals(0, m.composed());
         assertEquals(2, m.carried());
         assertFalse(m.changed().contains("1/0/0"));
+    }
+
+    @Test
+    void drawnAndCarriedTilesAreNoBlockChange() throws Exception {
+        BlobStore blobs = new BlobStore(dir.resolve("blobs"));
+        byte[] a = png(0xFF112233);
+        byte[] b = png(0xFF445566);
+        byte[] old = png(0xFF000000);
+        String ha = BlobStore.hash(a);
+        String hb = BlobStore.hash(b);
+        String hold = BlobStore.hash(old);
+        blobs.put(ha, a);
+        blobs.put(hb, b);
+        blobs.put(hold, old);
+        Path tiles = dir.resolve("tiles");
+        tile(tiles, 0, 0, 0, a);
+        tile(tiles, 0, 1, 0, b);
+        // The slot before had both base tiles, an upper tile drawn by the live renderer and a lower tile.
+        Manifest prev = new Manifest("w", "2026-10-14T10", 1L, null, false, 0, 0,
+                Map.of("0/0/0", ha, "0/1/0", hb, "1/0/0", hold, "-1/0/0", hold), List.of());
+        Set<String> explored = Set.of("0/0/0", "0/1/0");
+        SnapshotJob.Explored ex = (zoom, x, z) -> zoom == 0 ? explored.contains(Manifest.key(zoom, x, z))
+                : x == 0 && z == 0;
+        SnapshotJob j = new SnapshotJob("w", "2026-10-14T13", 0L, tiles, blobs, "2026-10-14T10", prev, null,
+                -2, 4, ex);
+        Manifest m = run(j);
+        assertTrue(m.composed() > 0);
+        assertFalse(m.changed().isEmpty(), "the drawn upper tiles are new keys to diff");
+        assertEquals(0, j.blockChanges());
+        assertEquals("2026-10-14T10", j.previousSlot());
+        assertEquals(1L, j.previousTakenAt());
+    }
+
+    @Test
+    void aBaseTileBeingRedrawnCountsAsABlockChange() throws Exception {
+        BlobStore blobs = new BlobStore(dir.resolve("blobs"));
+        byte[] a = png(0xFF112233);
+        String ha = BlobStore.hash(a);
+        blobs.put(ha, a);
+        Path tiles = dir.resolve("tiles");
+        tile(tiles, 0, 0, 0, a);
+        Files.write(tiles.resolve("0").resolve("0_0.png.tmp"), new byte[]{1});
+        Manifest prev = new Manifest("w", "2026-10-14T10", 1L, null, false, 0, 0, Map.of("0/0/0", ha), List.of());
+        SnapshotJob j = new SnapshotJob("w", "2026-10-14T13", 0L, tiles, blobs, "2026-10-14T10", prev, null, -2, 4);
+        Manifest m = run(j);
+        assertTrue(m.partial());
+        assertEquals(ha, m.tiles().get("0/0/0"));
+        assertEquals(1, j.blockChanges());
+    }
+
+    @Test
+    void theFirstSnapshotHasNoSlotBefore() throws Exception {
+        BlobStore blobs = new BlobStore(dir.resolve("blobs"));
+        Path tiles = dir.resolve("tiles");
+        tile(tiles, 0, 0, 0, png(0xFF112233));
+        SnapshotJob j = new SnapshotJob("w", "2026-10-14T13", 0L, tiles, blobs, null, null, null, -2, 4);
+        run(j);
+        assertNull(j.previousSlot());
+        assertEquals(0L, j.previousTakenAt());
+        assertEquals(1, j.blockChanges());
     }
 }
