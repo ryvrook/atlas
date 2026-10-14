@@ -90,6 +90,12 @@ public final class AtlasConfig {
     /** Folder of the BetterMap mod, relative to the server working directory. */
     public String betterMapDir = "mods/BetterMap";
     /**
+     * Where the heat layer and the kill feed come from. auto uses TrackerAPI when it is installed and
+     * Atlas's own systems otherwise, always uses TrackerAPI only, never uses Atlas's own systems only.
+     * Read at server start.
+     */
+    public String tracker = TrackerMode.AUTO.key();
+    /**
      * Reverse proxies whose X-Forwarded-For header is believed, as addresses or CIDR ranges.
      * Empty means the direct peer address is always the client.
      */
@@ -488,6 +494,12 @@ public final class AtlasConfig {
         return tileRequestsPerMinute;
     }
 
+    /** Where the heat layer and the kill feed come from. Never null. */
+    public TrackerMode trackerMode() {
+        TrackerMode m = TrackerMode.parse(tracker);
+        return m == null ? TrackerMode.AUTO : m;
+    }
+
     /** Whether idle time renders explored tiles that have no disk tile yet. */
     public boolean preRenderIdle() {
         return preRenderIdle;
@@ -664,6 +676,11 @@ public final class AtlasConfig {
         if (cfg.betterMapDir == null || cfg.betterMapDir.isBlank()) {
             cfg.betterMapDir = "mods/BetterMap";
         }
+        TrackerMode mode = TrackerMode.parse(cfg.tracker);
+        if (mode == null) {
+            throw new InvalidConfigException("tracker is \"" + cfg.tracker + "\" but must be auto, always or never");
+        }
+        cfg.tracker = mode.key();
         if (cfg.featsExport == null || cfg.featsExport.isBlank()) {
             cfg.featsExport = "mods/Ryvrook_Feats/export/feats.json";
         }

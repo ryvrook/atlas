@@ -17,10 +17,11 @@ Everything lives under `src/main/java/dev/ryvrook/atlas`.
 | `command` | `/atlas` and its sub commands |
 | `config` | `atlas.json` parsing, validation and visibility levels |
 | `data` | Engine reads, the factions snapshot, Feats, the Chronicle export, kills, heat, last seen and the payload builders |
+| `integration` | The TrackerAPI presence check, the version compare and `TrackerBridge`, the one class that names TrackerAPI types |
 | `iso` | 3D views, the chunk reader, the raster, the colour table, the PNG encoder, the cache, daily views and the routes |
 | `http` | The embedded HTTP server, the event stream hub, rate limits, trusted proxies and marker icons |
 | `markers` | Marker layers behind the API, the drop folder, the admin layer and the layer route |
-| `systems` | Engine systems that watch deaths and blocks |
+| `systems` | Engine systems that watch deaths, blocks and chunk saves. The block and death systems are only registered without TrackerAPI |
 | `tiles` | Tile keys, the explored index, chunk image decoding, the render queue and the tile cache |
 | `timeline` | Snapshots, the blob store, manifests, the event log, daily stats and the timeline routes |
 | `util` | JSON helpers and atomic writes |
@@ -53,6 +54,10 @@ and build with the wrapper.
 The jar lands in `build/libs/Atlas-<version>.jar`. The Hytale server artifact comes from the Hytale
 Maven repository, and `hytale_channel` and `hytale_version` in `gradle.properties` select it.
 
+The TrackerAPI jar is a compile and test dependency only and is never bundled. Gradle looks for it at
+`../trackerapi/build/libs/TrackerAPI-1.0.0.jar`, and `-PtrackerApiJar=/path/to/TrackerAPI-1.0.0.jar`
+points it elsewhere.
+
 The version is set once, as `version` in `build.gradle.kts`. `processResources` writes it into
 `manifest.json` in place of `@version@`, and a generated `version.txt` next to `AtlasVersion` carries
 it to the code. Never edit the version anywhere else.
@@ -69,6 +74,7 @@ pure logic and use the Hytale server jar only for types.
 | `config` | Parsing, defaults, added keys, the fail closed cases, the cookie and Chronicle keys and per world settings |
 | `data` | Marker merging, the hidden player rule, payload field lists, Feats diffs, the Chronicle export reader and the kill log file |
 | `http` | Path safety, rate limits, rate keys, trusted proxies, the event stream queue and the move from the old session cookie |
+| `integration` | The `tracker` decision, the reload watch, and `TrackerBridge` fed synthetic TrackerAPI records with the heat and kill lines the block and death systems make |
 | `iso` | View parameters, the cache keys and prune, the raster on synthetic columns and the iso config |
 | `markers` | The drop folder parser, the layer payload and tiers, popup escaping and timeline visibility |
 | `tiles` | Tile key math, the explored index, chunk image decoding, the render queue and the token bucket |
@@ -255,6 +261,7 @@ The periodic tasks and their intervals.
 | Feats export check | 5 seconds |
 | Chronicle export check | 5 seconds |
 | BetterMap settings check | 15 seconds |
+| TrackerAPI reload watch | 5 seconds |
 | Marker layer drop folder | 5 seconds, with the shared markers |
 | Idle pre render | 5 seconds, after 30 seconds without a tile request |
 | Timeline event log flush | 5 seconds |
@@ -446,6 +453,28 @@ Bump `STYLE` whenever the same chunks would draw differently. The key place fing
 too, so key places are drawn again once after such a change. Partial views stay in memory for a minute and never reach disk. `IsoSnapshots` draws the
 daily areas into `iso/` of the day folder with an `index.json`, which the day list reads as
 `isoViews`, and a sweep every ten minutes removes the views of days that were pruned.
+
+## TrackerAPI
+
+TrackerAPI is optional. The manifest lists `Ryvrook:TrackerAPI` under `OptionalDependencies`, so the
+engine's plugin class loader resolves its classes for Atlas when it is installed.
+
+- `setup` asks the plugin manager for `Ryvrook:TrackerAPI` through `TrackerPresence.find` and compares
+  its manifest version with 1.0.0. `TrackerPresence.decide` turns that and the `tracker` key into a
+  source. `OWN` registers `BlockActivitySystem` and `DeathSystem` as before, `TRACKER` and `NONE`
+  register neither. One log line names the source.
+- `start` calls `TrackerBridge.install` only for `TRACKER`. It hooks `TrackerApi.onEnable` and
+  `onDisable`, and `bind` subscribes ASYNC to `BlockBroken`, `BlockPlaced` and `EntityDied` as owner
+  `Atlas`. `shutdown` closes the link, which removes both hooks and every subscription.
+- `TrackerBridge` is the only class that imports `dev.ryvrook.trackerapi`. The plugin reaches it through
+  `TrackerLink`, so the bridge class is first loaded after the presence check.
+- Breaks and places call `HeatTracker.record` with the event's world, x, z and time. Deaths build the same
+  `KillLog.Kill` as `DeathSystem`, with the victim's place from the event and the killer's from
+  `TrackerApi.snapshot`, and pass it through the same `PlaceRule` and the same sink to the kill log, the
+  feed and the timeline. A creature is a boss when the event says so or `KillLog.isBoss` names it.
+- The chunk save systems, chat, disconnect and the asset reload listener stay registered either way.
+- A reloaded TrackerAPI brings new classes in a new loader. `TrackerPresence.Watch` compares the plugin
+  object every 5 seconds and logs one line asking for `/plugin reload` of Atlas when it changed.
 
 ## BetterMap
 

@@ -12,7 +12,9 @@
   "Website": "https://github.com/ryvrook/atlas",
   "ServerVersion": ">=0.7.0",
   "Dependencies": {},
-  "OptionalDependencies": {},
+  "OptionalDependencies": {
+    "Ryvrook:TrackerAPI": ">=1.0.0"
+  },
   "LoadBefore": {},
   "DisabledByDefault": false,
   "IncludesAssetPack": false

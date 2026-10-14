@@ -4,6 +4,33 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
+## 1.6.0 - 2026-10-14
+
+This is Atlas 1.6.0, dated 2026-10-14. Atlas works with TrackerAPI. When TrackerAPI 1.0.0 or newer is
+installed, the heat layer and the kill feed are fed from its events and Atlas registers no block or
+death systems of its own.
+
+### Upgrading
+
+- One new setting is added with its default on the first start, `tracker` (`auto`). It takes `auto`,
+  `always` or `never` and fails closed like the rest, see Configuration in the README. It is read at
+  server start, so a change needs a restart or `/plugin reload` of Atlas.
+- `heat.json` and `kills.json` stay as they are and keep counting from where they were, whichever source
+  feeds them.
+
+### Added
+
+- With `tracker` at `auto` and TrackerAPI installed, block breaks and places come from its
+  `BlockBroken` and `BlockPlaced` events and deaths from `EntityDied`. Without TrackerAPI Atlas uses its
+  own systems as before. `always` uses TrackerAPI only and records nothing without it, `never` ignores
+  it. The server log says in one line at start which source is active.
+- When TrackerAPI is loaded, reloaded or unloaded while Atlas runs, Atlas logs one line asking for a
+  reload of Atlas, since the engine systems it uses can only be chosen at start.
+
+### Changed
+
+- The manifest lists `Ryvrook:TrackerAPI` as an optional dependency.
+
 ## 1.5.0 - 2026-10-14
 
 This is Atlas 1.5.0, dated 2026-10-14. The timeline skips a scheduled snapshot when nothing changed, so

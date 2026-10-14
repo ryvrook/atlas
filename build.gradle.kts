@@ -3,10 +3,12 @@ plugins {
 }
 
 group = "dev.ryvrook"
-version = "1.5.0"
+version = "1.6.0"
 
 val hytaleChannel = (project.findProperty("hytale_channel") as String?) ?: "release"
 val hytaleVersion = (project.findProperty("hytale_version") as String?) ?: "0.7.1"
+// TrackerAPI is optional at run time. Atlas compiles its bridge against the jar, which is never bundled.
+val trackerApiJar = (project.findProperty("trackerApiJar") as String?) ?: "../trackerapi/build/libs/TrackerAPI-1.0.0.jar"
 
 java {
     toolchain {
@@ -25,6 +27,8 @@ repositories {
 dependencies {
     compileOnly("com.hypixel.hytale:Server:$hytaleVersion")
     testImplementation("com.hypixel.hytale:Server:$hytaleVersion")
+    compileOnly(files(trackerApiJar))
+    testImplementation(files(trackerApiJar))
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

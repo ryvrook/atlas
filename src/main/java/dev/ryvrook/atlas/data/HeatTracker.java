@@ -32,9 +32,14 @@ public final class HeatTracker {
     }
 
     public void record(String world, int blockX, int blockZ, boolean place) {
+        record(world, blockX, blockZ, place, System.currentTimeMillis());
+    }
+
+    /** Counts one break or place that happened at the given time, for events delivered a little later. */
+    public void record(String world, int blockX, int blockZ, boolean place, long atMs) {
         int cx = Math.floorDiv(blockX, 32);
         int cz = Math.floorDiv(blockZ, 32);
-        long bucket = System.currentTimeMillis() / BUCKET_MS;
+        long bucket = atMs / BUCKET_MS;
         data.computeIfAbsent(world, w -> new ConcurrentHashMap<>())
                 .computeIfAbsent(bucket, b -> new ConcurrentHashMap<>())
                 .computeIfAbsent(DominionSnapshot.chunkKey(cx, cz), k -> new AtomicIntegerArray(2))

@@ -21,6 +21,8 @@ import dev.ryvrook.atlas.data.EngineData;
 import dev.ryvrook.atlas.data.LiveState;
 import dev.ryvrook.atlas.data.Payloads;
 import dev.ryvrook.atlas.http.ApiServer;
+import dev.ryvrook.atlas.integration.TrackerLink;
+import dev.ryvrook.atlas.integration.TrackerPresence;
 import dev.ryvrook.atlas.iso.IsoChunkSaveSystem;
 import dev.ryvrook.atlas.iso.IsoRoutes;
 import dev.ryvrook.atlas.iso.IsoService;
@@ -88,6 +90,11 @@ public final class AtlasPlugin extends JavaPlugin {
     private Set<String> knownWorlds;
     private final Set<String> transientWorlds = ConcurrentHashMap.newKeySet();
 
+    // TrackerAPI, decided once in setup.
+    private TrackerPresence.Source trackerSource = TrackerPresence.Source.OWN;
+    private TrackerPresence.Watch trackerWatch;
+    private volatile TrackerLink trackerLink;
+
     public AtlasPlugin(JavaPluginInit init) {
         super(init);
     }
@@ -148,15 +155,21 @@ public final class AtlasPlugin extends JavaPlugin {
         IsoSnapshots.install(isoSnapshots);
 
         getCommandRegistry().registerCommand(new AtlasCommand(this));
-        getEntityStoreRegistry().registerSystem(BlockActivitySystem.breaks(atlas.heat()));
-        getEntityStoreRegistry().registerSystem(BlockActivitySystem.places(atlas.heat()));
-        getEntityStoreRegistry().registerSystem(new DeathSystem(k -> {
-            atlas.addKill(k);
-            Timeline t = timeline;
-            if (t != null) {
-                t.death(k);
-            }
-        }, atlas::placeWithheld));
+        // Block activity and deaths come either from Atlas's own systems or from TrackerAPI, never both.
+        TrackerPresence.Found tracker = TrackerPresence.find();
+        trackerSource = TrackerPresence.decide(cfg.trackerMode(), tracker);
+        trackerWatch = new TrackerPresence.Watch(cfg.trackerMode(), trackerSource, tracker);
+        String trackerLine = TrackerPresence.describe(cfg.trackerMode(), trackerSource, tracker);
+        if (trackerSource == TrackerPresence.Source.NONE) {
+            getLogger().at(Level.WARNING).log("%s", trackerLine);
+        } else {
+            getLogger().at(Level.INFO).log("%s", trackerLine);
+        }
+        if (trackerSource == TrackerPresence.Source.OWN) {
+            getEntityStoreRegistry().registerSystem(BlockActivitySystem.breaks(atlas.heat()));
+            getEntityStoreRegistry().registerSystem(BlockActivitySystem.places(atlas.heat()));
+            getEntityStoreRegistry().registerSystem(new DeathSystem(this::recordKill, atlas::placeWithheld));
+        }
         getChunkStoreRegistry().registerSystem(new ChunkSaveSystem(atlas.tiles()));
         getChunkStoreRegistry().registerSystem(new IsoChunkSaveSystem(iso));
         registerAssetReload();
@@ -205,6 +218,7 @@ public final class AtlasPlugin extends JavaPlugin {
             getLogger().at(Level.INFO).log("Atlas found no Dominion snapshot at %s and runs standalone until the file appears",
                     snap.toAbsolutePath());
         }
+        bindTracker();
         pollSnapshot();
         pollMapMod();
         atlas.seedFeed();
@@ -229,6 +243,7 @@ public final class AtlasPlugin extends JavaPlugin {
         tasks.add(ex.scheduleWithFixedDelay(guard("leaderboard", this::pollLeaderboard), 5, 5, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("chronicle", () -> pollChronicle(false)), 5, 5, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("map settings", this::pollMapMod), 15, 15, TimeUnit.SECONDS));
+        tasks.add(ex.scheduleWithFixedDelay(guard("tracker", this::watchTracker), 5, 5, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("explored", () -> atlas.tiles().refreshExplored()), 5, 600, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("tiles", () -> {
             atlas.tiles().refreshLoaded();
@@ -251,6 +266,15 @@ public final class AtlasPlugin extends JavaPlugin {
         if (atlas != null) {
             // Withdrawn first, so no session listener is handed a change while the scheduler goes down.
             atlas.sessionApi().stop();
+        }
+        TrackerLink link = trackerLink;
+        trackerLink = null;
+        if (link != null) {
+            try {
+                link.close();
+            } catch (RuntimeException | LinkageError e) {
+                // TrackerAPI went first and closed the subscriptions itself.
+            }
         }
         for (ScheduledFuture<?> f : tasks) {
             f.cancel(false);
@@ -280,6 +304,41 @@ public final class AtlasPlugin extends JavaPlugin {
             atlas.shutdown();
             atlas.tiles().shutdown();
             saveQuietly();
+        }
+    }
+
+    /** One death for the kill log, the feed and the timeline, from DeathSystem or from TrackerAPI. */
+    private void recordKill(dev.ryvrook.atlas.data.KillLog.Kill k) {
+        atlas.addKill(k);
+        Timeline t = timeline;
+        if (t != null) {
+            t.death(k);
+        }
+    }
+
+    /**
+     * Hooks the TrackerAPI bridge to TrackerAPI's enable and disable when setup chose TrackerAPI. The bridge
+     * class is the only one that names TrackerAPI types and is loaded here for the first time.
+     */
+    private void bindTracker() {
+        if (trackerSource != TrackerPresence.Source.TRACKER) {
+            return;
+        }
+        try {
+            trackerLink = dev.ryvrook.atlas.integration.TrackerBridge.install(atlas.heat(), this::recordKill,
+                    atlas::placeWithheld, msg -> getLogger().at(Level.WARNING).log("%s", msg));
+        } catch (RuntimeException | LinkageError e) {
+            getLogger().at(Level.WARNING).withCause(e).log(
+                    "Atlas could not bind to TrackerAPI and records no block activity and no kills until it is reloaded");
+        }
+    }
+
+    /** Every 5 seconds. Asks for a reload of Atlas once when TrackerAPI was loaded, reloaded or unloaded. */
+    private void watchTracker() {
+        TrackerPresence.Watch w = trackerWatch;
+        String line = w == null ? null : w.check(TrackerPresence.find());
+        if (line != null) {
+            getLogger().at(Level.WARNING).log("%s", line);
         }
     }
 

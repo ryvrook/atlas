@@ -182,6 +182,7 @@ map down the same way, so a setting you meant to tighten can never stay loose. F
 | `dominionSnapshot` | see below | Path of the optional factions snapshot file |
 | `honorBetterMap` | `true` | Apply BetterMap's server wide rules when its settings file exists |
 | `betterMapDir` | `mods/BetterMap` | BetterMap's folder, relative to the server working directory |
+| `tracker` | `auto` | Where the heat layer and the kill feed come from. `auto` uses TrackerAPI when it is installed, `always` only TrackerAPI, `never` only Atlas's own systems. Read at server start |
 | `trustedProxies` | empty | Reverse proxies whose forwarded headers are believed, as addresses or CIDR ranges such as `10.0.0.0/8` |
 | `visibility` | see below | Who sees each layer |
 | `defaultWorld` | empty | World the map opens on. Empty means the server's default world |
@@ -884,6 +885,16 @@ good copy. Without the file the tab stays hidden and the Stats tab is unchanged.
 
 Chronicle can also share the login with Atlas through `dev.ryvrook.atlas.api.SessionApi`, see
 [docs/API.md](docs/API.md#session-api-for-plugins) and [Reverse proxy](#reverse-proxy).
+
+## Works with TrackerAPI
+
+Atlas works with TrackerAPI, the shared tracking plugin behind Feats and Chronicle. When TrackerAPI
+1.0.0 or newer is installed, Atlas takes block breaks, block places and deaths from it for the heat
+layer and the kill feed, and registers none of its own systems for them, so the server counts each
+event once. Without TrackerAPI Atlas tracks them itself as before. The heat and the kill history carry
+on in the same files either way. Set `tracker` to `never` to keep Atlas's own systems, or to `always`
+to rely on TrackerAPI alone. After installing, updating or removing TrackerAPI, restart the server or
+reload Atlas as the log asks.
 
 ## BetterMap compatibility
 
