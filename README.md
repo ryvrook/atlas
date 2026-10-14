@@ -47,7 +47,7 @@ mod.
 
 ## Install
 
-1. Build `Atlas-1.1.0.jar` from source (see below), or download it from the Releases page once one is published.
+1. Build `Atlas-1.2.0.jar` from source (see below), or download it from the Releases page once one is published.
 2. On a dedicated server, put the jar in the `mods` folder inside the server's working directory, the folder you start `HytaleServer.jar` from. For a singleplayer world, use the `Mods` folder in Hytale's `UserData` folder.
 3. Start the server. On first start Atlas creates its data folder `mods/Ryvrook_Atlas`, writes `atlas.json` there and listens on port 8123.
 4. Open `http://<server address>:8123/` in a browser.
