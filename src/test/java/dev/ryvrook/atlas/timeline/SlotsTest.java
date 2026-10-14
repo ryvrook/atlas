@@ -122,6 +122,22 @@ class SlotsTest {
     }
 
     @Test
+    void anOldDayFolderStaysReachableOnTheDayItGainsSlotsWithAnHour() throws Exception {
+        TimelineStore s = new TimelineStore(dir);
+        slot(s, "w", "2026-10-13", new byte[]{1}, new byte[]{2});
+        slot(s, "w", "2026-10-13T22", new byte[]{3}, new byte[]{2});
+        assertEquals("2026-10-13", s.resolve("w", "2026-10-13"));
+        assertEquals("2026-10-13T22", s.resolve("w", "2026-10-13T22"));
+        assertEquals(BlobStore.hash(new byte[]{1}), s.manifest("w", "2026-10-13").tiles().get(Manifest.key(0, 0, 0)));
+        assertEquals(BlobStore.hash(new byte[]{3}), s.manifest("w", "2026-10-13T22").tiles().get(Manifest.key(0, 0, 0)));
+        // Taking the 22:00 slot again still compares it with the old day folder, not with itself.
+        slot(s, "w", "2026-10-13T22", new byte[]{4}, new byte[]{2});
+        Manifest m = s.manifest("w", "2026-10-13T22");
+        assertEquals("2026-10-13", m.previous());
+        assertEquals(List.of(Manifest.key(0, 0, 0)), m.changed());
+    }
+
+    @Test
     void retentionCountsDaysAndRemovesEverySlotOfADay() throws Exception {
         TimelineStore s = new TimelineStore(dir);
         LocalDate today = LocalDate.of(2026, 10, 13);

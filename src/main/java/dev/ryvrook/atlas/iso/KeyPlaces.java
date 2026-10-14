@@ -82,9 +82,16 @@ public final class KeyPlaces {
 
     // ---- fingerprint -------------------------------------------------------------
 
-    /** The fingerprint of a whole view, see digest(long[]). */
+    /**
+     * The fingerprint of a whole view, see digest(long[]), with the renderer style mixed in so a key
+     * place drawn by an older renderer is drawn again once.
+     */
     static long digest(IsoCache.Print print) {
-        return print == null ? 0 : digest(print.terrain());
+        if (print == null) {
+            return 0;
+        }
+        long h = mix(digest(print.terrain()), IsoRaster.STYLE);
+        return h == 0 ? 1 : h;
     }
 
     /**

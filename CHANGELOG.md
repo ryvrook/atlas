@@ -4,6 +4,43 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
+## 1.3.0 - 2026-10-13
+
+This is Atlas 1.3.0, dated 2026-10-13. The timeline plays properly, with more speeds, and the 3D views
+have shadows.
+
+### Upgrading
+
+- No new settings.
+- The 3D renderer changed, so cached 3D views are drawn again. Files of the old style are removed from
+  the 3D cache on the first start and each key place is drawn once more the next time its day runs.
+
+### Fixed
+
+- On a day that holds both the day folder of Atlas 1.1 and slots with an hour, the plain date named
+  the last slot of that day, so its tiles, its changed list and its stats were those of the later slot
+  and the timeline showed the same map twice. A plain date now names its own folder when that folder
+  holds a snapshot, and otherwise the last slot of the day as before. A retaken slot on such a day now
+  compares itself with the right snapshot.
+- Play finished in a few seconds on a short timeline and ended on an events only slot that shows the
+  map of the slot before, so it looked as if nothing had happened.
+
+### Changed
+
+- Play starts at the oldest slot held when started from the live map or the newest slot, and a pause
+  resumes where it stopped. The chip names each slot with its place in the run, such as 2 of 3. A slot
+  with events only that shows the same map as the step before passes in half the time and says so.
+  After the newest slot the live map returns and a toast says what was played. With fewer than two
+  slots Play is dimmed and its tooltip says when the next snapshot is due.
+- The playback speeds are 0.5, 1, 2, 3, 5 and 10 seconds a step. A stored speed outside that list
+  falls back to 1 second.
+- 3D views have soft cast shadows from the fixed sun on ground, water and tree tops, darker corners
+  and cliff feet, a lighter shoreline, and lava that is never shaded.
+- The 3D lightbox has a compass that shows where north lies and which side the view is seen from, and
+  a second double click fits the view again.
+- The build targets server 0.7.1 by default. Nothing in the engine that Atlas uses changed between
+  0.7.0 and 0.7.1.
+
 ## 1.2.0 - 2026-10-13
 
 This is Atlas 1.2.0, dated 2026-10-13. It shows more of what players build. The timeline keeps several

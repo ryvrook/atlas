@@ -47,7 +47,7 @@ mod.
 
 ## Install
 
-1. Build `Atlas-1.2.0.jar` from source (see below), or download it from the Releases page once one is published.
+1. Build `Atlas-1.3.0.jar` from source (see below), or download it from the Releases page once one is published.
 2. On a dedicated server, put the jar in the `mods` folder inside the server's working directory, the folder you start `HytaleServer.jar` from. For a singleplayer world, use the `Mods` folder in Hytale's `UserData` folder.
 3. Start the server. On first start Atlas creates its data folder `mods/Ryvrook_Atlas`, writes `atlas.json` there and listens on port 8123.
 4. Open `http://<server address>:8123/` in a browser.
@@ -264,8 +264,9 @@ into the slot of the moment and replaces what that slot held. Snapshots are neve
 page. `/atlas timeline status` prints the schedule.
 
 **Upgrading from 1.1 or older.** Day folders written before 1.2 stay as they are and count as one slot
-of their day. A plain date such as `2026-10-13` still works in every address and share link and means the
-last slot of that day.
+of their day. A plain date such as `2026-10-13` still works in every address and share link. It means
+the old day folder of that date when there is one, so the snapshot taken before the upgrade stays
+reachable, and otherwise the last slot of that day.
 
 **What a snapshot holds.** Every tile Atlas has on disk, at every zoom, recorded by the hash of its
 image. Each image is stored once and shared by every slot it appears in, so a slot where little
@@ -303,14 +304,20 @@ Picking a slot swaps the live tiles for the tiles of that slot, dims the live ov
 Viewing chip with a Return to live button. The events of the slot's hours appear as markers on the map
 and as a list with filters by kind and a Show button. The diamond button tints the tiles that changed
 since the slot before. A day with events but no snapshot shows the map of the snapshot before it and
-says so. The play button steps through the slots at half a second, one second or two seconds a step.
+says so. The play button steps through the slots at 0.5, 1, 2, 3, 5 or 10 seconds a step. From the live
+map or the newest slot it starts at the oldest slot held. The chip names each slot as it plays with its
+place in the run, such as 2 of 3, and a slot with events only that shows the same map as the step
+before passes in half the time and says events only, same map. After the newest slot the live map
+returns and a toast says what was played. Play needs at least two snapshots, and until then its tooltip
+says when the next snapshot is due.
 The tab also shows the figures of the picked slot and small charts over every slot held, and clicking a
 chart jumps to that slot. While the bar is open, the left and right arrows step a slot, space plays and
 pauses, and Home or Esc return to the live map. When a snapshot finishes, open pages add the new slot by
 themselves.
 
 **Share links.** A link copied while a slot is shown carries `t=<slot>`, such as `t=2026-10-13T16`, and
-opens on that slot. An older link with a plain date opens the last slot of that day.
+opens on that slot. An older link with a plain date opens the old day folder of that date, or the last
+slot of that day when there is none.
 
 Day tiles follow the `terrain` visibility, everything else the `timeline` visibility. Events follow
 the layer they belong to as well, so kills need `kills`, world events `worldevents`, Feats lines
@@ -321,7 +328,8 @@ chunk.
 ## 3D views
 
 Atlas draws isometric pictures of an area, one column per block with its side faces, trees as
-crowns on trunks, water and plants. A view covers a square of chunks around a point, from 1 to 16
+crowns on trunks, water and plants. Trees and hills cast soft shadows from a fixed sun, corners and
+the foot of cliffs are a little darker, and lakes and rivers have a lighter shoreline. A view covers a square of chunks around a point, from 1 to 16
 chunks in every direction, seen from the south east, south west, north west or north east, at one to
 three pixels per block edge. Wider views get a smaller scale, 3 up to radius 5, 2 up to radius 8 and 1
 above, so the largest picture stays near 4400 by 2400 pixels.
@@ -405,8 +413,10 @@ click or long press on the map offers View this area in 3D for any spot. The act
 the server offers 3D views to the viewer.
 
 The view opens in a lightbox that counts down while the server draws it. Drag to move the picture,
-scroll or pinch to zoom, double click to zoom in, and press 0 or the fit button to see it whole. The
-SE, SW, NW and NE buttons, or the left and right arrows, turn the view, and 2, 4, 8 and 16 set how many
+scroll or pinch to zoom, double click to zoom in, and double click again, press 0 or use the fit button
+to see it whole. The
+SE, SW, NW and NE buttons, or the left and right arrows, turn the view, and a compass in the corner shows
+where north lies and which side the view is seen from. 2, 4, 8 and 16 set how many
 chunks it reaches in every direction. A large radius is drawn at a smaller scale and the lightbox says
 so. A partial view has a Try again button. Download saves the PNG, and Copy link copies an address
 with `iso=world,x,z,r,az,s` that opens the same view for anyone who may see it. Esc closes it.

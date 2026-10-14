@@ -19,7 +19,7 @@ public record IsoView(String world, int cx, int cz, int radius, int azimuth, int
     /** Views wider than 17 by 17 chunks run one at a time with a pause after them. */
     static final int LARGE_SIDE = 17;
     static final long COORD_LIMIT = 30_000_000L;
-    private static final Pattern NAME = Pattern.compile("(-?\\d+)_(-?\\d+)_r(\\d+)_a(\\d+)_s(\\d+)_t(\\d+)\\.png");
+    private static final Pattern NAME = Pattern.compile("(-?\\d+)_(-?\\d+)_r(\\d+)_a(\\d+)_s(\\d+)_t(\\d+)(?:_v(\\d+))?\\.png");
 
     /** The largest scale the radius allows, 1 to 3. */
     public static int maxScale(int radius) {
@@ -58,13 +58,16 @@ public record IsoView(String world, int cx, int cz, int radius, int azimuth, int
         return Math.abs(chunkX - cx) <= radius && Math.abs(chunkZ - cz) <= radius;
     }
 
-    /** The cache file name of this view in a time bucket. */
+    /** The cache file name of this view in a time bucket, drawn by the current renderer. */
     public String fileName(long bucket) {
-        return cx + "_" + cz + "_r" + radius + "_a" + azimuth + "_s" + scale + "_t" + bucket + ".png";
+        return cx + "_" + cz + "_r" + radius + "_a" + azimuth + "_s" + scale + "_t" + bucket + "_v" + IsoRaster.STYLE + ".png";
     }
 
-    /** A cache file name read back, or null when the name is not one. */
-    record Named(IsoView view, long bucket) {
+    /**
+     * A cache file name read back, or null when the name is not one. style is the renderer that drew
+     * it, 1 for names from before the renderer was marked.
+     */
+    record Named(IsoView view, long bucket, int style) {
     }
 
     static Named parseName(String world, String name) {
@@ -75,7 +78,7 @@ public record IsoView(String world, int cx, int cz, int radius, int azimuth, int
         try {
             IsoView v = new IsoView(world, Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)),
                     Integer.parseInt(m.group(3)), Integer.parseInt(m.group(4)), Integer.parseInt(m.group(5)));
-            return new Named(v, Long.parseLong(m.group(6)));
+            return new Named(v, Long.parseLong(m.group(6)), m.group(7) == null ? 1 : Integer.parseInt(m.group(7)));
         } catch (NumberFormatException e) {
             return null;
         }

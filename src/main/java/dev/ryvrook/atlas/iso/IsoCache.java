@@ -97,7 +97,10 @@ final class IsoCache {
         trimMemory();
     }
 
-    /** Lists what an earlier run left on disk. Leftover temporary files are removed. */
+    /**
+     * Lists what an earlier run left on disk. Leftover temporary files and views drawn by an older
+     * renderer, see IsoRaster.STYLE, are removed.
+     */
     void load() {
         if (!Files.isDirectory(dir)) {
             return;
@@ -112,13 +115,22 @@ final class IsoCache {
                 try (DirectoryStream<Path> files = Files.newDirectoryStream(w)) {
                     for (Path f : files) {
                         String name = f.getFileName().toString();
-                        if (name.endsWith(Json.TMP_SUFFIX)) {
-                            Files.deleteIfExists(f);
-                            continue;
-                        }
-                        IsoView.Named n = IsoView.parseName(folder, name);
-                        if (n != null) {
-                            found.add(new Known(folder, n.view(), n.bucket(), Files.size(f), Files.getLastModifiedTime(f).toMillis()));
+                        try {
+                            if (name.endsWith(Json.TMP_SUFFIX)) {
+                                Files.deleteIfExists(f);
+                                continue;
+                            }
+                            IsoView.Named n = IsoView.parseName(folder, name);
+                            if (n != null && n.style() != IsoRaster.STYLE) {
+                                // Drawn by an older renderer, so it is drawn again instead of served.
+                                Files.deleteIfExists(f);
+                                continue;
+                            }
+                            if (n != null) {
+                                found.add(new Known(folder, n.view(), n.bucket(), Files.size(f), Files.getLastModifiedTime(f).toMillis()));
+                            }
+                        } catch (IOException e) {
+                            // One file that cannot be read or removed does not stop the rest from being listed.
                         }
                     }
                 }

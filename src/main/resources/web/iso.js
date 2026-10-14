@@ -96,7 +96,7 @@
   };
 
   // ---- the lightbox ----------------------------------------------------------------
-  let dlg, stage, layA, layB, imgA, imgB, divider, stateEl, noteEl, titleEl, subEl, azBox, rBox, cmpSel, dl, shareBtn, liveBtn, tagL, tagR;
+  let compass, needle, fromEl, dlg, stage, layA, layB, imgA, imgB, divider, stateEl, noteEl, titleEl, subEl, azBox, rBox, cmpSel, dl, shareBtn, liveBtn, tagL, tagR;
   function build() {
     if (dlg) return;
     dlg = document.createElement("dialog");
@@ -106,10 +106,11 @@
     dlg.setAttribute("aria-describedby", "iso-sub");
     dlg.innerHTML = "<div class='iso-head'><span class='iso-mark' aria-hidden='true'>" + A.icon("cube") + "</span><div class='grow'><h2 id='iso-title'></h2><div id='iso-sub' class='iso-sub'></div></div>" +
       "<button class='icon-btn' id='iso-close' aria-label='Close the 3D view' title='Close (Esc)'>" + A.icon("close") + "</button></div>" +
-      "<div class='iso-stage' id='iso-stage' tabindex='0' role='group' aria-roledescription='3D view' aria-label='3D view. Drag to move it, scroll or pinch to zoom, left and right arrows turn it, 0 fits it.'>" +
+      "<div class='iso-stage' id='iso-stage' tabindex='0' role='group' aria-roledescription='3D view' aria-label='3D view. Drag to move it, scroll or pinch to zoom, double click to zoom in or fit it again, left and right arrows turn it, 0 fits it.'>" +
       "<div class='iso-layer' id='iso-la'><img id='iso-img' alt='' draggable='false'></div>" +
       "<div class='iso-layer iso-top' id='iso-lb' hidden><img id='iso-img2' alt='' draggable='false'></div>" +
       "<span class='iso-tag left' id='iso-tag-l' hidden></span><span class='iso-tag right' id='iso-tag-r' hidden></span>" +
+      "<div class='iso-compass' id='iso-compass' aria-hidden='true' hidden><span class='iso-needle' id='iso-needle'><svg viewBox='0 0 16 16'><path d='M8 1 10.6 8H5.4z'/><path class='s' d='M5.4 8h5.2L8 15z'/></svg></span><b class='iso-n'>N</b><span id='iso-from'></span></div>" +
       "<div class='iso-divider' id='iso-div' role='slider' tabindex='0' aria-label='Compare divider, the older day is on the left' aria-valuemin='0' aria-valuemax='100' hidden><span class='iso-knob' aria-hidden='true'>" + A.icon("back", "sm") + A.icon("next", "sm") + "</span></div>" +
       "<div class='iso-state' id='iso-state' role='status' aria-live='polite' hidden></div></div>" +
       "<div class='iso-note' id='iso-note' hidden></div>" +
@@ -129,6 +130,7 @@
     divider = $("iso-div"); stateEl = $("iso-state"); noteEl = $("iso-note"); titleEl = $("iso-title"); subEl = $("iso-sub");
     azBox = $("iso-az"); rBox = $("iso-r"); cmpSel = $("iso-cmp"); dl = $("iso-dl"); shareBtn = $("iso-share"); liveBtn = $("iso-live");
     tagL = $("iso-tag-l"); tagR = $("iso-tag-r");
+    compass = $("iso-compass"); needle = $("iso-needle"); fromEl = $("iso-from");
     $("iso-close").addEventListener("click", () => dlg.close());
     dlg.addEventListener("close", onClose);
     // A click on the dimmed backdrop lands on the dialog itself and closes it.
@@ -361,8 +363,20 @@
   }
 
   // ---- controls ------------------------------------------------------------------------
+  // Where north points on screen for each direction, in degrees clockwise from straight up. From the south east
+  // north runs up to the right, and each quarter turn of the viewer moves it one corner on.
+  const NORTH = { 0: 63.4, 90: -63.4, 180: -116.6, 270: 116.6 };
+  function syncCompass() {
+    const az = view ? Number(view.az) : NaN;
+    const known = view && view.az != null && NORTH[az] != null;
+    compass.hidden = !known;
+    if (!known) return;
+    needle.firstChild.style.transform = "rotate(" + NORTH[az] + "deg)";
+    fromEl.textContent = "From the " + azOf(az)[2];
+  }
   function syncControls() {
     if (!view) return;
+    syncCompass();
     const live = view.mode === "live";
     azBox.hidden = !live;
     rBox.hidden = !live;
@@ -561,12 +575,14 @@
         pz.k = Math.max(fitK() * 0.5, Math.min(8, pinch.k * (Math.hypot(a.x - b.x, a.y - b.y) || 1) / pinch.d));
         pz.x = mid.x - pinch.ix * pz.k;
         pz.y = mid.y - pinch.iy * pz.k;
+        pz.touched = true;
       } else if (drag) {
         const p = ptrs.get(e.pointerId);
         pz.x = drag.px + p.x - drag.x;
         pz.y = drag.py + p.y - drag.y;
+        // A hand that shakes a little while double clicking has not moved the view.
+        if (Math.hypot(p.x - drag.x, p.y - drag.y) > 3) pz.touched = true;
       } else return;
-      pz.touched = true;
       clampPan();
       apply();
     });
@@ -584,7 +600,8 @@
       const p = local(e);
       zoomAt(Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0018)), p.x, p.y);
     }, { passive: false });
-    stage.addEventListener("dblclick", (e) => { const p = local(e); zoomAt(2, p.x, p.y); });
+    // A double click zooms in on the spot, and fits the view again once it was moved or zoomed.
+    stage.addEventListener("dblclick", (e) => { if (e.target.closest(".iso-divider, button")) return; if (pz.touched) { fit(); return; } const p = local(e); zoomAt(2, p.x, p.y); });
     divider.addEventListener("pointerdown", (e) => {
       e.stopPropagation();
       try { divider.setPointerCapture(e.pointerId); } catch (err) { /* capture is optional */ }

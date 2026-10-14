@@ -12,8 +12,9 @@ import java.util.Locale;
  * Snapshot slots. The timeline takes timeline.perDay snapshots a day at evenly spaced hours starting
  * from timeline.hour, and each one is a slot named by its date and hour, such as 2026-10-13T16. A
  * slot folder holds what a day folder held before. A plain date such as 2026-10-13 is still a valid
- * slot. It is how the day folders of Atlas 1.0 and 1.1 are named, and wherever a slot is read it
- * stands for the last slot held that day.
+ * slot. It is how the day folders of Atlas 1.0 and 1.1 are named. Wherever a slot is read, a plain
+ * date stands for its own folder when that holds a snapshot, and otherwise for the last slot held
+ * that day.
  */
 public final class Slots {
     /** The values timeline.perDay accepts, each a divisor of 24. */

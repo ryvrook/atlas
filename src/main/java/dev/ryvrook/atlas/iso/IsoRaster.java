@@ -15,6 +15,13 @@ package dev.ryvrook.atlas.iso;
  * canopies drop at most CANOPY_CAP blocks, so trees read as crowns rather than pillars, and a
  * column with a trunk under its leaves draws the trunk below the crown. Chunks that are missing,
  * unexplored or outside the render limit are drawn as a flat grey floor.
+ *
+ * <p>Light comes from one fixed direction on screen, from the front left and above. Top faces
+ * take a soft cast shadow found by walking the height field toward the light for at most
+ * SHADOW_REACH blocks, so trees shade the ground behind them and ridges shade the valleys below.
+ * Water takes its shadow on the surface. Top faces also darken a little next to higher neighbours,
+ * which fills corners and the foot of cliffs, and water lightens where it meets the shore. A fluid
+ * that gives off light, like lava, is never shaded.
  */
 final class IsoRaster {
     static final int SKIRT = 12;
@@ -30,6 +37,49 @@ final class IsoRaster {
     private static final float TOP = light(LY);
     private static final float SOUTH = light(LZ);
     private static final float EAST = light(LX);
+
+    /**
+     * Bumped whenever the pictures change for the same chunks, so cached views and key place
+     * fingerprints from an older renderer are drawn again.
+     */
+    static final int STYLE = 2;
+    /** How far a shadow reaches, in blocks along the ground. */
+    static final int SHADOW_REACH = 24;
+    /** Darkening of a top face in full shadow. */
+    static final float SHADOW_DARK = 0.30f;
+    /** Height the shadow ray climbs per block toward the light. Lower than the face light so shadows read. */
+    static final double SHADOW_RISE = 1.15;
+    private static final double SHADOW_STEP = 0.7;
+    /** Side of the squares of screen cells that bound the shadow walk, see reachTops. */
+    static final int TILE = 8;
+    private static final double SHADOW_DX = LX / Math.sqrt(LX * LX + LZ * LZ);
+    private static final double SHADOW_DZ = LZ / Math.sqrt(LX * LX + LZ * LZ);
+    /**
+     * The cells a shadow walk visits, as offsets from its start, with the height the ray has climbed at
+     * each. Rounding a whole cell plus an offset equals the cell plus the rounded offset, so the walk
+     * of every cell uses the same table.
+     */
+    private static final int[] STEP_X;
+    private static final int[] STEP_Z;
+    private static final double[] STEP_RISE;
+
+    static {
+        int n = (int) Math.floor(SHADOW_REACH / SHADOW_STEP + 1e-9);
+        STEP_X = new int[n];
+        STEP_Z = new int[n];
+        STEP_RISE = new double[n];
+        for (int k = 0; k < n; k++) {
+            double d = (k + 1) * SHADOW_STEP;
+            STEP_X[k] = (int) Math.round(d * SHADOW_DX);
+            STEP_Z[k] = (int) Math.round(d * SHADOW_DZ);
+            STEP_RISE[k] = d * SHADOW_RISE;
+        }
+    }
+    /** The cool tone shadows lean toward, so snow and sand in shadow stay clean instead of muddy. */
+    private static final int SHADOW_TONE = 0x34466e;
+    /** Darkening per block of a higher neighbour, and the least light a top face keeps from them. */
+    static final float AO_STEP = 0.045f;
+    static final float AO_FLOOR = 0.80f;
 
     /**
      * The cropped picture in the first width times height entries of argb, the rest of the array is
@@ -127,6 +177,8 @@ final class IsoRaster {
         int drawn = 0;
         int missing = 0;
         int grey = shade(MISSING_GREY, TOP) | 0xFF000000;
+        int[] reachTop = reachTops(surf, w);
+        int tiles = (w + TILE - 1) / TILE;
 
         for (int d = 0; d <= 2 * w - 2; d++) {
             int x0 = Math.max(0, d - w + 1);
@@ -147,9 +199,15 @@ final class IsoRaster {
                 int east = x + 1 < w ? i + 1 : -1;
                 int north = z > 0 ? i - w : -1;
                 int west = x > 0 ? i - 1 : -1;
-                ground(cv, a, c, s, tsurf, i, south, east, north, west, cx, row, base, u, v);
+                boolean glow = a.waterTop[s] >= 0 && c.glows(a.fluid[s]);
+                int top = reachTop[(z / TILE) * tiles + x / TILE];
+                float sh = glow ? 0f : shadow(surf, w, x, z, tsurf[i], top);
+                float ao = glow ? 1f : topAo(tsurf, w, x, z, tsurf[i]);
+                boolean shore = a.waterTop[s] >= 0 && !glow && shore(a, perm, tsurf, w, x, z);
+                ground(cv, a, c, s, tsurf, i, south, east, north, west, cx, row, base, u, v, sh, ao, shore, glow);
                 if (a.has(s, Columns.CANOPY)) {
-                    canopy(cv, a, c, s, surf, i, south, east, north, west, cx, row, base, u, v);
+                    float csh = shadow(surf, w, x, z, a.canopyTop[s], top);
+                    canopy(cv, a, c, s, surf, i, south, east, north, west, cx, row, base, u, v, csh);
                 }
             }
         }
@@ -163,8 +221,129 @@ final class IsoRaster {
         return Math.max(0, Math.min(top - heights[neighbour], cap));
     }
 
+    /**
+     * For every square of TILE by TILE screen cells, one above the highest surface a shadow ray from
+     * that square can meet within SHADOW_REACH, so the walk of a cell in flat open ground stops after
+     * a step or two. The ray runs toward smaller x and larger z, at most 14 cells across and 20 down,
+     * which stays inside two tiles to the left and three tiles below.
+     */
+    static int[] reachTops(int[] heights, int w) {
+        int t = (w + TILE - 1) / TILE;
+        int[] max = new int[t * t];
+        java.util.Arrays.fill(max, Integer.MIN_VALUE);
+        for (int z = 0; z < w; z++) {
+            for (int x = 0; x < w; x++) {
+                int h = heights[z * w + x];
+                int k = (z / TILE) * t + x / TILE;
+                if (h != NONE && h > max[k]) {
+                    max[k] = h;
+                }
+            }
+        }
+        int[] out = new int[t * t];
+        for (int tz = 0; tz < t; tz++) {
+            for (int tx = 0; tx < t; tx++) {
+                int m = Integer.MIN_VALUE;
+                for (int bz = tz; bz <= Math.min(t - 1, tz + 3); bz++) {
+                    for (int bx = Math.max(0, tx - 2); bx <= tx; bx++) {
+                        m = Math.max(m, max[bz * t + bx]);
+                    }
+                }
+                out[tz * t + tx] = m == Integer.MIN_VALUE ? Integer.MIN_VALUE : m + 1;
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The share of light, 0 to 1, that the height field blocks for a top face at height h in screen
+     * cell x, z. Walks from the cell toward the light in steps of SHADOW_STEP, the ray climbing
+     * SHADOW_RISE per block, and stops at SHADOW_REACH, at the edge or once the ray passes top, the
+     * highest surface. A column up to 1.5 blocks above the ray gives a partial shadow, so the edges
+     * are soft. heights holds the highest surface of every screen cell, NONE for a missing one.
+     */
+    static float shadow(int[] heights, int w, int x, int z, int h, int top) {
+        int own = heights[z * w + x];
+        if (own != NONE && own > h) {
+            // Leaves straight above the ground of a canopy column.
+            return 1f;
+        }
+        float best = 0f;
+        for (int k = 0; k < STEP_X.length; k++) {
+            double ray = h + STEP_RISE[k];
+            if (ray >= top) {
+                break;
+            }
+            int sx = x + STEP_X[k];
+            int sz = z + STEP_Z[k];
+            if (sx < 0 || sz < 0 || sx >= w || sz >= w) {
+                break;
+            }
+            int o = heights[sz * w + sx];
+            if (o == NONE) {
+                continue;
+            }
+            double over = (o - ray + 0.5) / 1.5;
+            if (over > best) {
+                best = (float) Math.min(1.0, over);
+                if (best >= 1f) {
+                    break;
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Light kept by a top face at height t of screen cell x, z next to higher neighbours, from
+     * AO_FLOOR to 1. The four sides count fully and the four corners by half, each for at most two
+     * blocks of height above t, so a corner between two walls is darker than the foot of one wall.
+     */
+    static float topAo(int[] heights, int w, int x, int z, int t) {
+        float occ = 0f;
+        for (int dz = -1; dz <= 1; dz++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int nx = x + dx;
+                int nz = z + dz;
+                if ((dx == 0 && dz == 0) || nx < 0 || nz < 0 || nx >= w || nz >= w) {
+                    continue;
+                }
+                int o = heights[nz * w + nx];
+                if (o == NONE || o <= t) {
+                    continue;
+                }
+                occ += Math.min(2, o - t) * (dx == 0 || dz == 0 ? 1f : 0.5f);
+            }
+        }
+        return Math.max(AO_FLOOR, 1f - occ * AO_STEP);
+    }
+
+    /** True for a water column with dry land at or above its surface on one of its four sides. */
+    private static boolean shore(Columns a, int[] perm, int[] tsurf, int w, int x, int z) {
+        int t = tsurf[z * w + x];
+        return dry(a, perm, tsurf, w, x - 1, z, t) || dry(a, perm, tsurf, w, x + 1, z, t)
+                || dry(a, perm, tsurf, w, x, z - 1, t) || dry(a, perm, tsurf, w, x, z + 1, t);
+    }
+
+    private static boolean dry(Columns a, int[] perm, int[] tsurf, int w, int x, int z, int t) {
+        if (x < 0 || z < 0 || x >= w || z >= w) {
+            return false;
+        }
+        int j = z * w + x;
+        return tsurf[j] != NONE && tsurf[j] >= t && a.waterTop[perm[j]] < 0;
+    }
+
+    /** A colour under a share sh of full shadow, darker and leaning a little toward a cool tone. */
+    static int shadowed(int rgb, float sh) {
+        if (sh <= 0f) {
+            return rgb;
+        }
+        return mix(shade(rgb, 1f - SHADOW_DARK * sh), SHADOW_TONE, 0.10f * sh);
+    }
+
     private static void ground(Canvas cv, Columns a, Palette c, int s, int[] tsurf, int i, int south, int east, int north,
-                               int west, int cx, int row, int base, int u, int v) {
+                               int west, int cx, int row, int base, int u, int v, float sh, float ao, boolean shore,
+                               boolean glow) {
         int t = tsurf[i];
         int g = a.terrain[s];
         int tint = a.tint[s];
@@ -177,12 +356,18 @@ final class IsoRaster {
         int cy = row - (t - base) * v;
         for (int k = 0; k < Math.max(dropS, dropE); k++) {
             int y = t - k;
-            float ao = 1f - Math.min(0.35f, k * 0.03f);
+            float fade = 1f - Math.min(0.35f, k * 0.03f);
+            // The lowest row of a face, where it meets the ground in front, is a little darker.
+            float aoS = k == dropS - 1 && south >= 0 && tsurf[south] != NONE ? fade * 0.86f : fade;
+            float aoE = k == dropE - 1 && east >= 0 && tsurf[east] != NONE ? fade * 0.86f : fade;
             int cs;
             int ce;
-            if (y > g) {
-                cs = shade(wc, SOUTH * 0.9f * ao);
-                ce = shade(wc, EAST * 0.9f * ao);
+            if (y > g && glow) {
+                cs = shade(wc, 0.95f);
+                ce = shade(wc, 0.85f);
+            } else if (y > g) {
+                cs = shade(wc, SOUTH * 0.9f * aoS);
+                ce = shade(wc, EAST * 0.9f * aoE);
             } else {
                 int j = g - y;
                 int id = c.safe(a.ids[at + Math.min(Columns.DEPTH - 1, j)]);
@@ -190,8 +375,8 @@ final class IsoRaster {
                 if (c.clear[id]) {
                     id = groundId;
                 }
-                cs = shade(c.south(id, tint), SOUTH * ao * deep);
-                ce = shade(c.east(id, tint), EAST * ao * deep);
+                cs = shade(c.south(id, tint), SOUTH * aoS * deep);
+                ce = shade(c.east(id, tint), EAST * aoE * deep);
             }
             int fy = cy + k * v;
             if (k < dropS) {
@@ -203,27 +388,33 @@ final class IsoRaster {
         }
         float slope = slope(t, tsurf, north, west);
         int top;
-        if (water) {
+        if (glow) {
+            top = wc;
+        } else if (water) {
             int floor = shade(c.top(groundId, tint), TOP);
             int depth = t - g;
             float alpha = Math.min(0.9f, 0.55f + depth * 0.05f);
             top = shade(mix(floor, wc, alpha), TOP * (1f - Math.min(0.35f, depth * 0.02f)));
+            if (shore) {
+                top = mix(top, 0xFFFFFF, 0.16f);
+            }
+            top = shadowed(top, sh);
         } else {
-            top = shade(c.top(groundId, tint), TOP * slope);
+            top = shadowed(shade(c.top(groundId, tint), TOP * slope * ao), sh);
         }
         cv.rhombus(cx, cy, u, top | 0xFF000000);
         if (a.has(s, Columns.DECOR) && !water) {
             int lite = mix(c.top(c.safe(a.extra[s]), tint), 0xFFFFFF, 0.25f);
-            int sh = Math.max(1, v / 2);
-            int sy = cy - sh;
-            cv.faceLeft(cx, sy, u, sh, shade(lite, SOUTH) | 0xFF000000);
-            cv.faceRight(cx, sy, u, sh, shade(lite, EAST) | 0xFF000000);
-            cv.rhombus(cx, sy, u, shade(lite, TOP * slope) | 0xFF000000);
+            int hh = Math.max(1, v / 2);
+            int sy = cy - hh;
+            cv.faceLeft(cx, sy, u, hh, shade(lite, SOUTH) | 0xFF000000);
+            cv.faceRight(cx, sy, u, hh, shade(lite, EAST) | 0xFF000000);
+            cv.rhombus(cx, sy, u, shadowed(shade(lite, TOP * slope), sh) | 0xFF000000);
         }
     }
 
     private static void canopy(Canvas cv, Columns a, Palette c, int s, int[] surf, int i, int south, int east, int north,
-                               int west, int cx, int row, int base, int u, int v) {
+                               int west, int cx, int row, int base, int u, int v, float sh) {
         int ct = a.canopyTop[s];
         int g = a.terrain[s];
         int tint = a.tint[s];
@@ -255,7 +446,7 @@ final class IsoRaster {
                 cv.faceRight(cx, fy, u, v, shade(le, EAST * ao) | 0xFF000000);
             }
         }
-        cv.rhombus(cx, cy, u, shade(c.top(leafId, tint), TOP * slope(ct, surf, north, west)) | 0xFF000000);
+        cv.rhombus(cx, cy, u, shadowed(shade(c.top(leafId, tint), TOP * slope(ct, surf, north, west)), sh) | 0xFF000000);
     }
 
     /** Lighter when the column stands above the two behind it, darker when it sits below them. */

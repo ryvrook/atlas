@@ -454,8 +454,9 @@ Takes JSON. `{"code": "ABC123"}` links the browser and answers `{ok: true, viewe
 Snapshots of each world's tiles and stats, `timeline.perDay` a day, plus an event log. Dates are
 server local ISO dates such as `"2026-10-13"`. Each snapshot is a slot, a date and an hour such as
 `"2026-10-13T16"`. A plain date is a slot too. Days kept by Atlas 1.1 and older are plain dates, one slot
-each, and wherever a route takes `{slot}` a plain date means the last slot held that day, so addresses
-from before 1.2 keep working. Every timeline route answers 404 when `timeline.enabled` is false, for an
+each, and wherever a route takes `{slot}` a plain date means the day folder of that date when it holds a
+snapshot, as the day list names it, and otherwise the last slot held that day, so addresses from before
+1.2 keep working. Every timeline route answers 404 when `timeline.enabled` is false, for an
 unknown, disabled or hidden world, and for a slot that holds nothing. Slot tiles and the changed list
 follow `terrain`, every other timeline route follows `timeline`. A malformed slot answers 400.
 

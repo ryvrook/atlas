@@ -36,10 +36,13 @@
   // day held to today, date naming the slot and cal its calendar day. A day with no slot at all is one step. Its kind
   // is snap (a snapshot), events (events only, the map of the snapshot before it), pruned (removed by retention, a
   // gap) or missing (nothing was kept that day, also a gap).
-  const SPEEDS = [500, 1000, 2000];
+  // Playback speeds in milliseconds a step. A stored speed that is not one of them falls back to one second.
+  const SPEEDS = [500, 1000, 2000, 3000, 5000, 10000];
+  const speedName = (v) => (v / 1000) + " s a step";
+  const storedSpeed = Number(A.store.get("tlSpeed", 1000));
   const T = A.tl = {
-    world: null, info: null, error: null, slots: [], index: -1, playing: false, timer: null,
-    speed: SPEEDS.includes(A.store.get("tlSpeed", 1000)) ? A.store.get("tlSpeed", 1000) : 1000,
+    world: null, info: null, error: null, slots: [], index: -1, playing: false, timer: null, run: null, lastRun: "",
+    speed: SPEEDS.includes(storedSpeed) ? storedSpeed : 1000,
     changedOn: A.store.get("tlChanged", true), barOpen: A.store.get("tlBar", false),
     stats: new Map(), events: new Map(), changed: new Map(), live: null, liveAt: 0, liveKey: "",
     want: null, off: new Set(A.store.get("tlOff", [])), seq: 0, statsWanted: false
@@ -99,6 +102,7 @@
     statsQueue = [];
     if (state.tlDate) goLive(true);
     T.index = -1;
+    T.lastRun = "";
   }
   A.on("world", (name) => { if (name !== T.world) { reset(name); sync(); } });
 
@@ -120,7 +124,14 @@
       T.slots = buildSlots(T.info);
       const i = keep ? T.slots.findIndex((s) => s.date === keep) : -1;
       if (keep && selectable(T.slots[i])) T.index = i;
+      else if (keep && T.run) finish();
       else if (keep) goLive(true);
+      // A snapshot that lands during a run joins it, so the count in the chip stays right.
+      if (T.run) {
+        let total = T.run.step;
+        for (let k = T.index + 1; k < T.slots.length; k++) if (selectable(T.slots[k])) total++;
+        T.run.total = total;
+      }
       if (T.want) {
         const w = T.want;
         T.want = null;
@@ -174,8 +185,10 @@
     const nx = nextIndex(i, 1);
     if (nx != null && nx >= 0 && T.slots[nx].tiles) A.preloadDay(T.slots[nx].tiles);
     if (!was) A.closeCtx();
+    T.lastRun = "";
     saveUrlSoon();
     sync();
+    if (T.playing) flash();
   }
   function goLive(quiet) {
     stop();
@@ -208,37 +221,93 @@
   const saveUrlSoon = A.throttle(() => A.saveUrl(), 400);
 
   // ---- playing --------------------------------------------------------------
-  // Play runs from the selected day to the newest one, one day per step, and stops there. From the live map or
-  // the newest day it starts again at the first day held.
+  // Play runs from the selected slot to the newest one, one slot per step. The newest slot stays up for one
+  // step, then the live map returns and a toast says what was played. From the live map or the newest slot it
+  // starts again at the first slot held. A slot with events only that shows the same map as the step before
+  // passes in half the time and says so, so playback never looks stuck on it.
+  // Play needs two snapshots. A day with events only shows the map of the snapshot before it, so it adds no step of its own.
+  const playable = () => T.slots.filter((s) => s.kind === "snap").length;
+  // Why Play cannot run, or an empty string when it can.
+  function playBlock() {
+    if (!available()) return "The timeline has no snapshot yet";
+    if (playable() >= 2) return "";
+    const at = T.info && T.info.nextRunAt;
+    return "Play needs at least two snapshots" + (at ? ", the next is taken " + (A.isToday(at) ? "at " + A.clock(at) : "on " + A.date(at) + " at " + A.clock(at)) : "");
+  }
+  // True for a slot with events only whose map is the one of the slot before it.
+  function sameMap(i) {
+    const s = T.slots[i];
+    if (!s || s.kind !== "events") return false;
+    const j = nextIndex(i, -1);
+    return j != null && j >= 0 && T.slots[j].tiles === s.tiles;
+  }
+  function tally(s) {
+    const r = T.run;
+    if (!r || !s) return;
+    r.step++;
+    r.to = s.date;
+    if (s.kind === "snap") r.snaps++; else r.events++;
+  }
   function play() {
     if (!available()) return;
     if (T.playing) { stop(); return; }
-    if (T.index < 0 || nextIndex(T.index, 1) === -1) {
-      const first = T.slots.findIndex(selectable);
-      if (first < 0) return;
-      select(first);
-    }
+    const why = playBlock();
+    if (why) { A.toast(why); syncPlay(); return; }
+    let start = T.index;
+    if (start < 0 || nextIndex(start, 1) === -1) start = T.slots.findIndex(selectable);
+    let total = 0;
+    for (let i = start; i >= 0 && i < T.slots.length; i++) if (selectable(T.slots[i])) total++;
     T.playing = true;
+    T.run = { from: T.slots[start].date, to: null, step: 0, total, snaps: 0, events: 0 };
+    tally(T.slots[start]);
+    if (start !== T.index) select(start); else { sync(); flash(); }
     schedule();
-    sync();
   }
   function schedule() {
     clearTimeout(T.timer);
     T.timer = setTimeout(() => {
+      T.timer = null;
       if (!T.playing) return;
       const i = nextIndex(T.index, 1);
-      if (i == null || i < 0) { stop(); return; }
+      if (i == null || i < 0) { finish(); return; }
+      tally(T.slots[i]);
       select(i);
-      if (nextIndex(i, 1) === -1) { stop(); return; }
       schedule();
-    }, T.speed);
+    }, sameMap(T.index) ? Math.max(250, T.speed / 2) : T.speed);
+  }
+  // The end of a run. The live map comes back and the toast and the Timeline tab say what was played.
+  function finish() {
+    const r = T.run;
+    goLive();
+    if (!r) return;
+    const parts = [];
+    if (r.snaps) parts.push(A.plural(r.snaps, "snapshot"));
+    if (r.events) parts.push(r.events === 1 ? "1 day of events only" : r.events + " days of events only");
+    const to = r.to || r.from;
+    const span = parseIso(to) === parseIso(r.from) ? " of " + dayName(r.from) + (to !== r.from && hourName(to) ? " up to " + hourName(to) : "")
+      : " from " + slotName(r.from) + " to " + slotName(to);
+    T.lastRun = "Played " + parts.join(" and ") + span + ".";
+    A.toast(T.lastRun + " Back on the live map.");
+    drawTabSoon();
   }
   function stop() {
+    T.run = null;
     if (!T.playing && !T.timer) return;
     T.playing = false;
     clearTimeout(T.timer);
     T.timer = null;
     syncPlay();
+    drawChip();
+  }
+  // A short pulse on the label and the chip at each step, so a step shows even when the map barely changes.
+  function flash() {
+    for (const id of ["tl-label", "tl-chip", "tl-badge"]) {
+      const el = $(id);
+      if (!el) continue;
+      el.classList.remove("tl-flash");
+      void el.offsetWidth;
+      el.classList.add("tl-flash");
+    }
   }
   function setSpeed(v) {
     v = Number(v);
@@ -548,7 +617,8 @@
     // The hour of the slot sits under the date while the server keeps more than one snapshot a day.
     const hour = s && perDayShown() ? hourName(s.date) : "";
     range.setAttribute("aria-valuetext", s ? label + (hour ? ", " + hour : "") + (s.kind === "events" ? ", events only" : "") : "Live map");
-    const lh = esc(label) + (hour ? "<small class='tl-hour'>" + esc(hour) + "</small>" : "");
+    const sub = [hour, s && s.kind === "events" ? (T.playing && sameMap(T.index) ? "events only, same map" : "events only") : ""].filter(Boolean).join(", ");
+    const lh = esc(label) + (sub ? "<small class='tl-hour'>" + esc(sub) + "</small>" : "");
     if ($("tl-label")._h !== lh) { $("tl-label").innerHTML = lh; $("tl-label")._h = lh; }
     $("tl-label").classList.toggle("past", !!s);
     const first = T.slots.find(selectable);
@@ -560,12 +630,16 @@
     drawStrip();
   }
   function syncPlay() {
+    // A blocked Play stays focusable and keeps its tooltip, and a press says why it cannot run.
+    const why = T.playing ? "" : playBlock();
     for (const id of ["tl-play", "tl-t-play"]) {
       const b = $(id);
       if (!b) continue;
       const lbl = T.playing ? "Pause the timeline" : "Play the timeline";
-      b.setAttribute("aria-label", lbl);
+      b.setAttribute("aria-label", why ? lbl + ". " + why : lbl);
       b.setAttribute("aria-pressed", String(T.playing));
+      b.setAttribute("aria-disabled", String(!!why));
+      b.title = why || (T.playing ? "Pause (space)" : "Play every snapshot up to now (space)");
       const u = b.querySelector("use");
       if (u) u.setAttribute("href", T.playing ? "#i-pause" : "#i-play");
       const t = b.querySelector(".lbl");
@@ -580,8 +654,10 @@
       chip.innerHTML = A.icon("history", "sm") + "<span id='tl-chip-txt'></span><button class='btn small' id='tl-live'>Return to live</button>";
       $("tl-live").addEventListener("click", () => goLive());
     }
-    const note = s.kind === "events" ? (s.tiles ? "map of " + slotName(s.tiles) : "no map that day") : s.day && s.day.partial ? "some tiles from the snapshot before" : "";
-    const h = "Viewing <b>" + esc(slotName(s.date, true)) + "</b>" + (note ? " <span class='muted'>" + esc(note) + "</span>" : "");
+    const r = T.playing && T.run;
+    const note = s.kind === "events" ? (r && sameMap(T.index) ? "events only, same map" : s.tiles ? "events only, map of " + slotName(s.tiles) : "no map that day") : s.day && s.day.partial ? "some tiles from the snapshot before" : "";
+    const h = (r ? "Playing" : "Viewing") + " <b>" + esc(slotName(s.date, true)) + "</b>" + (r ? " <span class='tl-step'>" + r.step + " of " + r.total + "</span>" : "") +
+      (note ? " <span class='muted'>" + esc(note) + "</span>" : "");
     const t = $("tl-chip-txt");
     if (t._h !== h) { t.innerHTML = h; t._h = h; }
     chip.hidden = false;
@@ -605,6 +681,7 @@
     drawTabSoon();
   }
 
+  $("tl-speed").innerHTML = SPEEDS.map((v) => "<option value='" + v + "'>" + speedName(v) + "</option>").join("");
   $("tl-play").addEventListener("click", play);
   $("tl-speed").addEventListener("change", (e) => setSpeed(e.target.value));
   $("tl-changed").addEventListener("click", () => setChanged(!T.changedOn));
@@ -657,7 +734,7 @@
     if (available() && !T.barOpen) { T.barOpen = true; layout(); drawBar(); }
     if (body.dataset.view !== "timeline") {
       body.dataset.view = "timeline";
-      const speeds = SPEEDS.map((v) => "<option value='" + v + "'>" + (v / 1000) + " s a day</option>").join("");
+      const speeds = SPEEDS.map((v) => "<option value='" + v + "'>" + speedName(v) + "</option>").join("");
       body.innerHTML = A.head("Timeline", "<span class='badge' id='tl-badge'></span>") + "<div id='tl-msg'></div><div id='tl-keys' class='kp-list' hidden></div>" +
         "<div id='tl-main'><div class='tl-ctl'>" +
         "<button class='icon-btn' id='tl-t-prev' aria-label='Previous day' title='Previous day (left arrow)'>" + A.icon("back") + "</button>" +
@@ -754,6 +831,7 @@
       if (last) h += " The newest snapshot is of " + esc(slotName(last.date)) + (last.day.takenAt ? ", taken " + esc(A.stamp(last.day.takenAt)) : "") + ".";
       if (info.nextRunAt) h += " The next one is due " + esc(A.stamp(info.nextRunAt)) + ".";
       h += " Pick a day on the slider or press play.</div>";
+      if (T.lastRun) h += "<div class='note'>" + esc(T.lastRun) + "</div>";
       const withViews = T.slots.slice().reverse().find((x) => x.kind === "snap" && isoViewsOf(x).length);
       return h + (withViews ? isoHtml(withViews, true) : "");
     }

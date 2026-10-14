@@ -26,7 +26,7 @@ class IsoCacheTest {
         IsoView v = new IsoView("my world", 1, 2, 3, 90, 2);
         String k = IsoCache.key(IsoCache.folder(v.world()), v, 7);
         assertTrue(k.startsWith("my_world-"));
-        assertTrue(k.endsWith("/1_2_r3_a90_s2_t7.png"));
+        assertTrue(k.endsWith("/1_2_r3_a90_s2_t7_v" + IsoRaster.STYLE + ".png"));
         assertFalse(k.equals(IsoCache.key(IsoCache.folder(v.world()), v, 8)));
     }
 
@@ -139,6 +139,19 @@ class IsoCacheTest {
         Files.setLastModifiedTime(tmp, FileTime.fromMillis(1));
         new IsoCache(dir, 1000).load();
         assertFalse(Files.exists(tmp));
+    }
+
+    @Test
+    void viewsFromAnOlderRendererAreRemovedOnLoad(@TempDir Path dir) throws Exception {
+        Path w = Files.createDirectories(dir.resolve("default"));
+        Path old = Files.writeString(w.resolve("0_0_r1_a0_s2_t1.png"), "x");
+        IsoView v = new IsoView("default", 0, 0, 1, 0, 2);
+        Path now = Files.writeString(w.resolve(v.fileName(1)), "y");
+        IsoCache c = new IsoCache(dir, 1000);
+        c.load();
+        assertFalse(Files.exists(old));
+        assertTrue(Files.exists(now));
+        assertEquals(1, c.keys().size());
     }
     @Test
     void viewsWithoutAFileLeaveTheIndexWhenTheyLeaveMemory(@TempDir Path dir) throws Exception {

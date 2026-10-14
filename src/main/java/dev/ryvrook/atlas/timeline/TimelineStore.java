@@ -39,8 +39,8 @@ import java.util.TreeSet;
  *
  * Worlds live under worlds so that no world name can meet the blobs folder. A slot is a server local
  * date and hour such as 2026-10-13T16, see Slots. A folder named by a plain date, as Atlas 1.0 and 1.1
- * wrote them, is a slot of its own, and a plain date given to any method here means the last slot
- * held that day. Retention counts days, and a day is pruned with all of its slots.
+ * wrote them, is a slot of its own, and a plain date given to any method here means that folder when
+ * it holds a snapshot and otherwise the last slot held that day. Retention counts days, and a day is pruned with all of its slots.
  */
 public final class TimelineStore {
     static final String TILES = "tiles.json";
@@ -86,7 +86,7 @@ public final class TimelineStore {
         return root.resolve("worlds").resolve(TileKeys.safe(world));
     }
 
-    /** The folder of a slot. A plain date names the last slot held that day, or its own folder when there is none. */
+    /** The folder of a slot. A plain date names its own folder when it holds a snapshot, or else the last slot held that day. */
     public Path dayDir(String world, String slot) {
         return worldDir(world).resolve(resolve(world, slot));
     }
@@ -97,12 +97,18 @@ public final class TimelineStore {
     }
 
     /**
-     * The slot a name stands for. A slot with an hour is itself. A plain date is the last slot of that
-     * day that holds a snapshot or a tombstone, the plain date folder itself when no slot with an hour
-     * does.
+     * The slot a name stands for. A slot with an hour is itself. A plain date is its own folder when that
+     * folder holds a snapshot or a tombstone, as on the day a server moved from Atlas 1.1 to several
+     * snapshots a day. The day list names that folder as a slot of its own, so it has to stay reachable.
+     * Otherwise a plain date is the last slot of that day that holds a snapshot or a tombstone, and the
+     * plain date itself when none does.
      */
     public String resolve(String world, String slot) {
         if (slot == null || slot.length() != 10 || !validDate(slot)) {
+            return slot;
+        }
+        Path own = worldDir(world).resolve(slot);
+        if (Files.isRegularFile(own.resolve(TILES)) || Files.isRegularFile(own.resolve(TOMBSTONE))) {
             return slot;
         }
         String best = null;

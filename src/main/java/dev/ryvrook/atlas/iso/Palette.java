@@ -36,6 +36,8 @@ public final class Palette {
     final boolean[] trunk;
     /** Fluid id to colour. */
     final int[] fluid;
+    /** Fluids that give off light, like lava, drawn at full brightness and never shaded. */
+    final boolean[] fluidGlow;
     /** Block types with a colour, for status. */
     final int types;
 
@@ -53,6 +55,7 @@ public final class Palette {
         leaf = new boolean[n];
         trunk = new boolean[n];
         fluid = new int[Math.max(1, fluids)];
+        fluidGlow = new boolean[fluid.length];
         java.util.Arrays.fill(tintUp, 0xFFFFFF);
         java.util.Arrays.fill(tintSouth, 0xFFFFFF);
         java.util.Arrays.fill(tintEast, 0xFFFFFF);
@@ -130,6 +133,9 @@ public final class Palette {
             if (f != null && f.getParticleColor() != null) {
                 c.fluid[id] = rgb(f.getParticleColor());
             }
+            if (f != null && f.getLight() != null) {
+                c.fluidGlow[id] = true;
+            }
         }
         return c;
     }
@@ -156,6 +162,10 @@ public final class Palette {
 
     int east(int id, int biome) {
         return tinted(base[id], tintEast[id], bioEast[id], biome);
+    }
+
+    boolean glows(int fluidId) {
+        return fluidId >= 0 && fluidId < fluidGlow.length && fluidGlow[fluidId];
     }
 
     int water(int fluidId) {

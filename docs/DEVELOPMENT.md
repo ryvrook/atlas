@@ -384,12 +384,20 @@ block type's texture computed colour, with the particle colour or grey as fallba
 tint is applied per face. The table is rebuilt after an asset reload. `IsoRaster` draws one column
 per block in depth order into an int array. Side faces at the edge and next to missing chunks drop a
 fixed skirt of 12 blocks, leaf canopies drop at most three blocks with the trunk drawn under them,
-and missing chunks are a grey floor. `PngEncoder` writes with the Sub filter and the fastest deflate
+and missing chunks are a grey floor. The light is fixed on screen, from the front left. Every top face
+takes a soft cast shadow from a walk of at most 24 blocks toward the light over the highest surfaces,
+trees included, bounded per 8 by 8 square of cells so open ground stops after a step or two. Water
+takes its shadow on the surface. Top faces darken a little next to higher neighbours, the lowest row of
+a side face is darker where it meets the ground, water is lighter along the shore, and a fluid that
+gives off light, like lava, is never shaded. `PngEncoder` writes with the Sub filter and the fastest deflate
 level. `IsoView` lowers the scale so a side stays within 1,100 block pixels.
 
 `IsoCache` keys a view on the world, centre chunk, radius, direction, scale and a six hour bucket. It
 keeps an LRU in memory within `isoCacheMb` and files under `iso/<world>/` within `isoDiskMb`, oldest
-first out. Partial views stay in memory for a minute and never reach disk. `IsoSnapshots` draws the
+first out. File names end in `_v<style>`, the `IsoRaster.STYLE` of the renderer that drew them, and a
+file of another style is deleted when the cache loads, so a change to the pictures reaches every view.
+Bump `STYLE` whenever the same chunks would draw differently. The key place fingerprint mixes it in
+too, so key places are drawn again once after such a change. Partial views stay in memory for a minute and never reach disk. `IsoSnapshots` draws the
 daily areas into `iso/` of the day folder with an `index.json`, which the day list reads as
 `isoViews`, and a sweep every ten minutes removes the views of days that were pruned.
 

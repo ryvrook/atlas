@@ -560,6 +560,13 @@ path.tl-changed { fill: var(--accent); fill-opacity: .26; stroke: var(--accent);
 .tl-chip { border-color: color-mix(in srgb, var(--accent) 55%, transparent); padding: 4px 4px 4px 10px; }
 .tl-chip > .ic { color: var(--accent); }
 .tl-chip b { font-weight: 650; }
+.tl-chip .tl-step { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+/* A blocked Play keeps its tooltip, so it is dimmed instead of disabled. */
+#tl-play[aria-disabled="true"], #tl-t-play[aria-disabled="true"] { opacity: .45; cursor: not-allowed; filter: none; }
+/* Each step of a playback pulses the label, the chip and the tab badge once. */
+.tl-flash { animation: tl-flash .7s var(--ease); }
+@keyframes tl-flash { 0% { outline: 3px solid var(--accent); outline-offset: 1px; } 100% { outline: 3px solid transparent; outline-offset: 6px; } }
+@media (prefers-reduced-motion: reduce) { .tl-flash { animation: none; } }
 
 /* Timeline tab */
 .tl-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 10px; }
@@ -797,3 +804,11 @@ progress::-moz-progress-bar { background: var(--accent); border-radius: 3px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
 }
+
+/* Compass of the 3D view. The needle points north on screen for the direction the view is seen from. */
+.iso-compass { position: absolute; left: 10px; bottom: 10px; z-index: 2; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 650; padding: 4px 10px 4px 4px; border-radius: 4px; background: rgba(22, 18, 14, .72); color: #f7f0e4; pointer-events: none; }
+.iso-compass[hidden] { display: none; }
+.iso-needle { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; border: 1px solid rgba(247, 240, 228, .35); }
+.iso-needle svg { width: 20px; height: 20px; fill: #ef7a5c; transition: transform var(--dur); }
+.iso-needle svg .s { fill: rgba(247, 240, 228, .7); }
+.iso-n { font-size: 11px; margin-right: 2px; color: #ef7a5c; }

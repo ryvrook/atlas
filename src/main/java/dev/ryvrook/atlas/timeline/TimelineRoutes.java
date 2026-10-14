@@ -55,7 +55,7 @@ public final class TimelineRoutes {
         return atlas.config();
     }
 
-    static final String SLOT_FORMAT = "The slot must look like 2026-01-31T16, or a date such as 2026-01-31 for the last slot of that day.";
+    static final String SLOT_FORMAT = "The slot must look like 2026-01-31T16, or a date such as 2026-01-31 for the snapshot of Atlas 1.1 that day or else its last slot.";
 
     private static Atlas.ApiResult error(int status, String message) {
         return new Atlas.ApiResult(status, Payloads.error(message));

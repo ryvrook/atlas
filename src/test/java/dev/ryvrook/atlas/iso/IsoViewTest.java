@@ -76,10 +76,12 @@ class IsoViewTest {
     void fileNamesRoundTrip() {
         IsoView v = new IsoView("default", -3, 12, 5, 270, 1);
         String name = v.fileName(4242);
-        assertEquals("-3_12_r5_a270_s1_t4242.png", name);
+        assertEquals("-3_12_r5_a270_s1_t4242_v" + IsoRaster.STYLE + ".png", name);
         IsoView.Named n = IsoView.parseName("default", name);
         assertEquals(v, n.view());
         assertEquals(4242, n.bucket());
+        assertEquals(IsoRaster.STYLE, n.style());
+        assertEquals(1, IsoView.parseName("default", "-3_12_r5_a270_s1_t4242.png").style());
         assertNull(IsoView.parseName("default", "../x.png"));
         assertTrue(v.covers(-8, 17));
         assertTrue(!v.covers(-9, 12));
