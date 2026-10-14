@@ -108,7 +108,8 @@ Viewer      {linked: bool, name: string|null, faction: string|null, admin: bool,
 Server      {apiVersion: 1, title: string, publicUrl: string|null, version: string, now: ms,
              uptimeSeconds: int, betterMap: bool}
 Party       {name: string, uuid: string|null, type: string, player: bool, boss: bool}
-Kill        {at: ms, world: string|null, victim: Party, killer: Party|null, cause: string|null, ranged: bool}
+Kill        {at: ms, world: string|null, victim: Party, killer: Party|null, cause: string|null, ranged: bool,
+             x: int|null, z: int|null}
 FeedLine    {at: ms, type: string, text: string, source: "atlas"|"dominion", world: string|null}
 ChatLine    {at: ms, name: string, tag: string|null, text: string}
 Siege       {id: string|null, attacker: string|null, defender: string|null, phase: string|null, world: string,
@@ -121,6 +122,12 @@ NationRef   {tag: string, name: string, color: string|null}
 - `layers` has one key per visibility layer, which are players, paths, lastSeen, territories, points,
   events, zones, factions, nations, stats, terrain, heat, feed, chat, kills, markers, worldevents,
   leaderboard, layers, timeline and iso.
+- `Kill.x` and `Kill.z` are the block where the victim died. They are null for kills recorded by older
+  releases, when the position could not be read, and when the live map would not have shown a player
+  of the kill where they stood (below `hideBelowY`, crouching or invisible under a hide rule, or in their
+  own territory with `hidePlayersInOwnTerritory` on). Such places are never stored. For non admins they
+  are snapped to the chunk corner, and they are null when either player of the kill is hidden from the
+  viewer or the world is one the viewer may not open.
 - `Party.uuid` is null for creatures and for hidden players. `Party.type` is the creature role id, or
   `"Player"` for players.
 - `FeedLine.world` names the world a line is about (deaths, boss kills and world events written by
@@ -467,7 +474,8 @@ follow `terrain`, every other timeline route follows `timeline`. A malformed slo
  today: string, currentSlot: string, days: [Slot]}
 
 Slot    {slot: string, date: string, hour: int|null, window: [int, int], snapshot: bool, pruned: bool,
-         takenAt: ms|null, tiles: int, changed: int, partial: bool, events: int, stats: bool, isoViews: [IsoDay]}
+         takenAt: ms|null, tiles: int, carried: int, changed: int, partial: bool, events: int, stats: bool,
+         isoViews: [IsoDay]}
 IsoDay  {label: string, x: int, z: int, radius: int, file: string}
 IsoKey  IsoDay and {name: string, azimuth: int, scale: int, keyPlace: true, unchanged: bool, sameAs: string|null}
 ```
@@ -477,9 +485,17 @@ hours of a day and `currentSlot` the slot a snapshot taken now belongs to. Days 
 such as today before its first snapshot, are one row with `slot` set to the date and `snapshot: false`.
 A pruned slot stays listed with `pruned: true` so a slider can show a gap. `nextRunAt` is null while the
 timeline is off. `partial` means some tiles were being redrawn during the snapshot and kept their image
-from the slot before. `window` is the hours of the day whose events belong to the slot, from its own
-hour (midnight for the first slot of a day) to the hour of the next slot that day (24 for the last), and
-`events` counts the stored lines in it.
+from the slot before. `tiles` counts every tile the slot shows, and `carried` how many of those were
+missing from the tile folder while the snapshot ran and keep the image of an earlier slot. `changed`
+counts the tiles whose image differs from the slot before. A tile carried from the slot before has its
+image and is not counted. One carried from an earlier snapshot of the same slot, taken again, is counted
+when that image differs from the slot before. For a
+slot taken by an older release both are worked out from the earlier slots the same way the tile route does.
+`window` is the hours of the day whose events belong to the slot, from its own hour (midnight for the
+first slot of a day) to the hour of the next slot that day (24 for the last), and `events` counts the
+stored lines in it. A plain date slot on a day that also has slots with an hour comes first, so it
+covers midnight up to the first of them. Alone on its day it covers the whole day. Every event of a day
+therefore belongs to exactly one row.
 
 `isoViews` lists the 3D views of the slot's day, empty when there are none or the slot was pruned. They
 are drawn once a day with the first slot, and every slot of the day lists them. `file` is the relative
@@ -499,9 +515,13 @@ is held, `file` points into it, so a browser loads the picture once.
 ### GET /api/timeline/{world}/{slot}/tiles/{zoom}/{x}/{z}.png
 
 The tile as it was in that slot, with the same coordinates as `/api/tiles`. PNG with a strong `ETag`
-and 304. Slots of past days are cached for a year as immutable, today's for five minutes. A tile that did
-not exist then, or a slot without a snapshot, answers 404 without a body. Counts against the tile rate
-limit.
+and 304. Slots of past days are cached for a year as immutable, today's for five minutes. Snapshots hold
+every tile of every zoom, since a tile missing from the live tile folder at that moment keeps the image
+it had in the slot before. A slot taken by an older release that lacks a tile answers with the image of the
+newest earlier slot that holds it, looking back to the newest complete snapshot or else the oldest slot
+held, so the map has no holes. The answer is the same whatever was asked before. The `ETag`
+is that image's. A tile no slot up to then held, or a slot without a snapshot, answers 404 without a
+body. Counts against the tile rate limit.
 
 ### GET /api/timeline/{world}/{slot}/changed
 
@@ -511,8 +531,11 @@ limit.
 {world: string, date: string, slot: string, previous: string|null, first: bool, tiles: [[zoom, x, z]]}
 ```
 
-The tiles whose image differs from the previous snapshot slot of the world, at every zoom. In the first
-slot held, `first` is true, `previous` is null and every tile is listed.
+The tiles whose image differs from the previous snapshot slot of the world, at every zoom, both slots
+taken with every tile they show as the tile route serves them. A tile carried over from the slot before
+is not listed. `previous` is the slot compared with. For a slot taken by an older release whose previous
+slot was pruned, that is the newest earlier slot still held. In the oldest slot held, `first` is true,
+`previous` is null and every tile is listed.
 
 ### GET /api/timeline/{world}/{slot}/stats
 
@@ -545,8 +568,18 @@ Oldest first. `kind` is one of `join`, `leave`, `death`, `kill`, `worldevent.sta
 `worldevent.end`, `feats.unlock`, `feats.milestone`, `feats.first`, `dominion`, `marker.add`,
 `marker.remove`, `snapshot` and `dropped`, or another lowercase dotted kind, which clients show as a
 plain line. Events are kept per day, and a slot answers the events of its `window`, the same hours
-as in the day list. A plain date that has no slot folder of its own answers the whole day. A day holds
-at most 5,000 events, then one `dropped` event with `dropped: true` and nothing after it.
+as in the day list, so two slots of a day never list the same event. A plain date that has a slot
+folder of its own answers that slot, the hours before the first slot with an hour that day or the whole
+day when it is the only one. A plain date without a folder of its own stands for the last slot of the
+day. A day with events but no snapshot answers the whole day. A day holds at most 5,000 events, then
+one `dropped` event with `dropped: true` and nothing after it.
+
+`x` and `z` are the block where it happened. `join` and `leave` carry where the player stood, `death`
+and `kill` where the victim died, and `feats.*` where the player stood when they were online at the
+unlock. They are null for events recorded by older releases, for feats of offline players, when the
+position could not be read, and when the live map would not have shown the player there. That is below
+`hideBelowY`, crouching or invisible under a hide rule, or in their own territory with
+`hidePlayersInOwnTerritory` on. Those places are never stored, so admins get null too.
 
 ### GET /api/timeline/{world}/events
 
@@ -575,7 +608,8 @@ Admins only. Takes `from` and `to`, both dates, inclusive, at most 90 days apart
 is built, with `Content-Type: application/zip` and `Content-Disposition: attachment`. The zip holds
 `README.txt`, then per day `days/{date}/events.jsonl` and per slot of that day `days/{slot}/tiles.json`,
 `stats.json` and `iso/` (its views and `index.json`) when present, then every tile image those slots
-name, once, as `blobs/{hash}.png`.
+name, once, as `blobs/{hash}.png`. Each `tiles.json` names every tile the slot shows, those taken from
+earlier slots included, so a slot whose earlier slots are outside the range is still whole.
 
 - 403 for non admins.
 - 400 for missing or malformed dates, `from` after `to`, or a longer range.
@@ -583,16 +617,19 @@ name, once, as `blobs/{hash}.png`.
 - 429 past `tileRequestsPerMinute` per address, next to the API limit.
 - The timeline 404 rules.
 
-Files are copied as stored, so player names are not hidden. That is why the route is admin only.
+Events and stats are copied as stored, so player names are not hidden. That is why the route is admin
+only.
 
 ### Timeline visibility per event
 
 Items are filtered when served. `kill` and `death` follow `kills`, `worldevent.*` follows
 `worldevents`, `feats.*` follows `leaderboard`, `marker.*` follows `markers`, `snapshot` and
 `dropped` need only `timeline`, and everything else follows `feed`. For non admins a hidden player
-other than the viewer is `"A player"` in `who` and in `text`, and `join`, `leave`, `kill` and `death`
-of a hidden player lose `x` and `z`. Those four kinds are snapped to the chunk corner for non admins
-other than the player.
+other than the viewer is `"A player"` in `who` and in `text`, and every event of a hidden player
+loses `x` and `z`, whatever its kind. So does an event whose text names another hidden player, such as
+a kill by a hidden player, and an event of a player in another faction while the layer of its kind is
+limited to the viewer's faction. `join`, `leave`, `kill`, `death` and `feats.*` are snapped to the
+chunk corner for non admins other than the player.
 
 ## 3D views
 

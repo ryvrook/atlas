@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -36,6 +37,23 @@ class TimelineRoutesTest {
         assertNull(TimelineRoutes.layerOf("snapshot"));
         assertTrue(TimelineRoutes.personal("leave"));
         assertFalse(TimelineRoutes.personal("worldevent.start"));
+    }
+
+    @Test
+    void placesFollowTheHiddenRule() {
+        // A hidden player's event has no place for others, whatever its kind.
+        assertArrayEquals(new Integer[]{null, null}, TimelineRoutes.place("feats.unlock", 100, 200, false, false, true));
+        assertArrayEquals(new Integer[]{null, null}, TimelineRoutes.place("join", 100, 200, false, false, true));
+        assertArrayEquals(new Integer[]{null, null}, TimelineRoutes.place("marker.add", 100, 200, false, false, true));
+        // Admins and the player themself see the exact place.
+        assertArrayEquals(new Integer[]{100, 200}, TimelineRoutes.place("death", 100, 200, true, false, true));
+        assertArrayEquals(new Integer[]{100, 200}, TimelineRoutes.place("death", 100, 200, false, true, false));
+        // Other people's places are snapped to the chunk corner.
+        assertArrayEquals(new Integer[]{96, -32}, TimelineRoutes.place("feats.first", 100, -1, false, false, false));
+        assertArrayEquals(new Integer[]{96, 192}, TimelineRoutes.place("leave", 100, 200, false, false, false));
+        assertArrayEquals(new Integer[]{100, 200}, TimelineRoutes.place("worldevent.start", 100, 200, false, false, false));
+        assertArrayEquals(new Integer[]{null, null}, TimelineRoutes.place("join", null, 200, false, false, false));
+        assertTrue(TimelineRoutes.personal("feats.unlock"));
     }
 
     @Test

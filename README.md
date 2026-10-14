@@ -47,7 +47,7 @@ mod.
 
 ## Install
 
-1. Build `Atlas-1.3.0.jar` from source (see below), or download it from the Releases page once one is published.
+1. Build `Atlas-1.4.0.jar` from source (see below), or download it from the Releases page once one is published.
 2. On a dedicated server, put the jar in the `mods` folder inside the server's working directory, the folder you start `HytaleServer.jar` from. For a singleplayer world, use the `Mods` folder in Hytale's `UserData` folder.
 3. Start the server. On first start Atlas creates its data folder `mods/Ryvrook_Atlas`, writes `atlas.json` there and listens on port 8123.
 4. Open `http://<server address>:8123/` in a browser.
@@ -297,23 +297,32 @@ hatched gap.
 | `maxDiskMb` | `2048` | Disk the timeline may use in MB. 0 means no cap |
 | `events` | `true` | Write the daily event log |
 
-**In the browser.** The Timeline tab and the clock button under the map controls open a slider bar.
-Each step is one slot, from the oldest day held to today, with the hour under the date, and the far
-right end is the live map. A day with nothing kept is one step of its own.
-Picking a slot swaps the live tiles for the tiles of that slot, dims the live overlays and shows a
-Viewing chip with a Return to live button. The events of the slot's hours appear as markers on the map
-and as a list with filters by kind and a Show button. The diamond button tints the tiles that changed
-since the slot before. A day with events but no snapshot shows the map of the snapshot before it and
-says so. The play button steps through the slots at 0.5, 1, 2, 3, 5 or 10 seconds a step. From the live
-map or the newest slot it starts at the oldest slot held. The chip names each slot as it plays with its
-place in the run, such as 2 of 3, and a slot with events only that shows the same map as the step
-before passes in half the time and says events only, same map. After the newest slot the live map
-returns and a toast says what was played. Play needs at least two snapshots, and until then its tooltip
-says when the next snapshot is due.
-The tab also shows the figures of the picked slot and small charts over every slot held, and clicking a
-chart jumps to that slot. While the bar is open, the left and right arrows step a slot, space plays and
-pauses, and Home or Esc return to the live map. When a snapshot finishes, open pages add the new slot by
-themselves.
+**In the browser.** The Timeline tab and the clock button under the map controls open a track along
+the bottom of the page. It is a time axis from the oldest day held to the live map at the right end, with
+day labels, a picture mark for each snapshot, a cube mark for a snapshot that also holds 3D views, a
+short tick for a slot with events only, a hatched block for a day removed by retention, and a bar under
+each slot that grows with its events. A legend names the marks. Hover a mark, or move along the focused
+track with the arrow keys, to see a card with the slot's tiles, changed tiles, events and a 3D
+thumbnail. Click or drag anywhere on the track to move through time.
+Picking a slot cross fades the live tiles into the tiles of that slot, dims the live overlays and shows a
+Viewing chip with a Return to live button. The events of the slot's hours land on the map as it appears,
+close ones share a badge with their count until the map is zoomed in, and the list in the tab groups them
+by hour with filters by kind and a Show button. Hovering a row lights up its marker. The diamond button
+tints the tiles that changed since the slot before. A day with events but no snapshot shows the map of
+the snapshot before it and says so.
+The play button steps through the slots at 0.5, 1, 2, 3, 5 or 10 seconds a snapshot. The next slot
+loads out of sight and fades in once every tile on screen has answered, so no gap opens, and each
+snapshot's time on screen starts once it is fully shown. The playhead slides to the next mark while
+playing, the ring around Play fills while a snapshot is on screen, and the chip names the slot with its
+place in the run, such as 2 of 5, with a progress bar. From the live map or the newest slot Play starts
+at the oldest slot held. A slot with events only that shows the same map as the step before passes in
+half the time and says events only, same map. After the newest slot the live map returns and a toast
+says what was played. Play needs at least two snapshots, and until then its tooltip says when the next
+snapshot is due.
+The tab starts with the controls and the figures of the shown slot, a strip of its 3D views, the key
+places, the slot's stats, small charts over every slot held (a click jumps to that slot) and the events.
+While the bar is open, the left and right arrows step a slot, space plays and pauses, and Home or Esc
+return to the live map. When a snapshot finishes, open pages add the new slot by themselves.
 
 **Share links.** A link copied while a slot is shown carries `t=<slot>`, such as `t=2026-10-13T16`, and
 opens on that slot. An older link with a plain date opens the old day folder of that date, or the last
@@ -322,8 +331,11 @@ slot of that day when there is none.
 Day tiles follow the `terrain` visibility, everything else the `timeline` visibility. Events follow
 the layer they belong to as well, so kills need `kills`, world events `worldevents`, Feats lines
 `leaderboard`, marker lines `markers` and the rest `feed`. Hidden players are shown as "A player" in
-the timeline too, and for non admins the place of a join, leave, kill or death is rounded to the
-chunk.
+the timeline too. A join, leave, kill, death or Feats event carries the place of the player, with the
+rules of the live player rows. The place is withheld when the player was underground, in their own
+territory with `hidePlayersInOwnTerritory`, or crouching or invisible when those are hidden, and it is
+dropped for hidden players, for players of another faction on a faction limited layer and for worlds
+the viewer may not open. Non admins get the corner of the chunk.
 
 ## 3D views
 
@@ -421,12 +433,14 @@ chunks it reaches in every direction. A large radius is drawn at a smaller scale
 so. A partial view has a Try again button. Download saves the PNG, and Copy link copies an address
 with `iso=world,x,z,r,az,s` that opens the same view for anyone who may see it. Esc closes it.
 
-**Key places in the timeline.** The Timeline tab opens with a Key places block. Each place shows the
-picture of one direction for the day picked on the slider, or the newest day while the map is live, with
-the four directions as a strip under it. A day whose picture did not change says unchanged since the day
-it was drawn. Compare days opens the picture next to the day before with the divider, View live in 3D
-opens the current view of the place, and Play steps the place through every day held in the picked
-direction.
+**Key places in the timeline.** The Timeline tab has one Key places block. Chips pick the place when
+there is more than one, and the choice is remembered. The picture shows the picked direction for the
+day on the slider, or the newest day while the map is live, with the day and direction on it. A day
+whose picture did not change says unchanged since the day it was drawn. Under the picture a day strip
+marks every day held for the place, the shown day filled, unchanged days muted and a dot where the main
+slider stands, and a click shows that day. A small switch picks the direction, SE, SW, NW or NE. Play
+steps the place through every day held with a progress bar, Compare opens the picture next to the day
+before with the divider, and Live 3D opens the current view of the place.
 
 **Daily views in the timeline.** The Timeline tab shows the day's other 3D views as thumbnails under its
 figures, or the newest day's while the map is live. A thumbnail opens the lightbox. Pick another day

@@ -9,12 +9,14 @@ import com.hypixel.hytale.server.core.modules.entity.damage.Damage;
 import com.hypixel.hytale.server.core.modules.entity.damage.DamageCause;
 import com.hypixel.hytale.server.core.modules.entity.damage.DeathComponent;
 import com.hypixel.hytale.server.core.modules.entity.damage.DeathSystems;
+import com.hypixel.hytale.server.core.modules.entity.component.TransformComponent;
 import com.hypixel.hytale.server.core.universe.PlayerRef;
 import com.hypixel.hytale.server.core.universe.world.World;
 import com.hypixel.hytale.server.core.universe.world.storage.EntityStore;
 import com.hypixel.hytale.server.npc.entities.NPCEntity;
 import dev.ryvrook.atlas.data.KillLog;
 
+import java.util.UUID;
 import java.util.function.Consumer;
 
 /**
@@ -24,9 +26,21 @@ import java.util.function.Consumer;
  */
 public final class DeathSystem extends DeathSystems.OnDeathSystem {
     private final Consumer<KillLog.Kill> sink;
+    private final PlaceRule rule;
+
+    /** Tells whether a player's place must be stored as unknown, as the live map would not show it. */
+    @FunctionalInterface
+    public interface PlaceRule {
+        boolean withheld(UUID player, String world, double x, double y, double z);
+    }
 
     public DeathSystem(Consumer<KillLog.Kill> sink) {
+        this(sink, (p, w, x, y, z) -> false);
+    }
+
+    public DeathSystem(Consumer<KillLog.Kill> sink, PlaceRule rule) {
         this.sink = sink;
+        this.rule = rule;
     }
 
     @Override
@@ -43,12 +57,14 @@ public final class DeathSystem extends DeathSystems.OnDeathSystem {
                 return;
             }
             KillLog.Party killer = null;
+            Ref<EntityStore> killerRef = null;
             boolean ranged = false;
             Damage info = death.getDeathInfo();
             if (info != null && info.getSource() instanceof Damage.EntitySource source) {
                 Ref<EntityStore> k = source.getRef();
                 if (k != null && k.isValid() && !k.equals(ref)) {
                     killer = party(store, k);
+                    killerRef = k;
                 }
                 ranged = source instanceof Damage.ProjectileSource;
             }
@@ -58,10 +74,46 @@ public final class DeathSystem extends DeathSystems.OnDeathSystem {
             }
             DamageCause cause = death.getDeathCause();
             World world = store.getExternalData().getWorld();
+            String worldName = world == null ? null : world.getName();
+            double[] at = position(store, ref);
+            // The place of the death is the victim's. It is kept only when the live map would show each
+            // player in the kill where they stand.
+            if (at != null && victim.player() && rule.withheld(victim.uuid(), worldName, at[0], at[1], at[2])) {
+                at = null;
+            }
+            if (at != null && killer != null && killer.player()) {
+                double[] near = position(store, killerRef);
+                if (near == null || rule.withheld(killer.uuid(), worldName, near[0], near[1], near[2])) {
+                    at = null;
+                }
+            }
             sink.accept(new KillLog.Kill(System.currentTimeMillis(), world == null ? null : world.getName(), victim,
-                    killer, cause == null ? null : cause.getId(), ranged));
+                    killer, cause == null ? null : cause.getId(), ranged, at == null ? null : (int) Math.floor(at[0]),
+                    at == null ? null : (int) Math.floor(at[2])));
         } catch (RuntimeException ignored) {
             // Never break the death pipeline for the map.
+        }
+    }
+
+    /** Where the entity stands as {x, y, z}, or null when its position cannot be read. */
+    private static double[] position(Store<EntityStore> store, Ref<EntityStore> ref) {
+        try {
+            if (ref == null || !ref.isValid()) {
+                return null;
+            }
+            TransformComponent t = store.getComponent(ref, TransformComponent.getComponentType());
+            if (t == null || t.getPosition() == null) {
+                return null;
+            }
+            double x = t.getPosition().x;
+            double y = t.getPosition().y;
+            double z = t.getPosition().z;
+            if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)) {
+                return null;
+            }
+            return new double[]{x, y, z};
+        } catch (RuntimeException | LinkageError e) {
+            return null;
         }
     }
 

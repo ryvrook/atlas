@@ -375,10 +375,16 @@ public final class Timeline {
             }
             String slot = r.slot();
             String prevSlot = store.previousSlot(r.world(), slot);
-            Manifest previous = prevSlot == null ? null : store.manifest(r.world(), prevSlot);
+            // The complete tiles of the slot before, so a tile missing now is carried over even when that
+            // slot was written before Atlas carried tiles over. Worked out in list, outside this lock.
+            String world = r.world();
+            java.util.function.Supplier<Manifest> previous = () -> prevSlot == null ? null : store.effective(world, prevSlot);
             Manifest sameSlot = store.manifest(r.world(), slot);
+            dev.ryvrook.atlas.tiles.ExploredIndex index = atlas.tiles().explored(r.world());
+            // An index that holds nothing yet cannot tell empty ground from unknown, so nothing is drawn.
+            SnapshotJob.Explored explored = index.size() > 0 ? index::hasTile : null;
             j = new SnapshotJob(r.world(), slot, System.currentTimeMillis(), atlas.tiles().diskDir(r.world()),
-                    store.blobs(), prevSlot, previous, sameSlot, TileService.MIN_ZOOM, TileService.MAX_ZOOM);
+                    store.blobs(), prevSlot, previous, sameSlot, TileService.MIN_ZOOM, TileService.MAX_ZOOM, explored);
             job = j;
             jobRequest = r;
         }
@@ -430,8 +436,8 @@ public final class Timeline {
         String text = r.daily() ? "The scheduled snapshot of the map was taken." : "An admin took a snapshot of the map.";
         EventLog.record(j.world, takenAt, "snapshot", null, null, null, text);
         long seconds = Math.max(0, (takenAt - j.startedAt) / 1000);
-        logger.at(Level.INFO).log("Atlas took the timeline snapshot of %s for %s with %d tiles, %d changed, %d new images, %d skipped in %d s",
-                j.world, j.date, m.tiles().size(), m.changed().size(), j.newBlobs(), j.skipped(), seconds);
+        logger.at(Level.INFO).log("Atlas took the timeline snapshot of %s for %s with %d tiles, %d changed, %d new images, %d skipped, %d carried over and %d drawn in %d s",
+                j.world, j.date, m.tiles().size(), m.changed().size(), j.newBlobs(), j.skipped(), j.carried(), j.composed(), seconds);
         reply(r, "Snapshot of " + j.world + " for " + slotText(j.date) + " done with " + m.tiles().size() + " tiles, "
                 + m.changed().size() + " changed, " + j.newBlobs() + " new images" + (m.partial()
                 ? ", " + j.skipped() + " tiles were being redrawn and keep their earlier image." : "."));

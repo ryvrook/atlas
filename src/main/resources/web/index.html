@@ -147,16 +147,20 @@
 
 <div id="tl-bar" class="tl-bar" role="region" aria-label="Timeline" hidden>
   <button class="icon-btn" id="tl-play" aria-label="Play the timeline" title="Play (space)"><svg class="ic"><use href="#i-play"/></svg></button>
-  <div class="tl-track">
-    <canvas id="tl-strip" aria-hidden="true"></canvas>
-    <input type="range" id="tl-range" min="0" max="0" step="1" value="0" aria-label="Day on the timeline">
-    <div class="tl-ends" aria-hidden="true"><span id="tl-first"></span><span>Live</span></div>
+  <div class="tl-track" id="tl-track">
+    <div class="tl-rail" id="tl-rail" role="slider" tabindex="0" aria-label="Snapshot on the timeline" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="Live map">
+      <div class="tl-fill" id="tl-fill" hidden></div>
+      <div class="tl-marks" id="tl-marks"></div>
+      <div class="tl-head" id="tl-head" aria-hidden="true"><span class="tl-bub live" id="tl-bub">Live</span></div>
+    </div>
+    <div class="tl-tip" id="tl-tip" role="tooltip" hidden></div>
   </div>
   <div class="tl-side">
+    <div id="tl-legend"></div>
     <span id="tl-label" class="tl-label">Live</span>
-    <select id="tl-speed" aria-label="Playback speed" title="Playback speed">
-      <option value="500">0.5 s a step</option><option value="1000">1 s a step</option><option value="2000">2 s a step</option>
-      <option value="3000">3 s a step</option><option value="5000">5 s a step</option><option value="10000">10 s a step</option>
+    <select id="tl-speed" aria-label="How long each snapshot stays on screen" title="How long each snapshot stays on screen">
+      <option value="500">0.5 s a snapshot</option><option value="1000">1 s a snapshot</option><option value="2000">2 s a snapshot</option>
+      <option value="3000">3 s a snapshot</option><option value="5000">5 s a snapshot</option><option value="10000">10 s a snapshot</option>
     </select>
     <button class="icon-btn" id="tl-changed" aria-label="Tint the tiles that changed that day" title="Tint the tiles that changed that day" aria-pressed="false"><svg class="ic"><use href="#i-diamond"/></svg></button>
     <button class="icon-btn" id="tl-close" aria-label="Close the timeline" title="Close the timeline"><svg class="ic"><use href="#i-close"/></svg></button>

@@ -65,6 +65,36 @@ public final class TimelineStore {
     private record CachedManifest(long modified, Manifest manifest) {
     }
 
+    /**
+     * A safety stop for the walk that fills in a slot written before tiles were carried over. The walk
+     * normally ends at a complete manifest or the oldest slot held, long before this.
+     */
+    public static final int CHAIN = 10_000;
+    /** Complete tile maps of slots kept in memory. */
+    private static final int EFFECTIVE_CACHE = 8;
+    /** Bumped by every write and prune, so derived maps and counts know when to be built again. */
+    private final java.util.concurrent.atomic.AtomicLong generation = new java.util.concurrent.atomic.AtomicLong();
+    private final Map<String, CachedTiles> effective = Collections.synchronizedMap(
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, CachedTiles> e) {
+                    return size() > EFFECTIVE_CACHE;
+                }
+            });
+    private final Map<String, CachedCounts> counts = Collections.synchronizedMap(new HashMap<>());
+    private final Map<String, java.util.concurrent.CompletableFuture<Map<String, String>>> building =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private record CachedTiles(long generation, Map<String, String> tiles) {
+    }
+
+    private record CachedCounts(long generation, Counts counts) {
+    }
+
+    /** Tiles of a slot as a browser sees them, own and carried, and the tiles whose image changed. */
+    public record Counts(int tiles, int carried, int changed) {
+    }
+
     /** What a prune removed. */
     public record PruneResult(int days, long blobs, long bytes, long totalBytes) {
     }
@@ -351,6 +381,184 @@ public final class TimelineStore {
         }
     }
 
+    /**
+     * Every tile of a slot, its own and the ones it lacks but an earlier slot holds, as tile key to
+     * hash. A complete manifest already names them all. For one written before tiles were carried
+     * over, the walk goes back slot by slot, see before, until a complete manifest or the oldest slot
+     * held, and the newest hash of each key wins. The answer does not depend on what is cached, since
+     * a cached slot on the way already holds the same fold of everything before it. CHAIN only stops
+     * a walk that could not end. Concurrent callers for the same slot share one walk. Returns an
+     * empty map when the slot has no snapshot.
+     */
+    public Map<String, String> effectiveTiles(String world, String slot) {
+        String id = resolve(world, slot);
+        Manifest own = manifest(world, id);
+        if (own == null) {
+            return Map.of();
+        }
+        if (own.complete()) {
+            return own.tiles();
+        }
+        long gen = generation.get();
+        String cacheKey = world + "|" + id;
+        CachedTiles c = effective.get(cacheKey);
+        if (c != null && c.generation() == gen) {
+            return c.tiles();
+        }
+        java.util.concurrent.CompletableFuture<Map<String, String>> mine = new java.util.concurrent.CompletableFuture<>();
+        String buildKey = cacheKey + "|" + gen;
+        java.util.concurrent.CompletableFuture<Map<String, String>> running = building.putIfAbsent(buildKey, mine);
+        if (running != null) {
+            try {
+                return running.join();
+            } catch (RuntimeException e) {
+                return own.tiles();
+            }
+        }
+        try {
+            Map<String, String> done = walk(world, id, own, gen);
+            effective.put(cacheKey, new CachedTiles(gen, done));
+            mine.complete(done);
+            return done;
+        } catch (RuntimeException e) {
+            mine.completeExceptionally(e);
+            throw e;
+        } finally {
+            building.remove(buildKey, mine);
+        }
+    }
+
+    private Map<String, String> walk(String world, String id, Manifest own, long gen) {
+        // Slots from the newest to the oldest one needed, then folded oldest first so newer hashes win.
+        List<Manifest> chain = new ArrayList<>();
+        chain.add(own);
+        Map<String, String> base = Map.of();
+        String at = id;
+        Manifest m = own;
+        for (int steps = 0; steps < CHAIN; steps++) {
+            String prev = before(world, at, m);
+            if (prev == null) {
+                break;
+            }
+            CachedTiles known = effective.get(world + "|" + prev);
+            if (known != null && known.generation() == gen) {
+                base = known.tiles();
+                break;
+            }
+            Manifest p = manifest(world, prev);
+            if (p == null) {
+                break;
+            }
+            if (p.complete()) {
+                base = p.tiles();
+                break;
+            }
+            chain.add(p);
+            at = prev;
+            m = p;
+        }
+        Map<String, String> out = new HashMap<>(base);
+        for (int i = chain.size() - 1; i >= 0; i--) {
+            out.putAll(chain.get(i).tiles());
+        }
+        return Collections.unmodifiableMap(out);
+    }
+
+    /**
+     * The snapshot slot a slot is compared with and filled in from. That is the previous slot its
+     * manifest names while that one still holds a snapshot, else the newest snapshot slot before it,
+     * as after retention pruned the one it named. Null for the oldest slot held.
+     */
+    String before(String world, String slot, Manifest m) {
+        String named = m == null ? null : m.previous();
+        if (named != null && Slots.valid(named) && named.compareTo(slot) < 0 && isSnapshotDir(world, named)) {
+            return named;
+        }
+        return previousSlot(world, slot);
+    }
+
+    /** The slot a slot's changed list is taken against, or null when it is the oldest one held. */
+    public String comparedWith(String world, String slot) {
+        String id = resolve(world, slot);
+        Manifest m = manifest(world, id);
+        if (m == null) {
+            return null;
+        }
+        return m.complete() ? m.previous() : before(world, id, m);
+    }
+
+    /**
+     * The manifest of a slot with every tile of effectiveTiles, or null when the slot has no snapshot.
+     * A complete manifest is returned as it is.
+     */
+    public Manifest effective(String world, String slot) {
+        Manifest m = manifest(world, slot);
+        if (m == null || m.complete()) {
+            return m;
+        }
+        String id = resolve(world, slot);
+        Map<String, String> all = effectiveTiles(world, id);
+        return new Manifest(m.world(), m.date(), m.takenAt(), before(world, id, m), m.partial(), m.skipped(),
+                m.newBlobs(), all, changed(world, id, m, all), all.size() - m.tiles().size(), 0, true);
+    }
+
+    /** The hash a slot shows for a tile, its own or the one an earlier slot held, or null. */
+    public String tileHash(String world, String slot, String key) {
+        return effectiveTiles(world, slot).get(key);
+    }
+
+    /**
+     * Keys of a slot whose image differs from the slot before, both taken with every tile they show.
+     * A complete manifest keeps its own list.
+     */
+    public List<String> changed(String world, String slot) {
+        String id = resolve(world, slot);
+        Manifest m = manifest(world, id);
+        if (m == null) {
+            return List.of();
+        }
+        return m.complete() ? m.changed() : changed(world, id, m, effectiveTiles(world, id));
+    }
+
+    private List<String> changed(String world, String id, Manifest m, Map<String, String> all) {
+        if (m.complete()) {
+            return m.changed();
+        }
+        String prev = before(world, id, m);
+        Map<String, String> before = prev == null ? null : effectiveTiles(world, prev);
+        return Manifest.diff(before == null || before.isEmpty() ? null : before, all);
+    }
+
+    /**
+     * The tile counts of the slot folder of exactly this name for the day list. A complete slot keeps
+     * them in its summary. An older one is counted from its effective
+     * tiles once and kept until the next write or prune. Null when the folder has no snapshot.
+     */
+    public Counts counts(String world, String slot) {
+        JsonObject sum = slotSummary(world, slot);
+        if (sum != null && Json.bool(sum, "complete")) {
+            return new Counts((int) Json.num(sum, "tiles", 0), (int) Json.num(sum, "carried", 0),
+                    (int) Json.num(sum, "changed", 0));
+        }
+        if (!isSnapshotDir(world, slot)) {
+            return null;
+        }
+        long gen = generation.get();
+        String key = world + "|" + slot;
+        CachedCounts c = counts.get(key);
+        if (c != null && c.generation() == gen) {
+            return c.counts();
+        }
+        Manifest m = manifest(world, slot);
+        if (m == null) {
+            return null;
+        }
+        Map<String, String> all = effectiveTiles(world, slot);
+        Counts out = new Counts(all.size(), all.size() - m.tiles().size(), changed(world, slot, m, all).size());
+        counts.put(key, new CachedCounts(gen, out));
+        return out;
+    }
+
     /** Writes the manifest, its summary and the stats of a slot, replacing an earlier snapshot of that slot. */
     public void write(Manifest m, JsonObject stats) throws IOException {
         ensureWorld(m.world());
@@ -362,6 +570,13 @@ public final class TimelineStore {
         }
         Files.deleteIfExists(day.resolve(TOMBSTONE));
         manifests.remove(m.world() + "|" + m.date());
+        changedOnDisk();
+    }
+
+    private void changedOnDisk() {
+        generation.incrementAndGet();
+        effective.clear();
+        counts.clear();
     }
 
     /** Makes sure the world folder names its world, so prune and status can list it. */
@@ -510,6 +725,7 @@ public final class TimelineStore {
                 collected[1] += more[1];
             }
         }
+        changedOnDisk();
         return new PruneResult(removed, collected[0], collected[1], total);
     }
 
@@ -560,6 +776,8 @@ public final class TimelineStore {
                 deleteTree(day);
             }
         }
+        // After the files are gone, so no reader caches a map built from them.
+        changedOnDisk();
         return any;
     }
 

@@ -1766,6 +1766,39 @@ public final class TileService {
         }
     }
 
+    /**
+     * Draws a tile of zoom 1 to 4 from the four tiles of the zoom below, as the live renderer does.
+     * children holds the PNG bytes of the quarters in the order x then z (top left, top right, bottom
+     * left, bottom right), and a null quarter stays transparent. Nothing is read from the world and no
+     * chunk image is requested, so any thread may call it. Returns null when no quarter is given or
+     * one of them is not a tile image.
+     */
+    public static byte[] composeUpper(byte[][] children) {
+        if (children == null || children.length != 4) {
+            return null;
+        }
+        int[] argb = new int[TILE * TILE];
+        int half = TILE / 2;
+        boolean any = false;
+        for (int i = 0; i < 4; i++) {
+            if (children[i] == null) {
+                continue;
+            }
+            int[] src = decodePng(children[i]);
+            if (src == null) {
+                return null;
+            }
+            any = true;
+            int dx = i % 2;
+            int dz = i / 2;
+            int[] small = MapImageDecoder.half(src, TILE);
+            for (int y = 0; y < half; y++) {
+                System.arraycopy(small, y * half, argb, (dz * half + y) * TILE + dx * half, half);
+            }
+        }
+        return any ? encodePng(argb) : null;
+    }
+
     private static byte[] encodePng(int[] argb) {
         try {
             BufferedImage img = new BufferedImage(TILE, TILE, BufferedImage.TYPE_INT_ARGB);
@@ -1785,7 +1818,8 @@ public final class TileService {
                 return null;
             }
             return img.getRGB(0, 0, TILE, TILE, null, 0, TILE);
-        } catch (IOException e) {
+        } catch (IOException | RuntimeException e) {
+            // ImageIO throws unchecked exceptions for some damaged files.
             return null;
         }
     }

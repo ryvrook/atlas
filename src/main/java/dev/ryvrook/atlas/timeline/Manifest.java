@@ -21,13 +21,26 @@ import java.util.TreeMap;
  * the same tile coordinates as the live tile route. date holds the slot, such as 2026-10-13T16, or a
  * plain date for a day folder of Atlas 1.0 and 1.1. previous is the slot before it that the world
  * holds, and changed lists the keys whose hash differs from it, or every key in the first slot.
+ *
+ * <p>A complete manifest names every tile the world had at that slot. A tile missing from the tile
+ * folder while the snapshot ran is carried over from the slot before, and carried counts those.
+ * composed counts the tiles of zoom 1 to 4 the snapshot drew itself from the zoom below. Manifests
+ * written before Atlas carried tiles over are not complete, so a reader walks back along previous
+ * to find the tiles they lack, see TimelineStore.effectiveTiles.
  */
 public record Manifest(String world, String date, long takenAt, String previous, boolean partial, int skipped,
-                       int newBlobs, Map<String, String> tiles, List<String> changed) {
+                       int newBlobs, Map<String, String> tiles, List<String> changed, int carried, int composed,
+                       boolean complete) {
 
     public Manifest {
         tiles = Collections.unmodifiableMap(new TreeMap<>(tiles));
         changed = List.copyOf(changed);
+    }
+
+    /** A manifest as Atlas wrote them before tiles were carried over, not complete. */
+    public Manifest(String world, String date, long takenAt, String previous, boolean partial, int skipped,
+                    int newBlobs, Map<String, String> tiles, List<String> changed) {
+        this(world, date, takenAt, previous, partial, skipped, newBlobs, tiles, changed, 0, 0, false);
     }
 
     /** Keys whose hash in next differs from prev, new keys included, in key order. Removed keys are not listed. */
@@ -71,6 +84,9 @@ public record Manifest(String world, String date, long takenAt, String previous,
         o.addProperty("skipped", skipped);
         o.addProperty("newBlobs", newBlobs);
         o.addProperty("count", tiles.size());
+        o.addProperty("carried", carried);
+        o.addProperty("composed", composed);
+        o.addProperty("complete", complete);
         JsonObject t = new JsonObject();
         tiles.forEach(t::addProperty);
         o.add("tiles", t);
@@ -86,6 +102,8 @@ public record Manifest(String world, String date, long takenAt, String previous,
         o.addProperty("takenAt", takenAt);
         o.addProperty("tiles", tiles.size());
         o.addProperty("changed", changed.size());
+        o.addProperty("carried", carried);
+        o.addProperty("complete", complete);
         o.addProperty("partial", partial);
         o.addProperty("previous", previous);
         return o;
@@ -111,7 +129,8 @@ public record Manifest(String world, String date, long takenAt, String previous,
         String slot = Json.str(o, "slot");
         return new Manifest(Json.str(o, "world"), slot != null ? slot : Json.str(o, "date"), (long) Json.num(o, "takenAt", 0),
                 Json.str(o, "previous"), Json.bool(o, "partial"), (int) Json.num(o, "skipped", 0),
-                (int) Json.num(o, "newBlobs", 0), tiles, changed);
+                (int) Json.num(o, "newBlobs", 0), tiles, changed, (int) Json.num(o, "carried", 0),
+                (int) Json.num(o, "composed", 0), Json.bool(o, "complete"));
     }
 
     public static Manifest read(Path file) throws IOException {

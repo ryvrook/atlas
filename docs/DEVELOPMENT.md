@@ -67,12 +67,12 @@ pure logic and use the Hytale server jar only for types.
 | --- | --- |
 | `auth` | Rate keys, revoke, linked name lookup, the attempt limit and the session API with its events and threads |
 | `config` | Parsing, defaults, added keys, the fail closed cases, the cookie and Chronicle keys and per world settings |
-| `data` | Marker merging, the hidden player rule, payload field lists, Feats diffs and the Chronicle export reader |
+| `data` | Marker merging, the hidden player rule, payload field lists, Feats diffs, the Chronicle export reader and the kill log file |
 | `http` | Path safety, rate limits, rate keys, trusted proxies, the event stream queue and the move from the old session cookie |
 | `iso` | View parameters, the cache keys and prune, the raster on synthetic columns and the iso config |
 | `markers` | The drop folder parser, the layer payload and tiers, popup escaping and timeline visibility |
 | `tiles` | Tile key math, the explored index, chunk image decoding, the render queue and the token bucket |
-| `timeline` | The blob store, manifest diffs, pruning with tombstones, the event log bound, route parsing and the export range |
+| `timeline` | The blob store, manifest diffs, carried and drawn snapshot tiles, slots filled in from earlier slots, the export contents, slot windows, pruning with tombstones, the event log bound, event places, route parsing and the export range |
 
 Add a test next to the code you change. A change to a payload needs a case in `PayloadsTest` or
 `LayerJsonTest` that pins the field list.
@@ -346,7 +346,23 @@ image with SHA-256 and stores new images in `BlobStore` under `snapshots/blobs`.
 skipped and keep the image of the day before, which marks the day partial. Nothing runs on a world
 thread.
 
+The live renderer deletes the tiles of zoom 1 to 4 above a zoom 0 tile it draws again, and those of
+zoom -1 and -2 below it, and draws them only when a browser asks. So the tile folder rarely holds every
+tile at once. Once the files are read, `SnapshotJob` draws each missing tile of zoom 1 to 4 from the
+four tiles of the zoom below with `TileService.composeUpper`, a few per step (one draw counts as 32
+reads), when those quarters were
+read or drawn in this snapshot. It reads no chunk image and never touches the world. A quarter that is
+explored but missing leaves the tile to be carried over. Every tile of the slot before that is still
+missing then keeps its hash and is counted in `carried`, since explored ground never goes away. Zoom
+-1 and -2 are always carried, drawing them for a whole world would be too heavy. Such a manifest is
+`complete`.
+
 `Manifest` maps each tile key to its hash and lists the keys that changed against the previous day.
+Manifests written by older releases are not complete. `TimelineStore.effectiveTiles` fills them in
+from the slots before, walking back along `previous` (or the slot list where that slot is gone) up to a
+complete manifest or the oldest slot held, through the manifest cache. Concurrent requests for one slot
+share one walk, and the result is cached until the next write or prune. The tile route, the changed list, the day list counts,
+the export and the next snapshot all read slots through it.
 `TimelineStore` keeps one folder per world and day with `tiles.json`, `summary.json` and
 `stats.json`. Pruning removes days past `retainDays`, then the oldest days while the total is above
 `maxDiskMb`, never the newest snapshot of a world or today, and leaves `tombstone.json` so the day
@@ -355,8 +371,13 @@ past the retention are forgotten.
 
 `EventLog.record` queues events from anywhere and a flush every five seconds appends them to
 `events/<date>.jsonl`. A day stops at 5,000 events with one `dropped` line. Events are stored with
-real names, and `TimelineRoutes` applies the hidden player rule, the layer of each kind and the chunk
-rounding when they are served, so un-hiding a player later works. `ActivityTracker` counts activity
+real names and places, and `TimelineRoutes` applies the hidden player rule, the layer of each kind and
+the chunk rounding when they are served, so un-hiding a player later works. A hidden player's events
+lose their place for other viewers. Places the live map would not show, below `hideBelowY`, crouching
+or invisible, or in the player's own territory, are stored as null when the event or kill is recorded,
+through `Atlas.placeWithheld`, since y is never stored. `Slots.window` gives each slot of a day its hours, a plain date
+slot taking the hours before the first slot with an hour, and the day list and the events route both
+use it with the slots held that day. `ActivityTracker` counts activity
 per world in hourly buckets for the daily stats and keeps 48 hours in `activity.json`.
 
 ## 3D views

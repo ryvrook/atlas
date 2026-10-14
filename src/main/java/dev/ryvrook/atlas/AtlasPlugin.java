@@ -156,7 +156,7 @@ public final class AtlasPlugin extends JavaPlugin {
             if (t != null) {
                 t.death(k);
             }
-        }));
+        }, atlas::placeWithheld));
         getChunkStoreRegistry().registerSystem(new ChunkSaveSystem(atlas.tiles()));
         getChunkStoreRegistry().registerSystem(new IsoChunkSaveSystem(iso));
         registerAssetReload();

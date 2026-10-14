@@ -37,6 +37,32 @@ class PayloadsTest {
     // ---- hidden rule ----------------------------------------------------------
 
     @Test
+    void killFieldsArePinned() {
+        JsonObject victim = parse("{\"name\":\"Bob\"}");
+        JsonObject k = Payloads.kill(5L, "default", victim, null, "fall", false, 96, -32);
+        assertEquals(set("at", "world", "victim", "killer", "cause", "ranged", "x", "z"), keys(k));
+        assertEquals(96, k.get("x").getAsInt());
+        assertTrue(k.get("killer").isJsonNull());
+        JsonObject unknown = Payloads.kill(5L, null, victim, null, null, true, null, null);
+        assertEquals(keys(k), keys(unknown));
+        assertTrue(unknown.get("x").isJsonNull());
+        assertTrue(unknown.get("z").isJsonNull());
+    }
+
+    @Test
+    void placesTheLiveMapWouldNotShowAreNotRecorded() {
+        assertFalse(Payloads.placeWithheld(64, 0, false, false));
+        // Below the hideBelowY line.
+        assertTrue(Payloads.placeWithheld(-5, 0, false, false));
+        assertFalse(Payloads.placeWithheld(0, 0, false, false));
+        // Crouching or invisible under a hide rule.
+        assertTrue(Payloads.placeWithheld(64, 0, true, false));
+        // In the territory of their own faction while hidePlayersInOwnTerritory is on.
+        assertTrue(Payloads.placeWithheld(64, 0, false, true));
+        assertTrue(Payloads.placeWithheld(Double.NaN, 0, false, false));
+    }
+
+    @Test
     void hiddenRuleSparesAdminsAndSelf() {
         Predicate<UUID> hidden = u -> u.equals(STEVE);
         assertTrue(Payloads.hiddenFrom(false, ALEX, STEVE, hidden));

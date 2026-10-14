@@ -130,7 +130,9 @@
     try {
       const s = T.index >= 0 ? T.slots[T.index] : null;
       const geo = geometry();
-      const base = map.hasLayer(A.terrain) ? "live" : map.hasLayer(A.dayTerrain) && s ? s.tiles : null;
+      // The picture on screen, not merely a layer on the map, since the old picture stays under a new one while it loads.
+      const shownBase = A.baseShown ? A.baseShown() : null;
+      const base = shownBase ? (shownBase === "blank" ? null : shownBase) : map.hasLayer(A.terrain) ? "live" : map.hasLayer(A.dayTerrain) && s ? s.tiles : null;
       const ch = s && s.kind === "snap" && T.changedOn && A.layerOn("terrain") ? await changedOf(s.date) : null;
       const c = document.createElement("canvas");
       c.width = geo.w; c.height = geo.h;

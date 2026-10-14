@@ -109,8 +109,11 @@ public final class Atlas {
         this.sessionApi = new dev.ryvrook.atlas.auth.SessionService(links, this::hiddenPlayers);
         live.setHideRules(config.hidePlayersCrouching, config.hidePlayersInvisible);
         // Timeline events. Names are recorded as they are, the hidden rule is applied when they are served.
-        live.onJoin(p -> EventLog.record(p.world(), System.currentTimeMillis(), "join", null, null, p.name(), p.uuid(),
-                p.name() + " joined the server."));
+        live.onJoin(p -> {
+            Double[] at = eventPlace(p.uuid(), p.world(), p.x(), p.y(), p.z());
+            EventLog.record(p.world(), System.currentTimeMillis(), "join", at[0], at[1], p.name(), p.uuid(),
+                    p.name() + " joined the server.");
+        });
         leaderboard.onEvent(this::featEvent);
         engine.onEvents(new EngineData.EventListener() {
             @Override
@@ -522,12 +525,9 @@ public final class Atlas {
                 if (limited && !v.sameFaction(faction)) {
                     continue;
                 }
-                if (cfg.hidePlayersInOwnTerritory && faction != null && !v.sameFaction(faction)) {
-                    JsonObject t = view.territoryAt(e.world(), Math.floorDiv((int) Math.floor(e.x()), 32),
-                            Math.floorDiv((int) Math.floor(e.z()), 32));
-                    if (t != null && faction.equalsIgnoreCase(Json.str(t, "tag"))) {
-                        continue;
-                    }
+                if (cfg.hidePlayersInOwnTerritory && !v.sameFaction(faction)
+                        && inOwnTerritory(view, e.world(), faction, e.x(), e.z())) {
+                    continue;
                 }
             }
             JsonObject row = new JsonObject();
@@ -627,6 +627,35 @@ public final class Atlas {
         return true;
     }
 
+    /**
+     * True when the faction holds the chunk of the block x and z in that world. The own territory rule
+     * of the players and last seen rows, and of places recorded for the timeline and the kill log.
+     */
+    static boolean inOwnTerritory(DominionSnapshot.View view, String world, String faction, double x, double z) {
+        if (faction == null || world == null || !Double.isFinite(x) || !Double.isFinite(z)) {
+            return false;
+        }
+        JsonObject t = view.territoryAt(world, Math.floorDiv((int) Math.floor(x), 32), Math.floorDiv((int) Math.floor(z), 32));
+        return t != null && faction.equalsIgnoreCase(Json.str(t, "tag"));
+    }
+
+    /**
+     * True when a player's place must be stored as unknown in a timeline event or the kill log. The
+     * record time rules of the live map, underground, crouching or invisible, and in their own
+     * territory. Cheap lookups only, so the world thread may call it.
+     */
+    public boolean placeWithheld(UUID player, String world, double x, double y, double z) {
+        AtlasConfig cfg = config;
+        boolean own = cfg.hidePlayersInOwnTerritory && player != null
+                && inOwnTerritory(snapshot.view(), world, factionOf(player), x, z);
+        return Payloads.placeWithheld(y, cfg.hideBelowY, live.autoHideReason(player) != null, own);
+    }
+
+    /** The x and z of a place for the event log, or nulls when the record time rules withhold it. */
+    private Double[] eventPlace(UUID player, String world, double x, double y, double z) {
+        return placeWithheld(player, world, x, y, z) ? new Double[]{null, null} : new Double[]{x, z};
+    }
+
     /** Whether this viewer must not see the player's name or position. Admins and the player themself always may. */
     private boolean hiddenFrom(Viewer v, UUID uuid) {
         return Payloads.hiddenFrom(v.admin(), v.uuid(), uuid, this::isHiddenPlayer);
@@ -664,11 +693,9 @@ public final class Atlas {
             if (factionLimited && !v.sameFaction(faction)) {
                 return null;
             }
-            if (located && cfg.hidePlayersInOwnTerritory && faction != null && !v.sameFaction(faction)) {
-                JsonObject t = view.territoryAt(world, Math.floorDiv((int) Math.floor(x), 32), Math.floorDiv((int) Math.floor(z), 32));
-                if (t != null && faction.equalsIgnoreCase(Json.str(t, "tag"))) {
-                    return null;
-                }
+            if (located && cfg.hidePlayersInOwnTerritory && !v.sameFaction(faction)
+                    && inOwnTerritory(view, world, faction, x, z)) {
+                return null;
             }
         }
         JsonObject row = new JsonObject();
@@ -1901,14 +1928,17 @@ public final class Atlas {
                 return null;
             }
         }
-        JsonObject o = new JsonObject();
-        o.addProperty("at", k.at());
-        Payloads.put(o, "world", k.world());
-        o.add("victim", partyJson(v, k.victim()));
-        o.add("killer", k.killer() == null ? JsonNull.INSTANCE : partyJson(v, k.killer()));
-        Payloads.put(o, "cause", k.cause());
-        o.addProperty("ranged", k.ranged());
-        return o;
+        // The place follows the player the death is about, as on the timeline. The victim when that is a
+        // player, else the killer. It is withheld when either party is hidden from the viewer, since a
+        // killer stands close to the place, and in a world the viewer may not open.
+        KillLog.Party about = k.victim().player() ? k.victim() : k.killer();
+        UUID aboutId = about == null || !about.player() ? null : about.uuid();
+        UUID killerId = k.killer() == null || !k.killer().player() ? null : k.killer().uuid();
+        boolean withheld = hiddenFrom(v, aboutId) || hiddenFrom(v, killerId) || hiddenWorld(v, k.world());
+        Integer[] at = dev.ryvrook.atlas.timeline.TimelineRoutes.place("death", k.x(), k.z(), v.admin(),
+                aboutId != null && aboutId.equals(v.uuid()), withheld);
+        return Payloads.kill(k.at(), k.world(), partyJson(v, k.victim()),
+                k.killer() == null ? JsonNull.INSTANCE : partyJson(v, k.killer()), k.cause(), k.ranged(), at[0], at[1]);
     }
 
     private JsonArray killRows(Viewer v, int limit) {
@@ -1958,12 +1988,12 @@ public final class Atlas {
         KillLog.Party killer = k.killer();
         if (!victim.player() && victim.boss() && killer != null) {
             feedLine("boss", feedName(killer) + " defeated " + victim.name() + " in " + where + ".", k.at(), k.world());
-            EventLog.record(timelineWorld(k.world()), k.at(), "kill", null, null, killer.name(),
+            EventLog.record(timelineWorld(k.world()), k.at(), "kill", coord(k.x()), coord(k.z()), killer.name(),
                     killer.player() ? killer.uuid() : null, killer.name() + " defeated " + victim.name() + ".");
         } else if (victim.player()) {
             feedLine("death", deathText(victim, killer, k.cause(), where, true), k.at(), k.world());
             boolean pvp = killer != null && killer.player();
-            EventLog.record(timelineWorld(k.world()), k.at(), pvp ? "kill" : "death", null, null, victim.name(),
+            EventLog.record(timelineWorld(k.world()), k.at(), pvp ? "kill" : "death", coord(k.x()), coord(k.z()), victim.name(),
                     victim.uuid(), deathText(victim, killer, k.cause(), null, false));
         }
     }
@@ -2013,7 +2043,13 @@ public final class Atlas {
             case "feats.first" -> (who == null ? "Someone" : who) + " was the first to earn " + e.featName() + ".";
             default -> (who == null ? "A player" : who) + " earned the" + tier + " feat " + e.featName() + ".";
         };
-        EventLog.record(timelineWorld(p == null ? null : p.world()), e.at(), e.kind(), null, null, who, e.uuid(), text);
+        Double[] at = p == null ? new Double[]{null, null} : eventPlace(p.uuid(), p.world(), p.x(), p.y(), p.z());
+        EventLog.record(timelineWorld(p == null ? null : p.world()), e.at(), e.kind(), at[0], at[1], who, e.uuid(), text);
+    }
+
+    /** A block coordinate as the event log takes it. */
+    private static Double coord(Integer v) {
+        return v == null ? null : v.doubleValue();
     }
 
     /** Feed text is shared by every viewer, so hidden players are always A player there. */
@@ -2047,7 +2083,8 @@ public final class Atlas {
             return;
         }
         lastSeen.record(new LastSeen.Entry(uuid, name, System.currentTimeMillis(), world, x, y, z));
-        EventLog.record(world, System.currentTimeMillis(), "leave", null, null, name, uuid,
+        Double[] at = eventPlace(uuid, world, x, y, z);
+        EventLog.record(world, System.currentTimeMillis(), "leave", at[0], at[1], name, uuid,
                 (name == null ? "A player" : name) + " left the server.");
     }
 

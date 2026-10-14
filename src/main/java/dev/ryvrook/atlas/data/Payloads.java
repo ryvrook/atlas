@@ -160,7 +160,35 @@ public final class Payloads {
         return o;
     }
 
+    /**
+     * One Kill of the killlog and kill events. The parties come already under the hidden rule, and x
+     * and z already as the viewer may see them, null when unknown or withheld.
+     */
+    public static JsonObject kill(long at, String world, JsonElement victim, JsonElement killer, String cause,
+                                  boolean ranged, Integer x, Integer z) {
+        JsonObject o = new JsonObject();
+        o.addProperty("at", at);
+        put(o, "world", world);
+        o.add("victim", victim);
+        o.add("killer", killer == null ? JsonNull.INSTANCE : killer);
+        put(o, "cause", cause);
+        o.addProperty("ranged", ranged);
+        o.addProperty("x", x);
+        o.addProperty("z", z);
+        return o;
+    }
+
     // ---- hidden rule ----------------------------------------------------------
+
+    /**
+     * True when a place must be stored as unknown when an event is recorded, because the live map would
+     * not show the player there. That is below the hideBelowY line, under a crouching or invisible
+     * hide rule, or in the territory of their own faction while hidePlayersInOwnTerritory is on. y is
+     * never stored, so these rules cannot be applied later.
+     */
+    public static boolean placeWithheld(double y, int hideBelowY, boolean autoHidden, boolean inOwnTerritory) {
+        return !Double.isFinite(y) || y < hideBelowY || autoHidden || inOwnTerritory;
+    }
 
     /**
      * True when a viewer must not see a player's name. Admins and the player themself always may, and a

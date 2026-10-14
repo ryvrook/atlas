@@ -39,44 +39,175 @@
   terrain.on("tileload", (e) => { e.tile.style.visibility = ""; });
   const blank = L.layerGroup();
 
-  // The tiles of one day on the timeline, with the same geometry as the live tiles. state.tlTiles names the
-  // snapshot whose tiles are shown. A past day never changes, so the browser keeps its tiles for a year.
-  const dayUrl = (date, c) => "api/timeline/" + encodeURIComponent(state.world || "") + "/" + encodeURIComponent(date || "") + "/tiles/" + geo.lToZ(c.z) + "/" + c.x + "/" + c.y + ".png";
-  const DayTiles = L.TileLayer.extend({ getTileUrl: function (c) { return dayUrl(state.tlTiles, c); } });
-  const dayTerrain = A.dayTerrain = new DayTiles("", {
-    tileSize: 256, minZoom: -5, maxZoom: 2, minNativeZoom: -5, maxNativeZoom: -1, noWrap: true, keepBuffer: 3,
-    updateWhenZooming: false, className: "atlas-tiles day-tiles"
-  });
-  // A tile that did not exist that day answers 404 and stays empty.
-  dayTerrain.on("tileerror", (e) => { e.tile.style.visibility = "hidden"; });
-  dayTerrain.on("tileload", (e) => { e.tile.style.visibility = ""; });
-  // Moving to another day swaps each tile on screen once its new image has loaded, so the map never flashes
-  // empty while the timeline plays. A late answer for a day that is no longer shown is ignored.
-  let swapSeq = 0;
-  A.swapDayTiles = () => {
-    const had = map.hasLayer(dayTerrain);
-    A.applyOverlays();
-    if (!had || !map.hasLayer(dayTerrain)) return;
-    const seq = ++swapSeq;
-    for (const key in dayTerrain._tiles) {
-      const t = dayTerrain._tiles[key];
-      const url = dayTerrain.getTileUrl(t.coords);
-      if (t.el._day === url) continue;
-      t.el._day = url;
-      const im = new Image();
-      im.onload = () => { if (seq === swapSeq) { t.el.src = url; t.el.style.visibility = ""; } };
-      im.onerror = () => { if (seq === swapSeq) t.el.style.visibility = "hidden"; };
-      im.src = url;
-    }
+  // The tiles of one slot on the timeline, with the same geometry as the live tiles. Each day layer names the
+  // snapshot it draws in _slot. A past slot never changes, so the browser keeps its tiles for a year.
+  // The browser keeps day tiles for a long time, a missing one included, so each address carries a key from the
+  // slot listing that changes whenever the tiles of that slot change. The timeline supplies it in A.dayTileKey.
+  const dayUrl = (date, c) => "api/timeline/" + encodeURIComponent(state.world || "") + "/" + encodeURIComponent(date || "") + "/tiles/" + geo.lToZ(c.z) + "/" + c.x + "/" + c.y + ".png" +
+    (A.dayTileKey ? A.dayTileKey(date) : "");
+  const DayTiles = L.TileLayer.extend({ getTileUrl: function (c) { return dayUrl(this._slot, c); } });
+  const dayLayer = () => {
+    const l = new DayTiles("", {
+      tileSize: 256, minZoom: -5, maxZoom: 2, minNativeZoom: -5, maxNativeZoom: -1, noWrap: true, keepBuffer: 3,
+      updateWhenZooming: false, className: "atlas-tiles day-tiles"
+    });
+    l._slot = null;
+    // A tile that did not exist up to that slot answers 404 and stays empty.
+    l.on("tileerror", (e) => { e.tile.style.visibility = "hidden"; });
+    l.on("tileload", (e) => { e.tile.style.visibility = ""; });
+    return l;
   };
-  dayTerrain.on("tileloadstart", (e) => { e.tile._day = dayTerrain.getTileUrl(e.coords); });
+  // Two day layers take turns. The one on screen stays while the other loads the next slot out of sight, and the
+  // new one fades in once every tile on screen has answered.
+  const dayA = dayLayer(), dayB = dayLayer();
+  const dayLayers = [dayA, dayB];
+
+  // ---- the base picture -----------------------------------------------------
+  // The base is the live tiles, a slot of the timeline or nothing. A change loads the new picture under cover
+  // and cross fades it in, so the map never shows a hole where the old picture had a tile. A slow or failed tile
+  // holds the fade for a short while at most. Callers waiting for the new picture are told once it is on screen.
+  const FADE = 250;
+  const reduced = () => !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
+  const Base = { front: null, next: null, primed: null, seq: 0, z: 2, waiters: [], dropTimer: 0, fading: false };
+  // A day layer names its picture by slot, and only for the world it was drawn for, since slots repeat across worlds.
+  const keyOf = (l) => l === terrain ? "live" : l === blank ? "blank" : l && l._world === (state.world || "") ? l._slot : null;
+  // The layer loading the next slot out of sight is let go as soon as that slot is no longer the one coming up.
+  function dropPrimed() {
+    const l = Base.primed;
+    if (!l) return;
+    Base.primed = null;
+    if (map.hasLayer(l)) map.removeLayer(l);
+    l._slot = null;
+  }
+  A.on("world", () => {
+    dropPrimed();
+    for (const l of dayLayers) if (l !== Base.front && !(Base.next && Base.next.layer === l)) l._slot = null;
+  });
+  const capMs = () => {
+    const t = A.tl;
+    return t && t.playing ? Math.min(4000, Math.max(1200, 2 * t.speed)) : 2500;
+  };
+  function settle() {
+    const w = Base.waiters;
+    Base.waiters = [];
+    for (const f of w) setTimeout(f, 0);
+  }
+  // Puts a layer on the map out of sight, drawing the wanted picture, above everything shown.
+  function cover(l, want) {
+    // A layer still on screen goes out of sight at once, never by a fade, before it is raised and redrawn.
+    const box = l.getContainer && l.getContainer();
+    if (box && map.hasLayer(l)) { box.style.transition = "none"; l.setOpacity(0); void box.offsetWidth; box.style.transition = ""; }
+    if (l !== terrain && keyOf(l) !== want) {
+      l._slot = want;
+      l._world = state.world || "";
+      if (map.hasLayer(l)) l.redraw();
+    }
+    l.setOpacity(0);
+    l.setZIndex(++Base.z);
+    if (!map.hasLayer(l)) l.addTo(map);
+  }
+  // Removes every tile layer that is neither on screen nor on its way, once the one on screen has its tiles.
+  function dropOld() {
+    clearTimeout(Base.dropTimer);
+    const keep = (l) => l === Base.front || (Base.next && Base.next.layer === l) || l === Base.primed;
+    const drop = () => { for (const l of [terrain, dayA, dayB]) if (!keep(l) && map.hasLayer(l)) map.removeLayer(l); };
+    const f = Base.front;
+    if (!f || f === blank || !f.isLoading()) { drop(); return; }
+    const seq = Base.seq;
+    const done = () => { if (seq === Base.seq) drop(); };
+    f.once("load", done);
+    Base.dropTimer = setTimeout(done, 4000);
+  }
+  function fadeIn(seq) {
+    const n = Base.next;
+    if (!n || n.seq !== seq) return;
+    clearTimeout(n.timer);
+    Base.next = null;
+    Base.front = n.layer;
+    if (Base.primed === n.layer) Base.primed = null;
+    n.layer.setOpacity(1);
+    Base.fading = true;
+    const wait = reduced() ? 0 : FADE + 20;
+    setTimeout(() => { Base.fading = false; if (seq === Base.seq) { dropOld(); settle(); A.emit("baseShown", keyOf(Base.front)); } }, wait);
+  }
+  function cancelNext() {
+    if (!Base.next) return;
+    clearTimeout(Base.next.timer);
+    Base.next = null;
+  }
+  function showBase(want) {
+    if (want === "blank") {
+      cancelNext();
+      Base.primed = null;
+      for (const l of [terrain, dayA, dayB]) if (map.hasLayer(l)) map.removeLayer(l);
+      if (!map.hasLayer(blank)) blank.addTo(map);
+      Base.front = blank;
+      settle();
+      return;
+    }
+    if (map.hasLayer(blank)) map.removeLayer(blank);
+    if (Base.primed && keyOf(Base.primed) !== want) dropPrimed();
+    const front = Base.front && Base.front !== blank && map.hasLayer(Base.front) ? Base.front : null;
+    if (front && keyOf(front) === want) {
+      // A fade into this picture still running finishes on its own and tells the waiters then.
+      if (Base.fading && !Base.next) return;
+      if (Base.next) { cancelNext(); Base.seq++; }
+      front.setOpacity(1);
+      dropOld();
+      settle();
+      return;
+    }
+    if (Base.next && keyOf(Base.next.layer) === want) return;
+    cancelNext();
+    let l = want === "live" ? terrain : dayLayers.find((x) => x !== front && keyOf(x) === want && map.hasLayer(x)) || (front === dayA ? dayB : dayA);
+    if (Base.primed === l) Base.primed = null;
+    const seq = ++Base.seq;
+    if (!front && want === "live") {
+      // The live map with nothing on screen yet, as the page opens, shows at once and fills in tile by tile.
+      l.setOpacity(1);
+      l.setZIndex(++Base.z);
+      if (map.hasLayer(l)) { if (l !== terrain) l.redraw(); } else l.addTo(map);
+      Base.front = l;
+      dropOld();
+      settle();
+      return;
+    }
+    cover(l, want);
+    Base.next = { layer: l, seq, timer: setTimeout(() => fadeIn(seq), capMs()) };
+    if (!l.isLoading()) setTimeout(() => fadeIn(seq), 0);
+  }
+  for (const l of [terrain, dayA, dayB]) l.on("load", () => { if (Base.next && Base.next.layer === l && !l.isLoading()) fadeIn(Base.next.seq); });
+  // True while a new picture is still loading under the one on screen.
+  A.baseLoading = () => !!Base.next;
+  // The picture on screen, "live", "blank" or the slot whose tiles show. During a fade it is the one fading in.
+  A.baseShown = () => keyOf(Base.front) || "blank";
+  // Lets go of the slot loading out of sight, for a run that stops.
+  A.releasePrimed = dropPrimed;
+  // The day layer on screen, for the exports. During a fade it is the one fading in.
+  Object.defineProperty(A, "dayTerrain", { configurable: true, get: () => (Base.next && Base.next.layer !== terrain ? Base.next.layer : Base.front !== terrain && Base.front !== blank && Base.front) || dayA });
+  // Moves the map to the slot in state.tlTiles, or back to the live map. done runs once the picture is on screen.
+  A.swapDayTiles = (done) => {
+    if (done) Base.waiters.push(done);
+    A.applyOverlays();
+  };
   // Tile addresses for the exports, which draw the view onto a canvas. coords has x, y and the Leaflet zoom z.
   A.dayTileUrl = dayUrl;
   A.liveTileUrl = (c) => terrain.getTileUrl(c);
-  // Warms the browser cache with the tiles on screen for the day that plays next.
-  A.preloadDay = (date) => {
-    if (!date || !map.hasLayer(dayTerrain)) return;
-    for (const key in dayTerrain._tiles) { const im = new Image(); im.src = dayUrl(date, dayTerrain._tiles[key].coords); }
+  // Gets the slot that plays next ready. During playback it loads into the layer out of sight, so the next step
+  // can fade in at once. Otherwise it only warms the browser cache with the tiles on screen.
+  A.preloadDay = (date, hidden) => {
+    if (!date) return;
+    const front = Base.front;
+    if (!front || front === blank || keyOf(front) === date) return;
+    if (hidden && !Base.next && front !== terrain) {
+      // The old picture stays under the new one until every tile of the new one is in, so priming waits for that.
+      if (front.isLoading()) { front.once("load", () => { if (Base.front === front && !Base.next) A.preloadDay(date, true); }); return; }
+      const l = front === dayA ? dayB : dayA;
+      Base.primed = l;
+      cover(l, date);
+      return;
+    }
+    for (const key in front._tiles) { const im = new Image(); im.src = dayUrl(date, front._tiles[key].coords); }
   };
 
   // Panes of their own. The tint of changed tiles sits right above the tiles, the edge of a render limit covers
@@ -110,7 +241,7 @@
     geo.maxZoom = geo.maxNative + 3;
     geo.minLevel = minZ;
     geo.maxLevel = maxZ;
-    for (const t of [terrain, dayTerrain]) {
+    for (const t of [terrain, dayA, dayB]) {
       t.options.minNativeZoom = geo.minNative;
       t.options.maxNativeZoom = geo.maxNative;
       t.options.minZoom = geo.minNative;
@@ -171,9 +302,7 @@
     const canTerrain = state.layers.terrain !== false;
     // While a past day is shown its tiles take the place of the live ones. A day with no snapshot before it is blank.
     const wantTerrain = canTerrain && A.store.get("base", "terrain") === "terrain";
-    const base = !wantTerrain ? blank : state.tlDate ? (state.tlTiles ? dayTerrain : blank) : terrain;
-    for (const l of [terrain, dayTerrain, blank]) if (l !== base && map.hasLayer(l)) map.removeLayer(l);
-    if (!map.hasLayer(base)) base.addTo(map);
+    showBase(!wantTerrain ? "blank" : state.tlDate ? (state.tlTiles || "blank") : "live");
     A.applyMarkerLayers();
     A.setNight();
     if (!$("layers-pop").hidden) renderLayersPop();

@@ -70,8 +70,33 @@ class SlotsTest {
         assertArrayEquals(new int[]{0, 10}, Slots.window("2026-10-13T04", day));
         assertArrayEquals(new int[]{10, 16}, Slots.window("2026-10-13T10", day));
         assertArrayEquals(new int[]{16, 24}, Slots.window("2026-10-13T16", day));
-        assertArrayEquals(new int[]{0, 24}, Slots.window("2026-10-13", day));
         assertArrayEquals(new int[]{0, 24}, Slots.window("2026-10-13T16", List.of("2026-10-13T16")));
+        assertArrayEquals(new int[]{0, 24}, Slots.window("2026-10-13", List.of("2026-10-13")));
+    }
+
+    @Test
+    void aPlainDateSlotTakesTheHoursBeforeTheFirstSlotWithAnHour() {
+        // The live day of 2026-10-13, an admin snapshot of Atlas 1.1 style and the 22:00 slot.
+        List<String> day = List.of("2026-10-13T22", "2026-10-13");
+        assertArrayEquals(new int[]{0, 22}, Slots.window("2026-10-13", day));
+        assertArrayEquals(new int[]{22, 24}, Slots.window("2026-10-13T22", day));
+        List<String> more = List.of("2026-10-13", "2026-10-13T04", "2026-10-13T16");
+        assertArrayEquals(new int[]{0, 4}, Slots.window("2026-10-13", more));
+        assertArrayEquals(new int[]{4, 16}, Slots.window("2026-10-13T04", more));
+        assertArrayEquals(new int[]{16, 24}, Slots.window("2026-10-13T16", more));
+        // Every hour belongs to exactly one slot.
+        int[] owners = new int[24];
+        for (String s : more) {
+            int[] w = Slots.window(s, more);
+            for (int h = w[0]; h < w[1]; h++) {
+                owners[h]++;
+            }
+        }
+        for (int h = 0; h < 24; h++) {
+            assertEquals(1, owners[h], "hour " + h);
+        }
+        // Slots of other days are ignored.
+        assertArrayEquals(new int[]{0, 24}, Slots.window("2026-10-13", List.of("2026-10-13", "2026-10-14T04")));
     }
 
     @Test

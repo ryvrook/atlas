@@ -130,10 +130,14 @@ public final class TimelineRoutes {
                 o.addProperty("world", world);
                 o.addProperty("date", Slots.date(m.date() == null ? date : m.date()));
                 o.addProperty("slot", t.store().resolve(world, date));
-                o.addProperty("previous", m.previous());
-                o.addProperty("first", m.previous() == null);
+                // The slot the list is taken against. For an older slot whose named previous slot was pruned
+                // that is the newest one still held, and none for the oldest.
+                String compared = t.store().comparedWith(world, date);
+                o.addProperty("previous", compared);
+                o.addProperty("first", compared == null);
                 JsonArray rows = new JsonArray();
-                for (String k : m.changed()) {
+                // A slot written before tiles were carried over is compared with every tile both slots show.
+                for (String k : t.store().changed(world, date)) {
                     int[] p = Manifest.parseKey(k);
                     if (p != null) {
                         JsonArray row = new JsonArray();
@@ -157,8 +161,7 @@ public final class TimelineRoutes {
                     yield error(404, "There are no events for that day.");
                 }
                 // Events are kept per day. A slot answers the hours of the day that belong to it.
-                int[] window = date.length() == 10 && slot.equals(date) ? new int[]{0, 24}
-                        : Slots.window(slot, t.store().slotsOf(world, day));
+                int[] window = Slots.window(slot, heldSlots(t.store(), world, day));
                 JsonObject o = new JsonObject();
                 o.addProperty("world", world);
                 o.addProperty("date", day);
@@ -219,8 +222,8 @@ public final class TimelineRoutes {
         }
         Timeline t = timeline.get();
         boolean past = Slots.date(date).compareTo(t.today()) < 0;
-        Manifest m = t.store().manifest(world, date);
-        String h = m == null ? null : m.tiles().get(Manifest.key(zoom, x, z));
+        // A slot that lacks the tile shows the one the newest earlier slot holds, as the map did then.
+        String h = t.store().tileHash(world, date, Manifest.key(zoom, x, z));
         if (h == null) {
             return new Tile(404, null, null, past);
         }
@@ -254,12 +257,7 @@ public final class TimelineRoutes {
         o.addProperty("currentSlot", t.currentSlot());
         JsonArray days = new JsonArray();
         for (String date : store.dates(world)) {
-            List<String> held = new ArrayList<>();
-            for (String slot : store.slotsOf(world, date)) {
-                if (store.slotHasSnapshot(world, slot) || store.slotPruned(world, slot)) {
-                    held.add(slot);
-                }
-            }
+            List<String> held = heldSlots(store, world, date);
             if (held.isEmpty()) {
                 // A day with events only.
                 JsonObject d = slotRow(world, date, date, null, store, t);
@@ -287,6 +285,20 @@ public final class TimelineRoutes {
         return o;
     }
 
+    /**
+     * The slots of a day that the day list shows, those with a snapshot or a tombstone. The events
+     * route takes its windows from the same list, so each event of the day belongs to exactly one row.
+     */
+    static List<String> heldSlots(TimelineStore store, String world, String date) {
+        List<String> held = new ArrayList<>();
+        for (String slot : store.slotsOf(world, date)) {
+            if (store.slotHasSnapshot(world, slot) || store.slotPruned(world, slot)) {
+                held.add(slot);
+            }
+        }
+        return held;
+    }
+
     /** One slot of the day list. events is added by the caller. */
     private JsonObject slotRow(String world, String date, String slot, int[] window, TimelineStore store, Timeline t) {
         JsonObject d = new JsonObject();
@@ -305,8 +317,10 @@ public final class TimelineRoutes {
         d.addProperty("pruned", store.slotPruned(world, slot));
         long takenAt = sum == null ? 0 : (long) Json.num(sum, "takenAt", 0);
         d.addProperty("takenAt", takenAt > 0 ? (Long) takenAt : null);
-        d.addProperty("tiles", sum == null ? 0 : (int) Json.num(sum, "tiles", 0));
-        d.addProperty("changed", sum == null ? 0 : (int) Json.num(sum, "changed", 0));
+        TimelineStore.Counts n = snap ? store.counts(world, slot) : null;
+        d.addProperty("tiles", n == null ? 0 : n.tiles());
+        d.addProperty("carried", n == null ? 0 : n.carried());
+        d.addProperty("changed", n == null ? 0 : n.changed());
         d.addProperty("partial", sum != null && Json.bool(sum, "partial"));
         java.nio.file.Path dir = store.worldDir(world).resolve(slot);
         d.addProperty("stats", snap && java.nio.file.Files.isRegularFile(dir.resolve(TimelineStore.STATS)));
@@ -493,7 +507,30 @@ public final class TimelineRoutes {
 
     /** Kinds whose place is where a player stood. Non admins get it snapped to the chunk corner. */
     static boolean personal(String kind) {
-        return kind.equals("join") || kind.equals("leave") || kind.equals("kill") || kind.equals("death");
+        return kind.equals("join") || kind.equals("leave") || kind.equals("kill") || kind.equals("death")
+                || kind.startsWith("feats");
+    }
+
+    /**
+     * The place of an event as a viewer may see it, as {x, z} with null parts when it is unknown or
+     * withheld. withheld drops the place of any kind, as for a player hidden from the viewer.
+     * Other people's personal events are snapped to the corner of their chunk for viewers who are not
+     * admins, and a viewer's own events keep their exact place.
+     */
+    public static Integer[] place(String kind, Integer x, Integer z, boolean admin, boolean self, boolean withheld) {
+        if (x == null || z == null) {
+            return new Integer[]{null, null};
+        }
+        if (admin || self) {
+            return new Integer[]{x, z};
+        }
+        if (withheld) {
+            return new Integer[]{null, null};
+        }
+        if (personal(kind)) {
+            return new Integer[]{Math.floorDiv(x, 32) * 32, Math.floorDiv(z, 32) * 32};
+        }
+        return new Integer[]{x, z};
     }
 
     /** One event as the viewer may see it, or null when its layer is hidden from the viewer. */
@@ -508,17 +545,9 @@ public final class TimelineRoutes {
         }
         boolean self = id != null && id.equals(v.uuid());
         boolean hidden = !v.admin() && !self && (hiddenFrom(v, id) || hiddenNames().contains(lower(l.who())));
-        Integer x = l.x();
-        Integer z = l.z();
-        if (hidden && personal(l.kind())) {
-            x = null;
-            z = null;
-        } else if (!v.admin() && !self && personal(l.kind()) && x != null && z != null) {
-            x = Math.floorDiv(x, 32) * 32;
-            z = Math.floorDiv(z, 32) * 32;
-        }
         String who = l.who();
         String text = l.text();
+        boolean namesHidden = false;
         if (!v.admin()) {
             if (hidden && who != null) {
                 text = replaceName(text, who);
@@ -528,9 +557,19 @@ public final class TimelineRoutes {
                 if (self && n.equalsIgnoreCase(v.name())) {
                     continue;
                 }
+                String before = text;
                 text = replaceName(text, n);
+                namesHidden |= !java.util.Objects.equals(before, text);
             }
         }
+        // The place goes when the player is hidden from the viewer, when another hidden player is named in
+        // the event, such as the killer standing next to the victim, and when the layer is limited to the
+        // viewer's faction and the player is in another one.
+        boolean withheld = hidden || namesHidden
+                || (layer != null && v.factionLimited(cfg(), layer) && !v.sameFaction(id == null ? null : atlas.factionOf(id)));
+        Integer[] at = place(l.kind(), l.x(), l.z(), v.admin(), self, withheld);
+        Integer x = at[0];
+        Integer z = at[1];
         JsonObject o = new JsonObject();
         o.addProperty("at", l.at());
         o.addProperty("kind", l.kind());
@@ -688,57 +727,73 @@ public final class TimelineRoutes {
         ex.sendResponseHeaders(200, 0);
         long started = System.currentTimeMillis();
         Counting counted = new Counting(ex.getResponseBody());
-        int days = 0;
-        java.util.Set<String> hashes = new java.util.LinkedHashSet<>();
-        int images = 0;
+        int[] written;
         try (java.util.zip.ZipOutputStream zip = new java.util.zip.ZipOutputStream(counted)) {
-            zip.setLevel(java.util.zip.Deflater.BEST_SPEED);
-            entry(zip, "README.txt", ("Atlas timeline export of " + world + " from " + from + " to " + to + ". Each folder "
-                    + "days/<date> holds that day's events.jsonl, and each folder days/<slot> (a date and hour such as "
-                    + "2026-10-13T16, or a plain date for a day taken by Atlas 1.1 or older) holds that snapshot's tiles.json "
-                    + "(tile key to image hash), stats.json and its isometric views under iso. Every image a tiles.json names "
-                    + "is stored once as blobs/<hash>.png.\n")
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            for (LocalDate d = from; !d.isAfter(to); d = d.plusDays(1)) {
-                String date = d.toString();
-                boolean any = copy(zip, store.eventsFile(world, date), "days/" + date + "/events.jsonl");
-                for (String slot : store.slotsOf(world, date)) {
-                    java.nio.file.Path day = store.worldDir(world).resolve(slot);
-                    any |= copy(zip, day.resolve(TimelineStore.TILES), "days/" + slot + "/tiles.json");
-                    any |= copy(zip, day.resolve(TimelineStore.STATS), "days/" + slot + "/stats.json");
-                    java.nio.file.Path iso = day.resolve("iso");
-                    if (java.nio.file.Files.isRegularFile(day.resolve(TimelineStore.TILES)) && java.nio.file.Files.isDirectory(iso)) {
-                        try (java.nio.file.DirectoryStream<java.nio.file.Path> s = java.nio.file.Files.newDirectoryStream(iso)) {
-                            List<java.nio.file.Path> files = new ArrayList<>();
-                            s.forEach(files::add);
-                            files.sort(null);
-                            for (java.nio.file.Path f : files) {
-                                String n = f.getFileName().toString();
-                                if (n.endsWith(".png") || n.equals("index.json")) {
-                                    any |= copy(zip, f, "days/" + slot + "/iso/" + n);
-                                }
-                            }
-                        }
-                    }
-                    Manifest m = Manifest.read(day.resolve(TimelineStore.TILES));
-                    if (m != null) {
-                        hashes.addAll(m.tiles().values());
-                    }
-                }
-                if (any) {
-                    days++;
-                }
-            }
-            for (String hash : hashes) {
-                if (BlobStore.validHash(hash) && copy(zip, store.blobs().path(hash), "blobs/" + hash + ".png")) {
-                    images++;
-                }
-            }
+            written = writeExport(zip, store, world, from, to);
         } finally {
             ex.getResponseBody().close();
         }
+        int days = written[0];
+        int images = written[1];
         log("Atlas exported the timeline of %s from %s to %s, %d %s and %d images, %d bytes in %d ms", world, from, to,
                 days, days == 1 ? "day" : "days", images, counted.count, System.currentTimeMillis() - started);
+    }
+
+    /**
+     * Writes the export of a world from one date to another into zip and returns {days, images}. A
+     * snapshot written before tiles were carried over is exported with every tile it shows, the ones it
+     * lacks taken from the earlier slots as the tile route does, so each tiles.json stands on its own.
+     */
+    static int[] writeExport(java.util.zip.ZipOutputStream zip, TimelineStore store, String world, LocalDate from,
+                             LocalDate to) throws IOException {
+        int days = 0;
+        int images = 0;
+        java.util.Set<String> hashes = new java.util.LinkedHashSet<>();
+        zip.setLevel(java.util.zip.Deflater.BEST_SPEED);
+        entry(zip, "README.txt", ("Atlas timeline export of " + world + " from " + from + " to " + to + ". Each folder "
+                + "days/<date> holds that day's events.jsonl, and each folder days/<slot> (a date and hour such as "
+                + "2026-10-13T16, or a plain date for a day taken by Atlas 1.1 or older) holds that snapshot's tiles.json "
+                + "(tile key to image hash, every tile the map showed at that slot), stats.json and its isometric views "
+                + "under iso. Every image a tiles.json names is stored once as blobs/<hash>.png.\n")
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        for (LocalDate d = from; !d.isAfter(to); d = d.plusDays(1)) {
+            String date = d.toString();
+            boolean any = copy(zip, store.eventsFile(world, date), "days/" + date + "/events.jsonl");
+            for (String slot : store.slotsOf(world, date)) {
+                java.nio.file.Path day = store.worldDir(world).resolve(slot);
+                Manifest m = store.slotHasSnapshot(world, slot) ? store.effective(world, slot) : null;
+                if (m != null) {
+                    entry(zip, "days/" + slot + "/tiles.json",
+                            Json.GSON.toJson(m.toJson()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    any = true;
+                    hashes.addAll(m.tiles().values());
+                }
+                any |= copy(zip, day.resolve(TimelineStore.STATS), "days/" + slot + "/stats.json");
+                java.nio.file.Path iso = day.resolve("iso");
+                if (m != null && java.nio.file.Files.isDirectory(iso)) {
+                    try (java.nio.file.DirectoryStream<java.nio.file.Path> s = java.nio.file.Files.newDirectoryStream(iso)) {
+                        List<java.nio.file.Path> files = new ArrayList<>();
+                        s.forEach(files::add);
+                        files.sort(null);
+                        for (java.nio.file.Path f : files) {
+                            String n = f.getFileName().toString();
+                            if (n.endsWith(".png") || n.equals("index.json")) {
+                                any |= copy(zip, f, "days/" + slot + "/iso/" + n);
+                            }
+                        }
+                    }
+                }
+            }
+            if (any) {
+                days++;
+            }
+        }
+        for (String hash : hashes) {
+            if (BlobStore.validHash(hash) && copy(zip, store.blobs().path(hash), "blobs/" + hash + ".png")) {
+                images++;
+            }
+        }
+        return new int[]{days, images};
     }
 
     private static void entry(java.util.zip.ZipOutputStream zip, String name, byte[] data) throws IOException {

@@ -4,6 +4,59 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
+## 1.4.0 - 2026-10-14
+
+This is Atlas 1.4.0, dated 2026-10-14. The timeline is rebuilt. Snapshots are complete at every zoom,
+playback cross fades between them, the track shows what each mark holds, events have a place on the map
+and the key places block is one compact unit.
+
+### Upgrading
+
+- No new settings.
+- Snapshots taken by earlier releases are filled in when served. A tile a slot lacks comes from the
+  newest earlier slot that holds it, so old black squares go away without a new snapshot. The first
+  snapshot after the upgrade is complete on its own. Browsers that cached the old 404 answers ask again,
+  since day tile addresses now carry a key.
+- Kill records gain `x` and `z`. Older records load without them.
+
+### Fixed
+
+- The tile renderer drops the zoomed out and zoomed in tiles whenever a base tile is drawn again and
+  draws them only when a browser asks, so a snapshot caught a different random subset of them each
+  time and the timeline showed black squares that changed at every step. A snapshot now carries every
+  tile the live folder lacks forward from the slot before, draws the zoomed out tiles itself from fresh
+  tiles below, and counts carried tiles in `carried`. `changed` counts only tiles whose image differs.
+- Joins, leaves, deaths, kills and Feats events were recorded without a place, so none of them could be
+  shown on the map. They now carry one, with the same rules as the live player rows. A place is withheld
+  when the player is underground, in their own territory with `hidePlayersInOwnTerritory`, crouching or
+  invisible when those are hidden, and at serve time for hidden players, for players of another faction
+  on a faction limited layer and for worlds the viewer may not open. Non admins get the chunk corner.
+- On a day that holds the day folder of Atlas 1.1 and slots with an hour, both listed the events of the
+  whole day. The day folder now covers midnight up to the first hour slot, so each event belongs to one
+  slot.
+- A prune could leave stale day counts in memory until the next snapshot.
+- A corrupt tile image failed a whole snapshot. The tile is carried over instead.
+
+### Changed
+
+- Playback double buffers the day tiles. The next slot loads out of sight and cross fades in once every
+  tile on screen has answered, so no gap opens where the step before had a tile. Each step's time on
+  screen starts when its picture is fully shown, and the chip says loading when the next one is late.
+- The slider is a track. It has a time axis with day labels, a picture mark per snapshot, a cube mark
+  for a snapshot with 3D views, a tick for a slot with events only, a hatched block for a removed day, an
+  event bar under each slot, and a playhead with a bubble that slides to the next slot while playing. A
+  hover or the arrow keys on the focused track show a card with the slot's tiles, changed, events and a
+  3D thumbnail. A legend names the marks. Click or drag anywhere on the track to move through time.
+- The chip shows the run as 2 of 5 with a progress bar, and the ring around Play fills while each
+  snapshot is on screen.
+- The events of a step land with its picture and pop in. Close events merge into a count badge until
+  the map is zoomed in, hovering a feed row lights up its marker, and a slot's feed is grouped by hour.
+- The speed menu reads 0.5 to 10 seconds a snapshot and says how long each snapshot stays on screen.
+- The Timeline tab starts with the controls and the figures of the shown slot, then a strip of its 3D
+  views, then Key places as one block with place chips, one picture, a day strip, a direction switch
+  and Play, Compare and Live 3D, then the stats, the charts and the feed.
+- The day list carries `carried` per slot, and `tiles` counts carried tiles too.
+
 ## 1.3.0 - 2026-10-13
 
 This is Atlas 1.3.0, dated 2026-10-13. The timeline plays properly, with more speeds, and the 3D views

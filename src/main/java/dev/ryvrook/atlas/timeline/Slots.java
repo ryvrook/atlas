@@ -129,34 +129,32 @@ public final class Slots {
     }
 
     /**
-     * The hours of the day whose events belong to a slot, from inclusive to exclusive. The first slot
-     * of a day starts its window at midnight, every slot ends where the next slot of the same day
-     * starts, and the last one at midnight, so each event of the day belongs to exactly one slot. A
-     * plain date covers the whole day. sameDay lists the slots held that day, in any order.
+     * The hours of the day whose events belong to a slot, from inclusive to exclusive. Every slot ends
+     * where the next slot of the same day starts, and the last one at midnight. The first slot of a day
+     * starts at midnight. A plain date, the day folder of Atlas 1.1 and older, counts as the earliest
+     * slot of its day, so it takes the hours from midnight up to the first slot with an hour, or the
+     * whole day when it is the only slot. Each event of the day therefore belongs to exactly one slot.
+     * sameDay lists the slots held that day, in any order.
      */
     public static int[] window(String slot, List<String> sameDay) {
         int h = hour(slot);
-        if (h < 0) {
-            return new int[]{0, 24};
-        }
-        int from = h;
         int to = 24;
         boolean earlier = false;
         for (String s : sameDay) {
-            int o = hour(s);
-            if (o < 0 || !date(s).equals(date(slot))) {
+            if (s == null || !valid(s) || !date(s).equals(date(slot))) {
                 continue;
             }
-            if (o < h) {
-                earlier = true;
-            } else if (o > h && o < to) {
+            int o = hour(s);
+            if (o > h && o < to) {
                 to = o;
+            } else if (o < h) {
+                earlier = true;
             }
         }
-        if (!earlier) {
-            from = 0;
+        if (h < 0) {
+            return new int[]{0, to};
         }
-        return new int[]{from, to};
+        return new int[]{earlier ? h : 0, to};
     }
 
     /** Orders slots by date and then hour, a plain date before the hours of its day. */

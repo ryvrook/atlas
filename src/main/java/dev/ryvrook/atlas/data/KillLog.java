@@ -23,7 +23,12 @@ public final class KillLog {
     public record Party(String name, String type, boolean player, boolean boss, UUID uuid) {
     }
 
-    public record Kill(long at, String world, Party victim, Party killer, String cause, boolean ranged) {
+    /** One death. x and z are the block where the victim died, null when unknown, as in lines Atlas 1.1 wrote. */
+    public record Kill(long at, String world, Party victim, Party killer, String cause, boolean ranged, Integer x,
+                       Integer z) {
+        public Kill(long at, String world, Party victim, Party killer, String cause, boolean ranged) {
+            this(at, world, victim, killer, cause, ranged, null, null);
+        }
     }
 
     private static final String[] BOSS_EXACT = {"Dungeon_Feastmaster_Boss", "Bear_Voidtaken", "Golem_Guardian_Void",
@@ -102,7 +107,8 @@ public final class KillLog {
                         continue;
                     }
                     kills.addLast(new Kill((long) Json.num(o, "at", 0), Json.str(o, "world"), victim,
-                            party(Json.obj(o, "killer")), Json.str(o, "cause"), Json.bool(o, "ranged")));
+                            party(Json.obj(o, "killer")), Json.str(o, "cause"), Json.bool(o, "ranged"),
+                            block(o, "x"), block(o, "z")));
                 }
                 while (kills.size() > KEEP) {
                     kills.removeFirst();
@@ -129,11 +135,25 @@ public final class KillLog {
             }
             o.addProperty("cause", k.cause());
             o.addProperty("ranged", k.ranged());
+            if (k.x() != null && k.z() != null) {
+                o.addProperty("x", k.x());
+                o.addProperty("z", k.z());
+            }
             out.add(o);
         }
         Json.writeAtomic(file, Json.GSON.toJson(out));
         // Only a successful write counts. A failed one leaves the changes pending for the next save.
         saved = version;
+    }
+
+    /** A whole block coordinate of a saved line, or null when the line has none. */
+    private static Integer block(JsonObject o, String key) {
+        JsonElement e = o.get(key);
+        if (e == null || !e.isJsonPrimitive() || !e.getAsJsonPrimitive().isNumber()) {
+            return null;
+        }
+        double d = e.getAsDouble();
+        return Double.isFinite(d) && Math.abs(d) < Integer.MAX_VALUE ? (int) Math.floor(d) : null;
     }
 
     private static JsonObject partyJson(Party p) {

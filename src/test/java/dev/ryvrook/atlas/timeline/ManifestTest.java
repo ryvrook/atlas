@@ -47,5 +47,20 @@ class ManifestTest {
         assertEquals(true, back.partial());
         assertEquals(2, back.skipped());
         assertEquals("2026-10-12", back.date());
+        // Written before tiles were carried over, so not complete.
+        assertEquals(false, back.complete());
+        assertEquals(0, back.carried());
+    }
+
+    @Test
+    void carriedAndCompleteRoundTrip() {
+        Manifest m = new Manifest("default", "2026-10-14T04", 5L, "2026-10-13T22", false, 0, 1,
+                Map.of("0/0/0", A, "-1/0/0", B), List.of(), 1, 2, true);
+        Manifest back = Manifest.fromJson(m.toJson());
+        assertEquals(1, back.carried());
+        assertEquals(2, back.composed());
+        assertEquals(true, back.complete());
+        assertEquals(2, m.summary().get("tiles").getAsInt());
+        assertEquals(1, m.summary().get("carried").getAsInt());
     }
 }
