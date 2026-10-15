@@ -311,4 +311,25 @@ class PayloadsTest {
         assertTrue(f.get("bank").isJsonNull());
         assertEquals("X", f.get("name").getAsString());
     }
+
+    @Test
+    void aHiddenFeatIsNamedOnlyForWhoEarnedItAndAdmins() {
+        UUID alex = UUID.fromString("22222222-2222-2222-2222-222222222222");
+        JsonObject pub = Payloads.leaderboard(parse(FEATS), 1L, u -> false, null, false);
+        JsonObject masked = pub.getAsJsonArray("recent").get(1).getAsJsonObject();
+        assertEquals(Payloads.HIDDEN_FEAT_NAME, masked.get("featName").getAsString());
+        assertEquals("hidden", masked.get("feat").getAsString());
+        assertEquals("", masked.get("category").getAsString());
+        assertTrue(masked.get("rarity").isJsonNull());
+        assertEquals("Rock Bottom", pub.getAsJsonArray("recent").get(0).getAsJsonObject().get("featName").getAsString());
+        assertFalse(pub.toString().contains("unknown_feat"));
+        assertFalse(pub.toString().contains("\"Unknown\""));
+
+        JsonObject mine = Payloads.leaderboard(parse(FEATS), 1L, u -> false, alex, false);
+        assertEquals("Unknown", mine.getAsJsonArray("recent").get(1).getAsJsonObject().get("featName").getAsString());
+        JsonObject steve = Payloads.leaderboard(parse(FEATS), 1L, u -> false, STEVE, false);
+        assertEquals(Payloads.HIDDEN_FEAT_NAME, steve.getAsJsonArray("recent").get(1).getAsJsonObject().get("featName").getAsString());
+        JsonObject admin = Payloads.leaderboard(parse(FEATS), 1L, u -> false, null, true);
+        assertEquals("Unknown", admin.getAsJsonArray("recent").get(1).getAsJsonObject().get("featName").getAsString());
+    }
 }

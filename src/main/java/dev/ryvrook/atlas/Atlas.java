@@ -90,6 +90,8 @@ public final class Atlas {
     /** Marker layers from the API, the drop folder and the admin commands. */
     private final MarkerService markers;
     private final MarkerRoutes markerRoutes;
+    /** The Coinage bridge, or null while Coinage is not installed. */
+    private volatile dev.ryvrook.atlas.integration.CoinageLink coinage;
 
     public Atlas(AtlasConfig config, Path dataDir) {
         this.config = config;
@@ -389,6 +391,38 @@ public final class Atlas {
         return v;
     }
 
+    /** Hands Atlas the Coinage bridge, or null to drop it. */
+    public void useCoinage(dev.ryvrook.atlas.integration.CoinageLink link) {
+        this.coinage = link;
+    }
+
+    /** True when this viewer is a linked player who may see their own balance. */
+    private boolean seesOwnMoney(Viewer v) {
+        return config.showOwnMoney && coinage != null && v.uuid() != null && !v.viewingAs();
+    }
+
+    /**
+     * The api/money body for the viewer's own player, {available, currency, balance, netWorth}, with the
+     * amounts formatted by Coinage. Only ever about the viewer, never another player.
+     */
+    public JsonObject moneyPayload(Viewer v) {
+        JsonObject o = new JsonObject();
+        dev.ryvrook.atlas.integration.CoinageLink link = coinage;
+        dev.ryvrook.atlas.integration.CoinageLink.Money m = null;
+        if (seesOwnMoney(v) && link != null) {
+            try {
+                m = link.money(v.uuid());
+            } catch (RuntimeException | LinkageError e) {
+                log(Level.FINE, "Atlas could not read a balance from Coinage, %s", e);
+            }
+        }
+        o.addProperty("available", m != null);
+        Payloads.put(o, "currency", m == null ? null : m.currency());
+        Payloads.put(o, "balance", m == null ? null : m.balance());
+        Payloads.put(o, "netWorth", m == null ? null : m.netWorth());
+        return o;
+    }
+
     public JsonObject viewerJson(Viewer v) {
         JsonObject o = new JsonObject();
         o.addProperty("linked", v.linked());
@@ -396,6 +430,7 @@ public final class Atlas {
         Payloads.put(o, "faction", v.faction());
         o.addProperty("admin", v.admin());
         Payloads.put(o, "viewingAs", v.viewingAs());
+        o.addProperty("money", seesOwnMoney(v));
         JsonObject layers = new JsonObject();
         for (String layer : config.visibility.keySet()) {
             layers.addProperty(layer, v.canSee(config, layer) && (!"players".equals(layer) || config.showPlayers || v.admin()));
@@ -904,6 +939,15 @@ public final class Atlas {
     }
 
     // ---- territories and points --------------------------------------------
+
+    /** True while the Dominion snapshot is read and carries a sieges list, which the territories route draws. */
+    public boolean snapshotDrawsSieges() {
+        if (!snapshot.present()) {
+            return false;
+        }
+        JsonElement s = snapshot.view().root.get("sieges");
+        return s != null && s.isJsonArray();
+    }
 
     public JsonObject territoriesPayload(Viewer v, String world) {
         JsonObject out = new JsonObject();
@@ -2037,11 +2081,15 @@ public final class Atlas {
         LiveState.PlayerSample p = e.uuid() == null ? null : live.sampleOf(e.uuid());
         String who = e.name();
         String tier = e.tier() == null || e.tier().isBlank() ? "" : " " + e.tier().toLowerCase(Locale.ROOT);
+        // Event text is the same for every viewer, so a hidden feat is never named in it.
+        boolean secret = e.hiddenFeat();
         String text = switch (e.kind()) {
             case "feats.milestone" -> (who == null ? "A milestone was reached, " : who + " reached the milestone ")
-                    + e.featName() + ".";
-            case "feats.first" -> (who == null ? "Someone" : who) + " was the first to earn " + e.featName() + ".";
-            default -> (who == null ? "A player" : who) + " earned the" + tier + " feat " + e.featName() + ".";
+                    + (secret ? "of a hidden feat" : e.featName()) + ".";
+            case "feats.first" -> (who == null ? "Someone" : who) + " was the first to earn "
+                    + (secret ? "a hidden feat" : e.featName()) + ".";
+            default -> (who == null ? "A player" : who) + (secret ? " earned a hidden" + tier + " feat."
+                    : " earned the" + tier + " feat " + e.featName() + ".");
         };
         Double[] at = p == null ? new Double[]{null, null} : eventPlace(p.uuid(), p.world(), p.x(), p.y(), p.z());
         EventLog.record(timelineWorld(p == null ? null : p.world()), e.at(), e.kind(), at[0], at[1], who, e.uuid(), text);
@@ -2065,7 +2113,8 @@ public final class Atlas {
         if (!v.canSee(config, "leaderboard")) {
             return Payloads.emptyLeaderboard();
         }
-        return Payloads.leaderboard(leaderboard.root(), leaderboard.updatedAt(), uuid -> hiddenFrom(v, uuid));
+        return Payloads.leaderboard(leaderboard.root(), leaderboard.updatedAt(), uuid -> hiddenFrom(v, uuid),
+                v.viewingAs() ? null : v.uuid(), v.admin());
     }
 
     /** The Chronicle stats from its export, with hidden players renamed for this viewer. */
@@ -2151,7 +2200,7 @@ public final class Atlas {
         String head = parts.get(0);
         java.util.Set<String> mine = java.util.Set.of("worlds", "players", "markers", "worldevents", "kills",
                 "leaderboard", "territories", "points", "factions", "nations", "stats", "changes", "heat", "bosses",
-                "chronicle");
+                "chronicle", "money");
         if (!mine.contains(head)) {
             return null;
         }
@@ -2160,6 +2209,9 @@ public final class Atlas {
         }
         if ("worlds".equals(head)) {
             return parts.size() == 1 ? ApiResult.ok(worldsPayload(v)) : NOT_FOUND;
+        }
+        if ("money".equals(head)) {
+            return parts.size() == 1 ? ApiResult.ok(moneyPayload(v)) : NOT_FOUND;
         }
         boolean worldInPath = java.util.Set.of("markers", "territories", "points", "changes", "heat").contains(head);
         String world = worldInPath ? (parts.size() >= 2 ? parts.get(1) : null) : query.get("world");

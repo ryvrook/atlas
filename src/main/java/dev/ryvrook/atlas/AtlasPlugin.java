@@ -74,6 +74,8 @@ public final class AtlasPlugin extends JavaPlugin {
     private ScheduledFuture<?> playerTask;
     /** Per task failure state for guard, as [time of the last log line]. Absent while the task succeeds. */
     private final Map<String, long[]> failures = new ConcurrentHashMap<>();
+    /** Held while the snapshot is polled, which the scheduler and a reload may both do. */
+    private final Object snapshotLock = new Object();
     private long lastSnapshotWarn;
     private long warnedErrorAt;
     /** Why atlas.json was rejected, or null while it is valid. The web server stays down while set. */
@@ -94,6 +96,9 @@ public final class AtlasPlugin extends JavaPlugin {
     private TrackerPresence.Source trackerSource = TrackerPresence.Source.OWN;
     private TrackerPresence.Watch trackerWatch;
     private volatile TrackerLink trackerLink;
+    // Coinage, bound in start when the plugin manager lists it.
+    private volatile dev.ryvrook.atlas.integration.CoinageLink coinageLink;
+    private final dev.ryvrook.atlas.integration.DominionWatch dominionWatch = new dev.ryvrook.atlas.integration.DominionWatch();
 
     public AtlasPlugin(JavaPluginInit init) {
         super(init);
@@ -156,7 +161,7 @@ public final class AtlasPlugin extends JavaPlugin {
 
         getCommandRegistry().registerCommand(new AtlasCommand(this));
         // Block activity and deaths come either from Atlas's own systems or from TrackerAPI, never both.
-        TrackerPresence.Found tracker = TrackerPresence.find();
+        dev.ryvrook.atlas.integration.PluginPresence.Found tracker = TrackerPresence.find();
         trackerSource = TrackerPresence.decide(cfg.trackerMode(), tracker);
         trackerWatch = new TrackerPresence.Watch(cfg.trackerMode(), trackerSource, tracker);
         String trackerLine = TrackerPresence.describe(cfg.trackerMode(), trackerSource, tracker);
@@ -219,6 +224,7 @@ public final class AtlasPlugin extends JavaPlugin {
                     snap.toAbsolutePath());
         }
         bindTracker();
+        bindCoinage();
         pollSnapshot();
         pollMapMod();
         atlas.seedFeed();
@@ -244,6 +250,7 @@ public final class AtlasPlugin extends JavaPlugin {
         tasks.add(ex.scheduleWithFixedDelay(guard("chronicle", () -> pollChronicle(false)), 5, 5, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("map settings", this::pollMapMod), 15, 15, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("tracker", this::watchTracker), 5, 5, TimeUnit.SECONDS));
+        tasks.add(ex.scheduleWithFixedDelay(guard("dominion", this::watchDominion), 5, 5, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("explored", () -> atlas.tiles().refreshExplored()), 5, 600, TimeUnit.SECONDS));
         tasks.add(ex.scheduleWithFixedDelay(guard("tiles", () -> {
             atlas.tiles().refreshLoaded();
@@ -274,6 +281,18 @@ public final class AtlasPlugin extends JavaPlugin {
                 link.close();
             } catch (RuntimeException | LinkageError e) {
                 // TrackerAPI went first and closed the subscriptions itself.
+            }
+        }
+        dev.ryvrook.atlas.integration.CoinageLink money = coinageLink;
+        coinageLink = null;
+        if (money != null) {
+            if (atlas != null) {
+                atlas.useCoinage(null);
+            }
+            try {
+                money.close();
+            } catch (RuntimeException | LinkageError e) {
+                // Coinage was unloaded first. Its hooks went with it.
             }
         }
         for (ScheduledFuture<?> f : tasks) {
@@ -333,12 +352,57 @@ public final class AtlasPlugin extends JavaPlugin {
         }
     }
 
+    /**
+     * Hooks the Coinage bridge when the plugin manager lists Coinage 1.0.0 or newer. The bridge class is the
+     * only one that names Coinage types and is loaded here for the first time. Atlas only reads balances, for
+     * the account menu of a linked player while showOwnMoney is on. Coinage reloads Atlas itself after its
+     * own reload, so no watch is needed here.
+     */
+    private void bindCoinage() {
+        dev.ryvrook.atlas.integration.PluginPresence.Found found = dev.ryvrook.atlas.integration.PluginPresence.find(
+                dev.ryvrook.atlas.integration.CoinageLink.GROUP, dev.ryvrook.atlas.integration.CoinageLink.NAME);
+        if (found == null) {
+            return;
+        }
+        if (dev.ryvrook.atlas.integration.VersionCompare.below(found.version(), dev.ryvrook.atlas.integration.CoinageLink.MINIMUM)) {
+            getLogger().at(Level.INFO).log("Atlas leaves Coinage %s alone because it is older than %s",
+                    found.version(), dev.ryvrook.atlas.integration.CoinageLink.MINIMUM);
+            return;
+        }
+        try {
+            dev.ryvrook.atlas.integration.CoinageLink link = dev.ryvrook.atlas.integration.CoinageBridge.install();
+            coinageLink = link;
+            atlas.useCoinage(link);
+            getLogger().at(Level.INFO).log("Atlas found Coinage %s and shows a linked player their own balance %s",
+                    found.version(), atlas.config().showOwnMoney ? "in the account menu" : "once showOwnMoney is true");
+        } catch (RuntimeException | LinkageError e) {
+            getLogger().at(Level.WARNING).withCause(e).log("Atlas could not bind to Coinage and shows no balances");
+        }
+    }
+
     /** Every 5 seconds. Asks for a reload of Atlas once when TrackerAPI was loaded, reloaded or unloaded. */
     private void watchTracker() {
         TrackerPresence.Watch w = trackerWatch;
         String line = w == null ? null : w.check(TrackerPresence.find());
         if (line != null) {
             getLogger().at(Level.WARNING).log("%s", line);
+        }
+    }
+
+    /**
+     * Every 5 seconds. Drops the Dominion snapshot from the map once Dominion has been missing for a minute,
+     * so a file left by a removed Dominion does not keep old territories on the map, and reads it again when
+     * Dominion is back. Only the default path is watched.
+     */
+    private void watchDominion() {
+        boolean watched = Atlas.resolveSnapshot(atlas.config()).equals(
+                java.nio.file.Path.of(AtlasConfig.DEFAULT_DOMINION_SNAPSHOT).toAbsolutePath().normalize());
+        boolean missing = watched && dev.ryvrook.atlas.integration.PluginPresence.missing(
+                dev.ryvrook.atlas.integration.DominionWatch.GROUP, dev.ryvrook.atlas.integration.DominionWatch.NAME);
+        Boolean gone = dominionWatch.update(watched, missing, System.currentTimeMillis());
+        if (gone != null) {
+            // The snapshot task applies it within a second.
+            atlas.snapshot().setOwnerGone(gone);
         }
     }
 
@@ -479,6 +543,12 @@ public final class AtlasPlugin extends JavaPlugin {
     }
 
     private void pollSnapshot() {
+        synchronized (snapshotLock) {
+            pollSnapshotLocked();
+        }
+    }
+
+    private void pollSnapshotLocked() {
         boolean wasPresent = atlas.snapshot().present();
         boolean changed = atlas.snapshot().poll(atlas::addFeed, this::addSnapshotChat);
         warnSnapshotError();
@@ -487,9 +557,12 @@ public final class AtlasPlugin extends JavaPlugin {
         }
         boolean present = atlas.snapshot().present();
         if (present != wasPresent) {
-            getLogger().at(Level.INFO).log(present
-                    ? "Atlas found the Dominion snapshot at %s"
+            getLogger().at(Level.INFO).log(present ? "Atlas found the Dominion snapshot at %s"
+                    : atlas.snapshot().ownerGone()
+                    ? "Atlas has seen no running Dominion for a minute, so it stops drawing the snapshot left at %s and runs standalone"
                     : "Atlas lost the Dominion snapshot at %s and runs standalone", atlas.snapshot().path().toAbsolutePath());
+            // Dominion's own siege layer is shown only while the snapshot does not draw the sieges.
+            atlas.markers().refreshLayer(dev.ryvrook.atlas.markers.MarkerService.DOMINION_SIEGES);
         }
         List<String> sections = atlas.changedSections();
         if (sections.isEmpty()) {

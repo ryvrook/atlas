@@ -13,7 +13,8 @@
   "ServerVersion": ">=0.7.0",
   "Dependencies": {},
   "OptionalDependencies": {
-    "Ryvrook:TrackerAPI": ">=1.0.0"
+    "Ryvrook:TrackerAPI": ">=1.0.0",
+    "Ryvrook:Coinage": ">=1.0.0"
   },
   "LoadBefore": {},
   "DisabledByDefault": false,

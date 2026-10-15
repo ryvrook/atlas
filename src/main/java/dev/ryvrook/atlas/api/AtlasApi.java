@@ -12,7 +12,8 @@ import java.util.logging.Logger;
  * The Atlas web map API for other plugins. Compile against the Atlas jar and list Atlas as an optional
  * dependency in your manifest. Register your layers from {@link #onEnable(Consumer)}, which runs at once
  * when Atlas is already up and again whenever Atlas starts, and stop using the API in
- * {@link #onDisable(Runnable)}. Both hooks stay registered across /atlas reload.
+ * {@link #onDisable(Runnable)}. Both hooks stay registered across /atlas reload. A /plugin reload of Atlas
+ * loads these classes again, so a plugin linked to the old ones has to be reloaded too.
  *
  * <pre>{@code
  * AtlasApi.onEnable(api -> api.layer("myplugin", "shops")
@@ -50,6 +51,19 @@ public abstract class AtlasApi {
     public static void onDisable(Runnable hook) {
         Objects.requireNonNull(hook, "hook");
         DISABLE.add(hook);
+    }
+
+    /**
+     * Removes hooks added with {@link #onEnable} and {@link #onDisable}, for a plugin that stops while Atlas
+     * keeps running. Either may be null. Not in Atlas 1.6.0 and older.
+     */
+    public static void removeHooks(Consumer<AtlasApi> enable, Runnable disable) {
+        if (enable != null) {
+            ENABLE.remove(enable);
+        }
+        if (disable != null) {
+            DISABLE.remove(disable);
+        }
     }
 
     /** The layer with this id, made on first use. pluginId and layerId are 1 to 64 letters, digits or _ . : - */

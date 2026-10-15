@@ -35,6 +35,7 @@ public final class AtlasConfig {
     /** The session cookie name of 1.0.0 and older, still accepted in 1.1.0. */
     public static final String LEGACY_COOKIE = "atlas_session";
     public static final String DEFAULT_CHRONICLE_EXPORT = "mods/Ryvrook_Chronicle/export/stats.json";
+    public static final String DEFAULT_DOMINION_SNAPSHOT = "mods/Ryvrook_Dominion/export/snapshot.json";
     private static final java.util.regex.Pattern COOKIE_NAME = java.util.regex.Pattern.compile("[A-Za-z0-9_]{1,32}");
     private static final java.util.regex.Pattern COOKIE_DOMAIN = java.util.regex.Pattern.compile(
             "\\.?[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*");
@@ -84,7 +85,7 @@ public final class AtlasConfig {
     public boolean hidePlayersInvisible = true;
     public int tileCacheMb = 64;
     public String adminToken = "";
-    public String dominionSnapshot = "mods/Ryvrook_Dominion/export/snapshot.json";
+    public String dominionSnapshot = DEFAULT_DOMINION_SNAPSHOT;
     /** Apply the server wide hide rules, world border and marker heights of the BetterMap mod when its files exist. */
     public boolean honorBetterMap = true;
     /** Folder of the BetterMap mod, relative to the server working directory. */
@@ -95,6 +96,11 @@ public final class AtlasConfig {
      * Read at server start.
      */
     public String tracker = TrackerMode.AUTO.key();
+    /**
+     * Show a linked player their own Coinage balance and net worth in the account menu. Off by default, since
+     * a shared screen would show it too. Needs Coinage 1.0.0 or newer.
+     */
+    public boolean showOwnMoney = false;
     /**
      * Reverse proxies whose X-Forwarded-For header is believed, as addresses or CIDR ranges.
      * Empty means the direct peer address is always the client.
@@ -667,7 +673,7 @@ public final class AtlasConfig {
             cfg.publicUrl = "";
         }
         if (cfg.dominionSnapshot == null || cfg.dominionSnapshot.isBlank()) {
-            cfg.dominionSnapshot = "mods/Ryvrook_Dominion/export/snapshot.json";
+            cfg.dominionSnapshot = DEFAULT_DOMINION_SNAPSHOT;
         }
         if (cfg.basePath != null && (cfg.basePath.contains("..") || cfg.basePath.contains("?") || cfg.basePath.contains("#"))) {
             throw new InvalidConfigException("basePath must be a plain path such as /map");

@@ -45,6 +45,12 @@ public final class MarkerService {
     /** Plugin id and layer id of the admin layer. */
     public static final String ADMIN_PLUGIN = "atlas";
     public static final String ADMIN_LAYER = "admin";
+    /**
+     * The live siege layer Dominion keeps through the API. The Dominion snapshot already gives every siege a
+     * pin with its phase and countdown, so the layer is left out of the browser while the snapshot carries
+     * sieges, and shown only when it does not.
+     */
+    public static final String DOMINION_SIEGES = "Ryvrook:Dominion:sieges";
     private static final Pattern FILE_NAME = Pattern.compile("[A-Za-z0-9_.-]{1,64}");
     private static final long FLUSH_DELAY_MS = 300;
 
@@ -141,6 +147,19 @@ public final class MarkerService {
             out.add(admin);
         }
         return out;
+    }
+
+    /** True when the browser should not get this layer because Atlas draws the same things itself. */
+    boolean shadowed(MarkerLayer l) {
+        return DOMINION_SIEGES.equals(l.key()) && atlas.snapshotDrawsSieges();
+    }
+
+    /** Tells browsers to fetch an API layer again, as when it starts or stops being shadowed. */
+    public void refreshLayer(String key) {
+        MarkerLayer l = key == null ? null : apiLayers.get(key);
+        if (l != null) {
+            markChanged(key, l.worlds());
+        }
     }
 
     private static String sourceOf(MarkerLayer l) {
@@ -429,6 +448,9 @@ public final class MarkerService {
         all.sort(Comparator.comparingInt((MarkerLayer l) -> -l.priority()).thenComparing(MarkerLayer::key));
         JsonArray list = new JsonArray();
         for (MarkerLayer l : all) {
+            if (shadowed(l)) {
+                continue;
+            }
             JsonObject o = LayerJson.layer(v, cfg, l, world, sourceOf(l));
             if (o != null) {
                 list.add(o);

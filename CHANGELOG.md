@@ -4,6 +4,34 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
+## Unreleased
+
+### Upgrading
+
+- One new setting is added with its default on the first start, `showOwnMoney` (`false`).
+- The manifest lists `Ryvrook:Coinage` as an optional dependency, so Atlas loads after Coinage when both
+  are installed.
+
+### Added
+
+- With Coinage installed and `showOwnMoney` on, a linked player sees their own wallet and net worth in
+  the account menu, from the new `/api/money` route. Nobody else sees them.
+- `AtlasApi.removeHooks` takes back hooks added with `onEnable` and `onDisable`.
+
+### Changed
+
+- The public map no longer shows Dominion's live siege layer while the Dominion snapshot lists sieges.
+  Each siege already had a pin from the snapshot, so the map showed it twice and the layer list had
+  two Sieges entries. The layer still shows when the snapshot lacks sieges.
+- The public map drops a Dominion snapshot at the default path once Dominion has been missing from the
+  server for a minute, and reads it again when Dominion is back. Before, a removed Dominion left its
+  last territories on the map for good.
+- The public map no longer names hidden feats. Recent unlocks, milestones and firsts of a feat that
+  Feats marks hidden say "A hidden feat" to everyone but admins and the player who earned it, its
+  rarity is left out, and timeline lines say a hidden feat was earned without naming it.
+- With TrackerAPI 1.0.3 or newer, which reloads Atlas by itself after its own reload, Atlas no longer
+  logs a line asking for that reload.
+
 ## 1.6.0 - 2026-10-14
 
 This is Atlas 1.6.0, dated 2026-10-14. Atlas works with TrackerAPI. When TrackerAPI 1.0.0 or newer is

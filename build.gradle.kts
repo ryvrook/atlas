@@ -7,8 +7,14 @@ version = "1.6.0"
 
 val hytaleChannel = (project.findProperty("hytale_channel") as String?) ?: "release"
 val hytaleVersion = (project.findProperty("hytale_version") as String?) ?: "0.7.1"
-// TrackerAPI is optional at run time. Atlas compiles its bridge against the jar, which is never bundled.
+// TrackerAPI and Coinage are optional at run time. Atlas compiles one bridge class against each jar, and
+// neither jar is bundled. -PtrackerApiJar and -PcoinageJar point elsewhere, else the sibling checkouts are used.
 val trackerApiJar = (project.findProperty("trackerApiJar") as String?) ?: "../trackerapi/build/libs/TrackerAPI-1.0.0.jar"
+val coinageJar = (project.findProperty("coinageJar") as String?)?.trim()
+    ?: listOf(
+        "../coinage/build/libs/Coinage-api-1.1.0.jar",
+        System.getProperty("user.home") + "/Projects/coinage/build/libs/Coinage-api-1.1.0.jar"
+    ).firstOrNull { file(it).exists() } ?: "../coinage/build/libs/Coinage-api-1.1.0.jar"
 
 java {
     toolchain {
@@ -29,6 +35,8 @@ dependencies {
     testImplementation("com.hypixel.hytale:Server:$hytaleVersion")
     compileOnly(files(trackerApiJar))
     testImplementation(files(trackerApiJar))
+    compileOnly(files(coinageJar))
+    testImplementation(files(coinageJar))
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

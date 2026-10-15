@@ -1,7 +1,7 @@
 package dev.ryvrook.atlas.integration;
 
 import dev.ryvrook.atlas.config.TrackerMode;
-import dev.ryvrook.atlas.integration.TrackerPresence.Found;
+import dev.ryvrook.atlas.integration.PluginPresence.Found;
 import dev.ryvrook.atlas.integration.TrackerPresence.Source;
 import org.junit.jupiter.api.Test;
 
@@ -14,6 +14,7 @@ class TrackerPresenceTest {
     private static final Found CURRENT = new Found(new Object(), "1.0.0");
     private static final Found NEWER = new Found(new Object(), "1.2.3");
     private static final Found OLD = new Found(new Object(), "0.9.4");
+    private static final Found PATCHED = new Found(new Object(), "1.0.2");
 
     @Test
     void autoUsesTrackerApiOnlyWhenNewEnough() {
@@ -49,13 +50,25 @@ class TrackerPresenceTest {
     void watchAsksForAReloadOncePerChange() {
         TrackerPresence.Watch w = new TrackerPresence.Watch(TrackerMode.AUTO, Source.TRACKER, CURRENT);
         assertNull(w.check(CURRENT));
-        String reloaded = w.check(NEWER);
+        String reloaded = w.check(PATCHED);
         assertNotNull(reloaded);
-        assertTrue(reloaded.contains("was reloaded"));
-        assertTrue(reloaded.contains("only be registered at server start"));
+        assertTrue(reloaded.contains("1.0.2 was reloaded"));
+        assertTrue(reloaded.contains("cannot use the new TrackerAPI classes"));
+        assertNull(w.check(PATCHED));
+        String gone = w.check(null);
+        assertTrue(gone.contains("was unloaded"));
+        assertTrue(gone.contains("only be registered at plugin start"));
+        assertNull(w.check(null));
+    }
+
+    @Test
+    void watchLeavesTheReloadToATrackerApiThatReloadsItsDependents() {
+        TrackerPresence.Watch w = new TrackerPresence.Watch(TrackerMode.AUTO, Source.TRACKER, CURRENT);
+        assertNull(w.check(new Found(new Object(), TrackerPresence.RELOADS_DEPENDENTS)));
         assertNull(w.check(NEWER));
         assertTrue(w.check(null).contains("was unloaded"));
-        assertNull(w.check(null));
+        TrackerPresence.Watch own = new TrackerPresence.Watch(TrackerMode.AUTO, Source.OWN, null);
+        assertNull(own.check(NEWER));
     }
 
     @Test

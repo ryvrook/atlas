@@ -35,9 +35,11 @@ public final class Leaderboard {
 
     /**
      * One new Feats event. kind is feats.unlock, feats.milestone or feats.first. uuid and name are the real
-     * player, or null when the record names nobody. featName falls back to the feat id.
+     * player, or null when the record names nobody. featName falls back to the feat id. hiddenFeat is true for
+     * a feat Feats keeps hidden, as far as its recent list shows.
      */
-    public record FeatEvent(String kind, long at, UUID uuid, String name, String feat, String featName, String tier) {
+    public record FeatEvent(String kind, long at, UUID uuid, String name, String feat, String featName, String tier,
+                            boolean hiddenFeat) {
     }
 
     public void onEvent(Consumer<FeatEvent> listener) {
@@ -155,15 +157,17 @@ public final class Leaderboard {
                 continue;
             }
             out.add(new FeatEvent("feats.unlock", at, Payloads.uuid(Payloads.text(r, "uuid")), Payloads.text(r, "name"),
-                    feat, nameOr(Payloads.text(r, "featName"), feat), Payloads.text(r, "tier")));
+                    feat, nameOr(Payloads.text(r, "featName"), feat), Payloads.text(r, "tier"), Payloads.flag(r, "hidden")));
         }
-        records(out, "feats.milestone", Json.obj(before, "milestones"), Json.obj(next, "milestones"));
-        records(out, "feats.first", Json.obj(before, "firsts"), Json.obj(next, "firsts"));
+        java.util.Set<String> secret = Payloads.hiddenFeats(next);
+        records(out, "feats.milestone", Json.obj(before, "milestones"), Json.obj(next, "milestones"), secret);
+        records(out, "feats.first", Json.obj(before, "firsts"), Json.obj(next, "firsts"), secret);
         out.sort((a, b) -> Long.compare(a.at(), b.at()));
         return out;
     }
 
-    private static void records(List<FeatEvent> out, String kind, JsonObject before, JsonObject next) {
+    private static void records(List<FeatEvent> out, String kind, JsonObject before, JsonObject next,
+                                java.util.Set<String> secret) {
         if (next == null) {
             return;
         }
@@ -182,7 +186,7 @@ public final class Leaderboard {
                 continue;
             }
             out.add(new FeatEvent(kind, at, Payloads.uuid(Payloads.text(r, "by")), Payloads.text(r, "byName"), e.getKey(),
-                    nameOr(Payloads.text(r, "featName"), e.getKey()), Payloads.text(r, "tier")));
+                    nameOr(Payloads.text(r, "featName"), e.getKey()), Payloads.text(r, "tier"), secret.contains(e.getKey())));
         }
     }
 

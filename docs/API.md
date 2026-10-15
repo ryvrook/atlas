@@ -104,7 +104,7 @@ positions are snapped to the chunk corner for non admins other than the player t
 
 ```
 Viewer      {linked: bool, name: string|null, faction: string|null, admin: bool, viewingAs: bool,
-             layers: {<layer>: bool}}
+             money: bool, layers: {<layer>: bool}}
 Server      {apiVersion: 1, title: string, publicUrl: string|null, version: string, now: ms,
              uptimeSeconds: int, betterMap: bool}
 Party       {name: string, uuid: string|null, type: string, player: bool, boss: bool}
@@ -119,6 +119,8 @@ NationRef   {tag: string, name: string, color: string|null}
 
 - `viewingAs` is true when an admin views the map as a faction, and `faction` then holds that
   faction's tag, which the client sends back as `?as=`.
+- `money` is true when `/api/money` has the viewer's own balance to give, which needs a linked player,
+  Coinage and `showOwnMoney`. Not in Atlas 1.6.0 and older.
 - `layers` has one key per visibility layer, which are players, paths, lastSeen, territories, points,
   events, zones, factions, nations, stats, terrain, heat, feed, chat, kills, markers, worldevents,
   leaderboard, layers, timeline and iso.
@@ -284,6 +286,13 @@ players. `Unlock.rarity` is the same value for that feat or null. `milestones` a
 first. A milestone reached with nobody named has `uuid` and `name` null. Rows are in Feats rank order
 and `rank` starts at 1.
 
+A feat Feats keeps hidden, which its recent list marks with `hidden`, keeps its name only for admins
+and for the viewer who earned it, as far as the recent list and the firsts show. Everyone else gets
+`feat` `"hidden"`, `featName` `"A hidden feat"`, an empty `category`, a null `rarity`, and no entry
+for it in `rarity`. Milestones and firsts of that feat are masked the same way. `totalFeats` is the
+count the export gives, which grows when other plugins add feats. Masking is not in Atlas 1.6.0 and
+older.
+
 ### GET /api/territories/{world}
 
 Follows `territories`.
@@ -398,6 +407,17 @@ blocks broken, blocks placed, distance travelled and items crafted. `unit` is `c
 `count`. `boards` holds the top ten of each board that has rows, time played, kills and blocks broken
 first, then the rest in the order of the file. A player hidden from the viewer, by Atlas or by
 Chronicle, has the name `"A player"` and a null uuid.
+
+### GET /api/money
+
+The viewer's own wallet and net worth in Coinage's primary currency, formatted by Coinage. Answers 200
+with `available: false` and nulls unless the viewer is a linked player, not an admin viewing as a
+faction, `showOwnMoney` is true and Coinage runs. Never about another player. Not in Atlas 1.6.0 and
+older.
+
+```
+{available: bool, currency: string|null, balance: string|null, netWorth: string|null}
+```
 
 ### GET /api/changes/{world}
 

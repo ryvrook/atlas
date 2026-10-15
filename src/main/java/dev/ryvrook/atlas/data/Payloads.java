@@ -593,9 +593,58 @@ public final class Payloads {
      * viewer must not see that player, and such players become "A player" with a null uuid everywhere.
      */
     public static JsonObject leaderboard(JsonObject root, long updatedAt, Predicate<UUID> hidden) {
+        return leaderboard(root, updatedAt, hidden, null, false);
+    }
+
+    /** What a hidden feat is called for a viewer who has not earned it. */
+    public static final String HIDDEN_FEAT_NAME = "A hidden feat";
+
+    /**
+     * The ids of hidden feats, from the hidden flag Feats writes on its recent unlocks. Milestone and first
+     * records carry no flag of their own, so a hidden feat is only known once it shows up in the recent list.
+     */
+    public static java.util.Set<String> hiddenFeats(JsonObject root) {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        for (JsonElement e : array(root, "recent")) {
+            if (e.isJsonObject() && flag(e.getAsJsonObject(), "hidden")) {
+                String feat = text(e.getAsJsonObject(), "feat");
+                if (feat != null) {
+                    out.add(feat);
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Same as {@link #leaderboard(JsonObject, long, Predicate)} for one viewer. A hidden feat keeps its name
+     * only for admins and for a viewer who earned it, as far as the recent list and the firsts show.
+     * Everyone else sees {@link #HIDDEN_FEAT_NAME}, the id {@code hidden}, no category and no rarity.
+     */
+    public static JsonObject leaderboard(JsonObject root, long updatedAt, Predicate<UUID> hidden, UUID viewer,
+                                         boolean admin) {
         if (root == null) {
             return emptyLeaderboard();
         }
+        java.util.Set<String> secret = admin ? java.util.Set.of() : hiddenFeats(root);
+        java.util.Set<String> owned = new java.util.HashSet<>();
+        if (viewer != null && !secret.isEmpty()) {
+            String me = viewer.toString();
+            for (JsonElement e : array(root, "recent")) {
+                if (e.isJsonObject() && me.equalsIgnoreCase(text(e.getAsJsonObject(), "uuid"))) {
+                    owned.add(text(e.getAsJsonObject(), "feat"));
+                }
+            }
+            JsonObject firsts = object(root, "firsts");
+            if (firsts != null) {
+                for (Map.Entry<String, JsonElement> e : firsts.entrySet()) {
+                    if (e.getValue().isJsonObject() && me.equalsIgnoreCase(text(e.getValue().getAsJsonObject(), "by"))) {
+                        owned.add(e.getKey());
+                    }
+                }
+            }
+        }
+        Predicate<String> masked = feat -> feat != null && secret.contains(feat) && !owned.contains(feat);
         JsonObject out = new JsonObject();
         out.addProperty("available", true);
         put(out, "updatedAt", updatedAt > 0 ? updatedAt : time(root, "updatedAt"));
@@ -608,7 +657,7 @@ public final class Payloads {
         if (rin != null) {
             for (Map.Entry<String, JsonElement> e : rin.entrySet()) {
                 Double v = number(rin, e.getKey());
-                if (v != null) {
+                if (v != null && !masked.test(e.getKey())) {
                     rarity.addProperty(e.getKey(), Math.max(0, Math.min(1, v)));
                 }
             }
@@ -651,26 +700,31 @@ public final class Payloads {
             UUID id = uuid(text(r, "uuid"));
             String name = text(r, "name");
             person(o, "uuid", "name", id, name == null ? "" : name, hidden.test(id));
-            o.addProperty("feat", feat);
+            boolean mask = masked.test(feat);
+            o.addProperty("feat", mask ? "hidden" : feat);
             String featName = text(r, "featName");
-            o.addProperty("featName", featName == null ? feat : featName);
+            o.addProperty("featName", mask ? HIDDEN_FEAT_NAME : featName == null ? feat : featName);
             String tier = text(r, "tier");
             o.addProperty("tier", tier == null ? "" : tier);
             o.addProperty("points", whole(r, "points", 0));
             String category = text(r, "category");
-            o.addProperty("category", category == null ? "" : category);
+            o.addProperty("category", mask || category == null ? "" : category);
             o.addProperty("hiddenFeat", flag(r, "hidden"));
-            put(o, "rarity", rarity.has(feat) ? (Number) rarity.get(feat).getAsDouble() : null);
+            put(o, "rarity", !mask && rarity.has(feat) ? (Number) rarity.get(feat).getAsDouble() : null);
             recent.add(o);
         }
         out.add("recent", recent);
-        out.add("milestones", records(object(root, "milestones"), hidden));
-        out.add("firsts", records(object(root, "firsts"), hidden));
+        out.add("milestones", records(object(root, "milestones"), hidden, masked));
+        out.add("firsts", records(object(root, "firsts"), hidden, masked));
         return out;
     }
 
     /** Milestone or first records keyed by feat id, as a list oldest first. */
     static JsonArray records(JsonObject in, Predicate<UUID> hidden) {
+        return records(in, hidden, f -> false);
+    }
+
+    static JsonArray records(JsonObject in, Predicate<UUID> hidden, Predicate<String> masked) {
         List<JsonObject> rows = new ArrayList<>();
         if (in != null) {
             for (Map.Entry<String, JsonElement> e : in.entrySet()) {
@@ -683,9 +737,10 @@ public final class Payloads {
                     continue;
                 }
                 JsonObject o = new JsonObject();
-                o.addProperty("feat", e.getKey());
+                boolean mask = masked.test(e.getKey());
+                o.addProperty("feat", mask ? "hidden" : e.getKey());
                 String featName = text(r, "featName");
-                o.addProperty("featName", featName == null ? e.getKey() : featName);
+                o.addProperty("featName", mask ? HIDDEN_FEAT_NAME : featName == null ? e.getKey() : featName);
                 String tier = text(r, "tier");
                 o.addProperty("tier", tier == null ? "" : tier);
                 o.addProperty("at", at);

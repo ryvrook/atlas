@@ -1,9 +1,7 @@
 package dev.ryvrook.atlas.integration;
 
-import com.hypixel.hytale.common.plugin.PluginIdentifier;
-import com.hypixel.hytale.server.core.plugin.PluginBase;
-import com.hypixel.hytale.server.core.plugin.PluginManager;
 import dev.ryvrook.atlas.config.TrackerMode;
+import dev.ryvrook.atlas.integration.PluginPresence.Found;
 
 /**
  * Finds TrackerAPI through the engine's plugin manager and decides where the heat layer and the kill
@@ -25,30 +23,12 @@ public final class TrackerPresence {
         NONE
     }
 
-    /** The loaded TrackerAPI plugin object and its manifest version. */
-    public record Found(Object identity, String version) {
+    /** The loaded TrackerAPI, or null when it is not loaded. Safe from any thread. */
+    public static Found find() {
+        return PluginPresence.find(GROUP, NAME);
     }
 
     private TrackerPresence() {
-    }
-
-    /** The loaded TrackerAPI, or null when it is not loaded. Safe from any thread. */
-    public static Found find() {
-        try {
-            PluginManager manager = PluginManager.get();
-            if (manager == null) {
-                return null;
-            }
-            PluginBase p = manager.getPlugin(new PluginIdentifier(GROUP, NAME));
-            if (p == null) {
-                return null;
-            }
-            String version = p.getManifest() == null || p.getManifest().getVersion() == null
-                    ? "0.0.0" : p.getManifest().getVersion().toString();
-            return new Found(p, version);
-        } catch (RuntimeException | LinkageError e) {
-            return null;
-        }
     }
 
     /** True when the found TrackerAPI is one Atlas can use. */
@@ -81,10 +61,15 @@ public final class TrackerPresence {
         };
     }
 
+    /** TrackerAPI from this version on reloads every plugin that lists it, Atlas included, after its own start. */
+    public static final String RELOADS_DEPENDENTS = "1.0.3";
+
     /**
      * Watches the TrackerAPI plugin object every few seconds. A reloaded TrackerAPI brings new classes that
      * the running Atlas cannot use, and one that appears or goes away after setup cannot change the systems
-     * Atlas registered, so each change asks for a reload of Atlas in one log line.
+     * Atlas registered. TrackerAPI 1.0.3 and newer reloads Atlas itself two seconds after it starts, so the
+     * watch stays quiet then. For an older TrackerAPI, or one that was unloaded, each change asks for a
+     * reload of Atlas in one log line.
      */
     public static final class Watch {
         private final Source source;
@@ -97,7 +82,7 @@ public final class TrackerPresence {
             this.seen = atSetup == null ? null : atSetup.identity();
         }
 
-        /** The line to log for the plugin object now loaded, or null when nothing changed. */
+        /** The line to log for the plugin object now loaded, or null when nothing changed or TrackerAPI handles it. */
         public synchronized String check(Found now) {
             Object id = now == null ? null : now.identity();
             if (id == seen || mode == TrackerMode.NEVER) {
@@ -105,6 +90,9 @@ public final class TrackerPresence {
             }
             Object before = seen;
             seen = id;
+            if (id != null && !VersionCompare.below(now.version(), RELOADS_DEPENDENTS)) {
+                return null;
+            }
             String what = id == null ? "TrackerAPI was unloaded"
                     : before == null ? "TrackerAPI " + now.version() + " was loaded"
                     : "TrackerAPI " + now.version() + " was reloaded";
@@ -115,8 +103,8 @@ public final class TrackerPresence {
                 case OWN -> "Atlas keeps its own systems until it is reloaded";
                 case NONE -> "Atlas records nothing until it is reloaded";
             };
-            String reason = mode == TrackerMode.AUTO && source == Source.TRACKER
-                    ? ", since its own systems can only be registered at server start" : "";
+            String reason = id == null && mode == TrackerMode.AUTO && source == Source.TRACKER
+                    ? ", since its own systems can only be registered at plugin start" : "";
             return what + ". " + effect + reason + ". Run /plugin reload Ryvrook:Atlas";
         }
     }

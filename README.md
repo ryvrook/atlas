@@ -183,6 +183,7 @@ map down the same way, so a setting you meant to tighten can never stay loose. F
 | `honorBetterMap` | `true` | Apply BetterMap's server wide rules when its settings file exists |
 | `betterMapDir` | `mods/BetterMap` | BetterMap's folder, relative to the server working directory |
 | `tracker` | `auto` | Where the heat layer and the kill feed come from. `auto` uses TrackerAPI when it is installed, `always` only TrackerAPI, `never` only Atlas's own systems. Read at server start |
+| `showOwnMoney` | `false` | Show a linked player their own Coinage wallet and net worth in the account menu. Needs Coinage |
 | `trustedProxies` | empty | Reverse proxies whose forwarded headers are believed, as addresses or CIDR ranges such as `10.0.0.0/8` |
 | `visibility` | see below | Who sees each layer |
 | `defaultWorld` | empty | World the map opens on. Empty means the server's default world |
@@ -587,6 +588,8 @@ AtlasApi.onDisable(() -> {
 Atlas is already up and again every time Atlas starts. `onDisable` runs every time Atlas stops, and
 the layers and markers go with it, so register them again from `onEnable`. Both hooks stay
 registered across `/atlas reload`. A hook that throws is logged and never reaches Atlas.
+`AtlasApi.removeHooks(enable, disable)` takes them back when your plugin stops first. A `/plugin reload`
+of Atlas loads its classes again, so a plugin compiled against them has to be reloaded after it.
 
 **Layers and markers.** `layer(pluginId, layerId)` makes a layer on first use and returns it after
 that. Layers take `label`, `tier`, `defaultHidden`, `priority`, `minZoom` and `maxZoom`, and add
@@ -870,7 +873,9 @@ When the separate Feats plugin writes its export at `featsExport`, a Leaderboard
 Feats totals, the top players with their last unlock time, recent unlocks with the rarity of each
 feat and a rare tag under 5 percent, the world milestones and the server firsts. Feats unlocks,
 milestones and firsts are written to the timeline event log, and each day's stats carry a Feats
-summary. Atlas reads the file only. A file that cannot be read is logged once and the last good copy
+summary. A hidden feat is named only to admins and to the player who earned it, everyone else sees
+"A hidden feat", and timeline lines never name one. The feat total comes from the export. Atlas reads
+the file only. A file that cannot be read is logged once and the last good copy
 stays on the map. Without the file the tab stays hidden.
 
 ## Chronicle
@@ -893,8 +898,16 @@ Atlas works with [TrackerAPI](https://www.curseforge.com/hytale/mods/trackerapi/
 layer and the kill feed, and registers none of its own systems for them, so the server counts each
 event once. Without TrackerAPI Atlas tracks them itself as before. The heat and the kill history carry
 on in the same files either way. Set `tracker` to `never` to keep Atlas's own systems, or to `always`
-to rely on TrackerAPI alone. After installing, updating or removing TrackerAPI, restart the server or
-reload Atlas as the log asks.
+to rely on TrackerAPI alone. TrackerAPI 1.0.3 and newer reloads Atlas by itself after its own reload.
+After installing or removing TrackerAPI, or reloading an older one, restart the server or reload
+Atlas as the log asks.
+
+## Works with Coinage
+
+When Coinage 1.0.0 or newer is installed and `showOwnMoney` is `true`, a linked player sees their own
+wallet and net worth in the primary currency in the account menu of the map, formatted the way Coinage
+writes amounts in game. Nobody else sees them, admins included, and nothing about money reaches the
+public map. Atlas only reads from Coinage and never moves money.
 
 ## BetterMap compatibility
 
@@ -921,7 +934,10 @@ Without the file Atlas runs standalone with terrain, players, markers and zone n
 
 The file is reloaded when its modification time changes, checked once a second. A missing file is
 logged once with the path Atlas looked at, and a file that fails to parse is logged at most once a
-minute. Atlas reads snapshot version 1. A file with another version is still read and Atlas logs one
+minute. At the default path the file is dropped from the map once Dominion has been missing from the
+server for a minute, so a removed Dominion leaves no old territories behind, and read again when
+Dominion is back. While the file lists sieges, Dominion's own live siege layer is left off the map,
+since every siege already has its pin. Atlas reads snapshot version 1. A file with another version is still read and Atlas logs one
 warning. Nothing from the file reaches browsers unless Atlas lists the field.
 
 ```

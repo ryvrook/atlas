@@ -17,7 +17,7 @@ Everything lives under `src/main/java/dev/ryvrook/atlas`.
 | `command` | `/atlas` and its sub commands |
 | `config` | `atlas.json` parsing, validation and visibility levels |
 | `data` | Engine reads, the factions snapshot, Feats, the Chronicle export, kills, heat, last seen and the payload builders |
-| `integration` | The TrackerAPI presence check, the version compare and `TrackerBridge`, the one class that names TrackerAPI types |
+| `integration` | Plugin presence checks, the version compare, the Dominion watch, and `TrackerBridge` and `CoinageBridge`, the only classes that name TrackerAPI and Coinage types |
 | `iso` | 3D views, the chunk reader, the raster, the colour table, the PNG encoder, the cache, daily views and the routes |
 | `http` | The embedded HTTP server, the event stream hub, rate limits, trusted proxies and marker icons |
 | `markers` | Marker layers behind the API, the drop folder, the admin layer and the layer route |
@@ -54,9 +54,11 @@ and build with the wrapper.
 The jar lands in `build/libs/Atlas-<version>.jar`. The Hytale server artifact comes from the Hytale
 Maven repository, and `hytale_channel` and `hytale_version` in `gradle.properties` select it.
 
-The TrackerAPI jar is a compile and test dependency only and is never bundled. Gradle looks for it at
-`../trackerapi/build/libs/TrackerAPI-1.0.0.jar`, and `-PtrackerApiJar=/path/to/TrackerAPI-1.0.0.jar`
-points it elsewhere.
+The TrackerAPI and Coinage jars are compile and test dependencies only and are never bundled. Gradle
+looks for `../trackerapi/build/libs/TrackerAPI-1.0.0.jar` and for
+`../coinage/build/libs/Coinage-api-1.1.0.jar`, then the same Coinage jar under `~/Projects/coinage`.
+`-PtrackerApiJar=/path/to/TrackerAPI-1.0.0.jar` and `-PcoinageJar=/path/to/Coinage-api-1.1.0.jar` point
+them elsewhere.
 
 The version is set once, as `version` in `build.gradle.kts`. `processResources` writes it into
 `manifest.json` in place of `@version@`, and a generated `version.txt` next to `AtlasVersion` carries
@@ -74,9 +76,9 @@ pure logic and use the Hytale server jar only for types.
 | `config` | Parsing, defaults, added keys, the fail closed cases, the cookie and Chronicle keys and per world settings |
 | `data` | Marker merging, the hidden player rule, payload field lists, Feats diffs, the Chronicle export reader and the kill log file |
 | `http` | Path safety, rate limits, rate keys, trusted proxies, the event stream queue and the move from the old session cookie |
-| `integration` | The `tracker` decision, the reload watch, and `TrackerBridge` fed synthetic TrackerAPI records with the heat and kill lines the block and death systems make |
+| `integration` | The `tracker` decision, the reload watch, `TrackerBridge` fed synthetic TrackerAPI records with the heat and kill lines the block and death systems make, the Dominion watch and the own money route |
 | `iso` | View parameters, the cache keys and prune, the raster on synthetic columns and the iso config |
-| `markers` | The drop folder parser, the layer payload and tiers, popup escaping and timeline visibility |
+| `markers` | The drop folder parser, the layer payload and tiers, popup escaping, timeline visibility and Dominion's siege layer giving way to the snapshot |
 | `tiles` | Tile key math, the explored index, chunk image decoding, the render queue and the token bucket |
 | `timeline` | The blob store, manifest diffs, block changes, the skip decision and the catch up, carried and drawn snapshot tiles, slots filled in from earlier slots, the export contents, slot windows, pruning with tombstones, the event log bound, event places, route parsing and the export range |
 
@@ -253,6 +255,7 @@ The periodic tasks and their intervals.
 | Task | Interval |
 | --- | --- |
 | Factions snapshot check | 1 second |
+| Dominion presence at the default snapshot path | 5 seconds |
 | World info and player health | 2 seconds |
 | Player push over the event stream | `playerUpdateHz`, 1 per second by default, full list every 10 seconds |
 | World watch for added and removed worlds | 5 seconds |
@@ -261,7 +264,7 @@ The periodic tasks and their intervals.
 | Feats export check | 5 seconds |
 | Chronicle export check | 5 seconds |
 | BetterMap settings check | 15 seconds |
-| TrackerAPI reload watch | 5 seconds |
+| TrackerAPI and Coinage reload watch | 5 seconds |
 | Marker layer drop folder | 5 seconds, with the shared markers |
 | Idle pre render | 5 seconds, after 30 seconds without a tile request |
 | Timeline event log flush | 5 seconds |
@@ -330,7 +333,9 @@ modification time or size changes. The admin commands copy the admin layer, chan
 write `admin.json` atomically, and refuse to write while the file holds an error.
 
 `AtlasApi` publishes the running instance through `enable` and `disable`. Hooks registered with
-`onEnable` and `onDisable` live in static lists, so they survive a reload of Atlas.
+`onEnable` and `onDisable` live in static lists, so they survive `/atlas reload`, and
+`removeHooks` takes them out. A `/plugin reload` of Atlas starts over with new classes, see Dominion
+below.
 
 ## Session API
 
@@ -473,8 +478,42 @@ engine's plugin class loader resolves its classes for Atlas when it is installed
   `TrackerApi.snapshot`, and pass it through the same `PlaceRule` and the same sink to the kill log, the
   feed and the timeline. A creature is a boss when the event says so or `KillLog.isBoss` names it.
 - The chunk save systems, chat, disconnect and the asset reload listener stay registered either way.
-- A reloaded TrackerAPI brings new classes in a new loader. `TrackerPresence.Watch` compares the plugin
-  object every 5 seconds and logs one line asking for `/plugin reload` of Atlas when it changed.
+- A reloaded TrackerAPI brings new classes in a new loader. TrackerAPI 1.0.3 and newer reloads every
+  enabled plugin that lists it two seconds after its own start, Atlas included. `TrackerPresence.Watch`
+  compares the plugin object every 5 seconds and stays quiet for such a TrackerAPI. For an older one,
+  or one that was unloaded, it logs one line asking for `/plugin reload` of Atlas.
+
+## Coinage
+
+Coinage is optional too and listed under `OptionalDependencies`. `start` asks the plugin manager for
+`Ryvrook:Coinage` and, for 1.0.0 or newer, loads `CoinageBridge`, which hooks `CoinageApi.onEnable` and
+`onDisable` and is the only class that imports `dev.ryvrook.coinage`. The plugin reaches it through
+`CoinageLink`. Atlas only reads. `/api/money` asks `reports().netWorth` for the viewer's own player in
+the primary currency and formats the `wallet` part and the total with `Currency.format`, only for a
+linked player, not an admin viewing as a faction, and only while `showOwnMoney` is on. The account
+menu fetches it each time it opens, so nothing is cached and nothing about money goes over the event
+stream. A Coinage that is reloaded or unloaded leaves the bridge on the old classes, and the 5 second
+watch logs one line asking for a reload of Atlas.
+
+## Dominion
+
+Atlas never links against Dominion. It reads `export/snapshot.json`, and Dominion pushes a live siege
+layer, `Ryvrook:Dominion:sieges`, and its `/f map hide` switch through `AtlasApi`. The snapshot gives
+every siege a pin with its phase and countdown, so `MarkerService` leaves the siege layer out of the
+layer payload while the snapshot is read and carries a `sieges` list. When the snapshot appears or goes
+away, browsers are told to fetch that layer again. Hidden players reach Atlas both ways, which is
+harmless since either one hides.
+
+The snapshot file stays on disk when Dominion is removed. `DominionWatch` looks at the plugin manager
+every 5 seconds and, at the default path only, drops the snapshot once Dominion has been missing,
+disabled or failed for a minute, and reads it again as soon as Dominion is back. The minute covers a
+`/plugin reload` of Dominion and the boot, since Dominion loads after Atlas.
+
+A `/plugin reload` of Atlas loads the `api` classes again, while Dominion stays linked to the old
+ones until it is reloaded too. Dominion notices and logs one line asking for that. Until then the
+snapshot still draws its sieges and hides its hidden players. `AtlasApi.removeHooks` lets a plugin take
+its hooks back when it stops first. TrackerAPI and Coinage each reload Atlas after their own reload, so
+a reload of TrackerAPI reloads Atlas more than once, which is harmless.
 
 ## BetterMap
 

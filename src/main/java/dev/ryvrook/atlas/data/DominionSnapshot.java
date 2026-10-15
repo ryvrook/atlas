@@ -357,6 +357,8 @@ public final class DominionSnapshot {
     private volatile Path path;
     private volatile View view = EMPTY;
     private volatile boolean present;
+    /** Set while the plugin that writes the file is known not to run, so a file it left behind is not shown. */
+    private volatile boolean ownerGone;
     private FileTime lastModified;
     private long lastSize = -1;
     private long lastFeedAt;
@@ -382,6 +384,24 @@ public final class DominionSnapshot {
 
     public Path path() {
         return path;
+    }
+
+    /**
+     * Marks the plugin that writes the file as gone or back. While it is gone the file is treated as missing,
+     * so territories and sieges of a removed plugin do not stay on the map. The next poll applies it.
+     */
+    public void setOwnerGone(boolean gone) {
+        synchronized (this) {
+            if (ownerGone != gone) {
+                ownerGone = gone;
+                lastModified = null;
+                lastSize = -1;
+            }
+        }
+    }
+
+    public boolean ownerGone() {
+        return ownerGone;
     }
 
     public View view() {
@@ -417,7 +437,7 @@ public final class DominionSnapshot {
     public synchronized boolean poll(Consumer<JsonObject> newFeedLine, Consumer<JsonObject> newChatLine) {
         Path p = path;
         try {
-            if (p == null || !Files.isRegularFile(p)) {
+            if (p == null || ownerGone || !Files.isRegularFile(p)) {
                 if (present) {
                     present = false;
                     view = EMPTY;

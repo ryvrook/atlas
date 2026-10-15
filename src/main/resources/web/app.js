@@ -273,11 +273,20 @@
     if (v.viewingAs) h += "Viewing the map as <b>" + esc(v.faction) + "</b>.";
     else if (v.admin) h += "Linked as <b>" + esc(v.name || "admin") + "</b> with admin access.";
     else h += "Linked as <b>" + esc(v.name) + "</b>" + (v.faction ? " of " + A.facChip(v.faction) : "") + ".";
-    h += "</div><div class='menu-sep'></div>";
+    h += "</div>";
+    if (v.money) h += "<div class='menu-note' id='account-money' hidden></div>";
+    h += "<div class='menu-sep'></div>";
     if (v.viewingAs) h += "<button class='menu-item' data-act='admin'>" + A.icon("admin", "sm") + "<span class='grow'>Back to the admin view</span></button>";
     h += "<button class='menu-item' data-act='findme'>" + A.icon("locate", "sm") + "<span class='grow'>Find me on the map</span></button>";
     if (!v.viewingAs) h += "<button class='menu-item' data-act='logout'>" + A.icon("logout", "sm") + "<span class='grow'>Unlink this browser</span></button>";
     menu.innerHTML = h;
+    // The player's own Coinage balance, asked for each time the menu opens so it is never stale.
+    if (v.money) A.api("api/money").then((d) => {
+      const el = $("account-money");
+      if (!el || !d || !d.available) return;
+      el.textContent = "Wallet " + d.balance + ", net worth " + d.netWorth;
+      el.hidden = false;
+    }).catch(() => { /* the menu works without it */ });
     menu.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => {
       closeAccountMenu();
       if (b.dataset.act === "logout") logout();
