@@ -141,21 +141,25 @@ public final class Atlas {
         return Path.of(cfg.featsExport).toAbsolutePath().normalize();
     }
 
-    /** The Chronicle stats export path resolved against the server working directory. */
+    /**
+     * The Chronicle stats export path resolved against the server working directory. Either default path
+     * gives the Ryvrook_ChronicleStats file, which Chronicle 1.1.0 and newer writes, so an atlas.json that
+     * still holds the old Ryvrook_Chronicle default never reads a file an older Chronicle left there while
+     * the new one exists.
+     */
     public static Path resolveChronicle(AtlasConfig cfg) {
-        return Path.of(cfg.chronicleExport).toAbsolutePath().normalize();
+        Path set = Path.of(cfg.chronicleExport).toAbsolutePath().normalize();
+        Path old = Path.of(AtlasConfig.OLD_CHRONICLE_EXPORT).toAbsolutePath().normalize();
+        return set.equals(old) ? Path.of(AtlasConfig.DEFAULT_CHRONICLE_EXPORT).toAbsolutePath().normalize() : set;
     }
 
     /**
-     * The other default Chronicle export path when chronicleExport is one of them, else null. Older files hold
-     * the Ryvrook_Chronicle path while Chronicle 1.1.0 and newer writes under Ryvrook_ChronicleStats, so
-     * whichever default is set, the other one is read while the set one is missing.
+     * The old Ryvrook_Chronicle export path when chronicleExport is either default, else null. It is read
+     * only while the Ryvrook_ChronicleStats file is missing, for a Chronicle older than 1.1.0.
      */
     public static Path chronicleFallback(AtlasConfig cfg) {
-        Path set = resolveChronicle(cfg);
         Path now = Path.of(AtlasConfig.DEFAULT_CHRONICLE_EXPORT).toAbsolutePath().normalize();
-        Path old = Path.of(AtlasConfig.OLD_CHRONICLE_EXPORT).toAbsolutePath().normalize();
-        return set.equals(now) ? old : set.equals(old) ? now : null;
+        return resolveChronicle(cfg).equals(now) ? Path.of(AtlasConfig.OLD_CHRONICLE_EXPORT).toAbsolutePath().normalize() : null;
     }
 
     /** The BetterMap folder resolved against the server working directory. */

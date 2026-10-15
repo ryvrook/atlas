@@ -151,6 +151,8 @@ class ChronicleExportTest {
         java.nio.file.Files.writeString(now, "{\"version\":1,\"totals\":{\"kills\":3}}");
         assertTrue(export.poll(), "the file at the set path wins once it exists");
         assertTrue(export.available());
+        assertEquals(3, export.root().getAsJsonObject("totals").get("kills").getAsInt());
+        assertFalse(export.poll(), "the old file is not read again while the new one exists");
     }
 
     @Test
@@ -158,7 +160,9 @@ class ChronicleExportTest {
         dev.ryvrook.atlas.config.AtlasConfig cfg = new dev.ryvrook.atlas.config.AtlasConfig();
         assertTrue(dev.ryvrook.atlas.Atlas.chronicleFallback(cfg).toString().contains("Ryvrook_Chronicle" + java.io.File.separator));
         cfg.chronicleExport = dev.ryvrook.atlas.config.AtlasConfig.OLD_CHRONICLE_EXPORT;
-        assertTrue(dev.ryvrook.atlas.Atlas.chronicleFallback(cfg).toString().contains("Ryvrook_ChronicleStats"));
+        assertTrue(dev.ryvrook.atlas.Atlas.resolveChronicle(cfg).toString().contains("Ryvrook_ChronicleStats"),
+                "the old default reads the new file first, so a stale old file is never read while it exists");
+        assertTrue(dev.ryvrook.atlas.Atlas.chronicleFallback(cfg).toString().contains("Ryvrook_Chronicle" + java.io.File.separator));
         cfg.chronicleExport = "custom/stats.json";
         org.junit.jupiter.api.Assertions.assertNull(dev.ryvrook.atlas.Atlas.chronicleFallback(cfg));
     }
