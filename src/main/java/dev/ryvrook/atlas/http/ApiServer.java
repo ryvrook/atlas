@@ -49,7 +49,7 @@ public final class ApiServer {
     /** Seconds a client may take to send a whole request. */
     static final int REQUEST_SECONDS = 30;
     private static final String STATIC_CACHE = "public, max-age=86400";
-    /** For a file asked for with ?v= of this version, which index.html adds. A new jar changes the address. */
+    /** For a file asked for with the ?v= tag index.html gives it, which changes with the file's bytes. */
     private static final String VERSIONED_CACHE = "public, max-age=31536000, immutable";
     /** Inline script elements without attributes in index.html. */
     private static final java.util.regex.Pattern INLINE_SCRIPT = java.util.regex.Pattern.compile(
@@ -400,7 +400,7 @@ public final class ApiServer {
                         .getBytes(StandardCharsets.UTF_8);
             }
             String html = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-            html = versionAssets(html, AtlasVersion.VERSION);
+            html = versionAssets(html, this::assetTag);
             return html.replace("{{TITLE}}", escapeHtml(title)).getBytes(StandardCharsets.UTF_8);
         }
     }
@@ -436,9 +436,34 @@ public final class ApiServer {
      * the files of a new jar at once while each version can still be cached for a long time.
      */
     static String versionAssets(String html, String version) {
-        String v = java.net.URLEncoder.encode(version == null ? "0" : version, StandardCharsets.UTF_8);
-        return ASSET_REF.matcher(html).replaceAll(m -> java.util.regex.Matcher.quoteReplacement(
-                m.group(1) + m.group(2) + "?v=" + v + m.group(3)));
+        return versionAssets(html, rel -> version);
+    }
+
+    /**
+     * Same with a tag per file, from {@link #assetTag}. A file the tag function does not know gets the
+     * running version.
+     */
+    static String versionAssets(String html, java.util.function.Function<String, String> tagOf) {
+        return ASSET_REF.matcher(html).replaceAll(m -> {
+            String tag = tagOf.apply(m.group(2));
+            String v = java.net.URLEncoder.encode(tag == null ? AtlasVersion.VERSION : tag, StandardCharsets.UTF_8);
+            return java.util.regex.Matcher.quoteReplacement(m.group(1) + m.group(2) + "?v=" + v + m.group(3));
+        });
+    }
+
+    /**
+     * The ?v= tag of a file in the jar, the running version and the start of the file's hash, or null when
+     * the jar has no such file. The hash part changes with the bytes, so a rebuilt jar that keeps its
+     * version still gets new addresses, and a year long immutable cache never holds an old file.
+     */
+    String assetTag(String rel) {
+        String clean = safeRelative(rel);
+        StaticFile f = clean == null ? null : staticFile(clean);
+        if (f == null) {
+            return null;
+        }
+        String hash = f.etag().replace("\"", "");
+        return AtlasVersion.VERSION + "-" + hash.substring(0, Math.min(10, hash.length()));
     }
 
     /** Sends index.html with no-cache and an ETag, or 304 when the browser already has it. */
@@ -838,12 +863,12 @@ public final class ApiServer {
         }
     }
 
-    /** True when the query is exactly v= the running version, the address versionAssets writes. */
-    static boolean versioned(String rawQuery, String version) {
-        if (rawQuery == null || version == null) {
+    /** True when the query is exactly v= the file's tag, the address versionAssets writes. */
+    static boolean versioned(String rawQuery, String tag) {
+        if (rawQuery == null || tag == null) {
             return false;
         }
-        return rawQuery.equals("v=" + java.net.URLEncoder.encode(version, StandardCharsets.UTF_8));
+        return rawQuery.equals("v=" + java.net.URLEncoder.encode(tag, StandardCharsets.UTF_8));
     }
 
     private void serveStatic(HttpExchange ex, String method, String path) throws IOException {
@@ -870,7 +895,7 @@ public final class ApiServer {
         }
         Headers h = ex.getResponseHeaders();
         h.set("Content-Type", typeOf(rel));
-        h.set("Cache-Control", versioned(ex.getRequestURI().getRawQuery(), AtlasVersion.VERSION) ? VERSIONED_CACHE : STATIC_CACHE);
+        h.set("Cache-Control", versioned(ex.getRequestURI().getRawQuery(), assetTag(rel)) ? VERSIONED_CACHE : STATIC_CACHE);
         h.set("ETag", data.etag());
         securityHeaders(h, CSP);
         if (data.gzip() != null) {

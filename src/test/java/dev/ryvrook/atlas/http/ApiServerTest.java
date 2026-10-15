@@ -172,5 +172,14 @@ class ApiServerTest {
         assertFalse(ApiServer.versioned("v=1.5.0", "1.6.0"));
         assertFalse(ApiServer.versioned(null, "1.6.0"));
         assertFalse(ApiServer.versioned("v=1.6.0&x=1", "1.6.0"));
+        assertFalse(ApiServer.versioned("v=1.6.0", null), "a file the jar does not hold is never immutable");
+    }
+
+    @Test
+    void assetTagsFollowTheFileBytes() {
+        String html = "<script src=\"app.js\"></script><link href=\"style.css\">";
+        String out = ApiServer.versionAssets(html, rel -> rel.equals("app.js") ? "1.6.0-abc" : null);
+        assertTrue(out.contains("src=\"app.js?v=1.6.0-abc\""));
+        assertTrue(out.contains("href=\"style.css?v=" + AtlasVersion.VERSION + "\""));
     }
 }
