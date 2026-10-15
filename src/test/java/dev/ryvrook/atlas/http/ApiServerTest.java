@@ -165,4 +165,12 @@ class ApiServerTest {
         assertEquals("; Path=/; HttpOnly; SameSite=Lax; Domain=.example.com", ApiServer.cookieAttributes(false, ".example.com"));
         assertEquals("; Path=/; HttpOnly; SameSite=Lax; Secure", ApiServer.cookieAttributes(true, null));
     }
+
+    @Test
+    void onlyTheRunningVersionIsCachedForAYear() {
+        assertTrue(ApiServer.versioned("v=1.6.0", "1.6.0"));
+        assertFalse(ApiServer.versioned("v=1.5.0", "1.6.0"));
+        assertFalse(ApiServer.versioned(null, "1.6.0"));
+        assertFalse(ApiServer.versioned("v=1.6.0&x=1", "1.6.0"));
+    }
 }

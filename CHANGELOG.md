@@ -29,6 +29,9 @@ new files.
 - The public map no longer names hidden feats. Recent unlocks, milestones and firsts of a feat that
   Feats marks hidden say "A hidden feat" to everyone but admins and the player who earned it, its
   rarity is left out, and timeline lines say a hidden feat was earned without naming it.
+- Scripts, stylesheets and icons asked for with the `?v=` of the running version are cached for a year
+  as immutable instead of a day, so browsers stop asking for them again every day. A new jar changes
+  the address.
 - With TrackerAPI 1.0.3 or newer, which reloads Atlas by itself after its own reload, Atlas no longer
   logs a line asking for that reload.
 

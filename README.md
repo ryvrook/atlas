@@ -784,7 +784,8 @@ Set `cookieDomain` to the shared parent domain only when the two run on sibling 
 
 Atlas serves the web client and a JSON API from inside the Hytale server. `index.html` is sent with
 `Cache-Control: no-cache` and an ETag. Every script, stylesheet and icon it references carries
-`?v=<version>` and is cached for a day. Text files are compressed once at start and sent gzipped to
+`?v=<version>` and is cached for a year as immutable, since a new jar changes the address. Files
+asked for without it are cached for a day. Text files are compressed once at start and sent gzipped to
 browsers that accept it. Static files, tiles and marker icons carry a strong ETag and answer a
 matching `If-None-Match` with 304, and every GET endpoint also answers HEAD.
 

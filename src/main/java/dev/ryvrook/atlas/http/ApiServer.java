@@ -49,6 +49,8 @@ public final class ApiServer {
     /** Seconds a client may take to send a whole request. */
     static final int REQUEST_SECONDS = 30;
     private static final String STATIC_CACHE = "public, max-age=86400";
+    /** For a file asked for with ?v= of this version, which index.html adds. A new jar changes the address. */
+    private static final String VERSIONED_CACHE = "public, max-age=31536000, immutable";
     /** Inline script elements without attributes in index.html. */
     private static final java.util.regex.Pattern INLINE_SCRIPT = java.util.regex.Pattern.compile(
             "<script>(.*?)</script>", java.util.regex.Pattern.DOTALL);
@@ -836,6 +838,14 @@ public final class ApiServer {
         }
     }
 
+    /** True when the query is exactly v= the running version, the address versionAssets writes. */
+    static boolean versioned(String rawQuery, String version) {
+        if (rawQuery == null || version == null) {
+            return false;
+        }
+        return rawQuery.equals("v=" + java.net.URLEncoder.encode(version, StandardCharsets.UTF_8));
+    }
+
     private void serveStatic(HttpExchange ex, String method, String path) throws IOException {
         String decoded;
         try {
@@ -860,7 +870,7 @@ public final class ApiServer {
         }
         Headers h = ex.getResponseHeaders();
         h.set("Content-Type", typeOf(rel));
-        h.set("Cache-Control", STATIC_CACHE);
+        h.set("Cache-Control", versioned(ex.getRequestURI().getRawQuery(), AtlasVersion.VERSION) ? VERSIONED_CACHE : STATIC_CACHE);
         h.set("ETag", data.etag());
         securityHeaders(h, CSP);
         if (data.gzip() != null) {
