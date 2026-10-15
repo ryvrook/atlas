@@ -9,7 +9,11 @@ val hytaleChannel = (project.findProperty("hytale_channel") as String?) ?: "rele
 val hytaleVersion = (project.findProperty("hytale_version") as String?) ?: "0.7.1"
 // TrackerAPI and Coinage are optional at run time. Atlas compiles one bridge class against each jar, and
 // neither jar is bundled. -PtrackerApiJar and -PcoinageJar point elsewhere, else the sibling checkouts are used.
-val trackerApiJar = (project.findProperty("trackerApiJar") as String?) ?: "../trackerapi/build/libs/TrackerAPI-1.0.0.jar"
+val trackerApiJar = (project.findProperty("trackerApiJar") as String?)?.trim()
+    ?: listOf("1.0.3", "1.0.0").flatMap {
+        listOf("../trackerapi/build/libs/TrackerAPI-$it.jar",
+            System.getProperty("user.home") + "/Projects/trackerapi/build/libs/TrackerAPI-$it.jar")
+    }.firstOrNull { file(it).exists() } ?: "../trackerapi/build/libs/TrackerAPI-1.0.3.jar"
 val coinageJar = (project.findProperty("coinageJar") as String?)?.trim()
     ?: listOf(
         "../coinage/build/libs/Coinage-api-1.1.0.jar",
