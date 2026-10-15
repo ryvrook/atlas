@@ -34,7 +34,7 @@ need `atlas.admin` and work from the console.
 | `/atlas` | The map address as a link |
 | `/atlas link` | A six character code, good for five minutes, and a link that fills it in |
 | `/atlas hide`, `/atlas show` | Hide yourself from non admins, or show yourself again |
-| `/atlas admin` | The address and whether you have admin access |
+| `/atlas admin` | The address and your admin access |
 | `/atlas reload` | Re-read `atlas.json` and the Dominion snapshot |
 | `/atlas hide <player>`, `/atlas show <player>` | Hide or show another player, saved in `hidden.json` |
 | `/atlas unlink <player>` | Sign every browser of a player out |
