@@ -174,7 +174,7 @@ class AtlasConfigTest {
         AtlasConfig d = AtlasConfig.parse(null);
         assertEquals("ryvrook_session", d.cookieName);
         assertEquals("", d.cookieDomain);
-        assertEquals("mods/Ryvrook_Chronicle/export/stats.json", d.chronicleExport);
+        assertEquals("mods/Ryvrook_ChronicleStats/export/stats.json", d.chronicleExport);
         assertEquals("", d.chronicleUrl);
         assertTrue(d.addedKeys.contains("cookieName"));
         assertTrue(d.addedKeys.contains("chronicleExport"));
@@ -184,7 +184,7 @@ class AtlasConfigTest {
         assertEquals("atlas_session", c.cookieName);
         assertEquals(".example.com", c.cookieDomain);
         assertEquals("https://example.com/stats/", c.chronicleUrl);
-        assertEquals("mods/Ryvrook_Chronicle/export/stats.json", c.chronicleExport);
+        assertEquals("mods/Ryvrook_ChronicleStats/export/stats.json", c.chronicleExport);
         assertEquals("/stats/", AtlasConfig.parse("{\"chronicleUrl\": \"/stats/\"}").chronicleUrl);
         assertEquals("ryvrook_session", AtlasConfig.parse("{\"cookieName\": \"\"}").cookieName);
 

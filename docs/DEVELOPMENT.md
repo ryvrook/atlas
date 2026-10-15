@@ -164,7 +164,7 @@ curl -s http://127.0.0.1:8190/api/chronicle
 - The link answer sets `ryvrook_session`, and the worlds answer with that cookie says `"linked":true`.
 - A request that carries the same token as `atlas_session` is linked too and its answer sets
   `ryvrook_session` and clears `atlas_session`.
-- After a `stats.json` in the shape Chronicle writes is copied into `mods/Ryvrook_Chronicle/export`,
+- After a `stats.json` in the shape Chronicle writes is copied into `mods/Ryvrook_ChronicleStats/export`,
   `api/chronicle` answers `"available":true` with its totals and boards within five seconds.
 
 To check that a broken config fails closed, put `{"port": "x"}` in `atlas.json` before boot and expect

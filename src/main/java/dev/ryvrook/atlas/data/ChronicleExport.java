@@ -94,6 +94,10 @@ public final class ChronicleExport {
     }
 
     private volatile Path path;
+    /** Read while the file at path is missing, or null. */
+    private volatile Path fallback;
+    /** The file the last read came from, so a move between path and fallback is read again. */
+    private Path lastRead;
     private volatile JsonObject root;
     private volatile long updatedAt;
     private FileTime lastModified;
@@ -108,8 +112,14 @@ public final class ChronicleExport {
     }
 
     public synchronized void setPath(Path p) {
-        if (!p.equals(path)) {
+        setPath(p, null);
+    }
+
+    /** Sets the export path and a second path read while the first one is missing. */
+    public synchronized void setPath(Path p, Path second) {
+        if (!p.equals(path) || !java.util.Objects.equals(second, fallback)) {
             path = p;
+            fallback = second;
             lastModified = null;
             lastSize = -1;
         }
@@ -140,6 +150,15 @@ public final class ChronicleExport {
     /** Checks the file and reloads it when it changed. Returns true when the published data changed. */
     public synchronized boolean poll() {
         Path p = path;
+        Path second = fallback;
+        if (second != null && (p == null || !Files.isRegularFile(p)) && Files.isRegularFile(second)) {
+            p = second;
+        }
+        if (!java.util.Objects.equals(p, lastRead)) {
+            lastRead = p;
+            lastModified = null;
+            lastSize = -1;
+        }
         try {
             if (p == null || !Files.isRegularFile(p)) {
                 lastModified = null;

@@ -203,8 +203,10 @@ map down the same way, so a setting you meant to tighten can never stay loose. F
 other factions. It needs the factions snapshot file.
 
 `featsExport` defaults to `mods/Ryvrook_Feats/export/feats.json`, `chronicleExport` to
-`mods/Ryvrook_Chronicle/export/stats.json` and `dominionSnapshot` to
-`mods/Ryvrook_Dominion/export/snapshot.json`, all relative to the server working directory.
+`mods/Ryvrook_ChronicleStats/export/stats.json` and `dominionSnapshot` to
+`mods/Ryvrook_Dominion/export/snapshot.json`, all relative to the server working directory. Chronicle
+wrote under `mods/Ryvrook_Chronicle` before 1.1.0, so while `chronicleExport` is either default path and
+its file is missing, Atlas reads the other one.
 
 `adminToken` is filled with a random 32 character value when empty. A value shorter than 24
 characters is replaced with a random one and a warning is logged.

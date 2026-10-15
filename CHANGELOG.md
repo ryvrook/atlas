@@ -32,6 +32,9 @@ new files.
 - Scripts, stylesheets and icons asked for with the `?v=` of the running version are cached for a year
   as immutable instead of a day, so browsers stop asking for them again every day. A new jar changes
   the address.
+- `chronicleExport` defaults to `mods/Ryvrook_ChronicleStats/export/stats.json`, Chronicle's folder since
+  its 1.1.0. While the setting is either the new or the old default and that file is missing, Atlas reads
+  the other one, so an existing `atlas.json` keeps working without an edit.
 - With TrackerAPI 1.0.3 or newer, which reloads Atlas by itself after its own reload, Atlas no longer
   logs a line asking for that reload.
 

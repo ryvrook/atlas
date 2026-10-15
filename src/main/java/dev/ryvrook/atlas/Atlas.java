@@ -105,6 +105,7 @@ public final class Atlas {
         this.lastSeen = new LastSeen(dataDir);
         this.leaderboard = new Leaderboard(resolveFeats(config));
         this.chronicle = new ChronicleExport(resolveChronicle(config));
+        chronicle.setPath(resolveChronicle(config), chronicleFallback(config));
         this.mapMod = new MapModSettings(resolveMapMod(config));
         this.markers = new MarkerService(this, dataDir);
         this.markerRoutes = new MarkerRoutes(this, markers);
@@ -145,6 +146,18 @@ public final class Atlas {
         return Path.of(cfg.chronicleExport).toAbsolutePath().normalize();
     }
 
+    /**
+     * The other default Chronicle export path when chronicleExport is one of them, else null. Older files hold
+     * the Ryvrook_Chronicle path while Chronicle 1.1.0 and newer writes under Ryvrook_ChronicleStats, so
+     * whichever default is set, the other one is read while the set one is missing.
+     */
+    public static Path chronicleFallback(AtlasConfig cfg) {
+        Path set = resolveChronicle(cfg);
+        Path now = Path.of(AtlasConfig.DEFAULT_CHRONICLE_EXPORT).toAbsolutePath().normalize();
+        Path old = Path.of(AtlasConfig.OLD_CHRONICLE_EXPORT).toAbsolutePath().normalize();
+        return set.equals(now) ? old : set.equals(old) ? now : null;
+    }
+
     /** The BetterMap folder resolved against the server working directory. */
     public static Path resolveMapMod(AtlasConfig cfg) {
         return Path.of(cfg.betterMapDir).toAbsolutePath().normalize();
@@ -167,7 +180,7 @@ public final class Atlas {
         this.config = cfg;
         snapshot.setPath(resolveSnapshot(cfg));
         leaderboard.setPath(resolveFeats(cfg));
-        chronicle.setPath(resolveChronicle(cfg));
+        chronicle.setPath(resolveChronicle(cfg), chronicleFallback(cfg));
         mapMod.setDir(resolveMapMod(cfg));
         tiles.setCacheMb(cfg.tileCacheMb);
         proxies = TrustedProxies.parse(cfg.trustedProxies);

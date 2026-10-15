@@ -136,4 +136,30 @@ class ChronicleExportTest {
         assertEquals(0, out.getAsJsonArray("boards").size());
         assertEquals("/stats/", out.get("url").getAsString());
     }
+
+    @Test
+    void readsTheOtherDefaultWhileTheSetOneIsMissing(@TempDir Path dir) throws Exception {
+        Path now = dir.resolve("Ryvrook_ChronicleStats/export/stats.json");
+        Path old = dir.resolve("Ryvrook_Chronicle/export/stats.json");
+        java.nio.file.Files.createDirectories(old.getParent());
+        java.nio.file.Files.writeString(old, "{\"version\":1,\"totals\":{}}");
+        ChronicleExport export = new ChronicleExport(now);
+        export.setPath(now, old);
+        assertTrue(export.poll());
+        assertTrue(export.available());
+        java.nio.file.Files.createDirectories(now.getParent());
+        java.nio.file.Files.writeString(now, "{\"version\":1,\"totals\":{\"kills\":3}}");
+        assertTrue(export.poll(), "the file at the set path wins once it exists");
+        assertTrue(export.available());
+    }
+
+    @Test
+    void eitherDefaultFallsBackToTheOther() {
+        dev.ryvrook.atlas.config.AtlasConfig cfg = new dev.ryvrook.atlas.config.AtlasConfig();
+        assertTrue(dev.ryvrook.atlas.Atlas.chronicleFallback(cfg).toString().contains("Ryvrook_Chronicle" + java.io.File.separator));
+        cfg.chronicleExport = dev.ryvrook.atlas.config.AtlasConfig.OLD_CHRONICLE_EXPORT;
+        assertTrue(dev.ryvrook.atlas.Atlas.chronicleFallback(cfg).toString().contains("Ryvrook_ChronicleStats"));
+        cfg.chronicleExport = "custom/stats.json";
+        org.junit.jupiter.api.Assertions.assertNull(dev.ryvrook.atlas.Atlas.chronicleFallback(cfg));
+    }
 }

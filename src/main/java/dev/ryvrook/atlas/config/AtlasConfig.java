@@ -34,7 +34,10 @@ public final class AtlasConfig {
     public static final String DEFAULT_COOKIE = "ryvrook_session";
     /** The session cookie name of 1.0.0 and older, still accepted in 1.1.0. */
     public static final String LEGACY_COOKIE = "atlas_session";
-    public static final String DEFAULT_CHRONICLE_EXPORT = "mods/Ryvrook_Chronicle/export/stats.json";
+    /** Chronicle's data folder is Ryvrook_ChronicleStats since Chronicle 1.1.0. */
+    public static final String DEFAULT_CHRONICLE_EXPORT = "mods/Ryvrook_ChronicleStats/export/stats.json";
+    /** The default before, still read when the file at the default is missing, see Atlas.chronicleFallback. */
+    public static final String OLD_CHRONICLE_EXPORT = "mods/Ryvrook_Chronicle/export/stats.json";
     public static final String DEFAULT_DOMINION_SNAPSHOT = "mods/Ryvrook_Dominion/export/snapshot.json";
     private static final java.util.regex.Pattern COOKIE_NAME = java.util.regex.Pattern.compile("[A-Za-z0-9_]{1,32}");
     private static final java.util.regex.Pattern COOKIE_DOMAIN = java.util.regex.Pattern.compile(
