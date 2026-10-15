@@ -888,7 +888,7 @@ Chronicle can also share the login with Atlas through `dev.ryvrook.atlas.api.Ses
 
 ## Works with TrackerAPI
 
-Atlas works with TrackerAPI, the shared tracking plugin behind Feats and Chronicle. When TrackerAPI
+Atlas works with [TrackerAPI](https://www.curseforge.com/hytale/mods/trackerapi/), the shared tracking plugin behind Feats and Chronicle. When TrackerAPI
 1.0.0 or newer is installed, Atlas takes block breaks, block places and deaths from it for the heat
 layer and the kill feed, and registers none of its own systems for them, so the server counts each
 event once. Without TrackerAPI Atlas tracks them itself as before. The heat and the kill history carry
