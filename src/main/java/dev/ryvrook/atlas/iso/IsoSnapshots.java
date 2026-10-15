@@ -554,7 +554,7 @@ public final class IsoSnapshots {
             String slotName = dayDir.getFileName().toString();
             return keyPlace(p, slotName, dayDir, true).thenApply(list -> {
                 if (list.isEmpty()) {
-                    return "Nothing of " + p.displayName() + " could be drawn. Is the area explored?";
+                    return "Nothing of " + p.displayName() + " could be drawn, since nothing around it is explored.";
                 }
                 try {
                     writeIndex(p.world, slotName, dayDir, o -> Json.bool(o, "keyPlace") && p.label.equals(Json.str(o, "label")), list);

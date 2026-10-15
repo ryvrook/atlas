@@ -101,7 +101,7 @@ public abstract class SessionApi {
      * called on an Atlas-scheduler thread in the order of the changes and are dropped when Atlas stops.
      * Atlas fires REDEEMED when a code is redeemed on the map or through this API, ADOPTED when
      * {@link #adopt} added a session and REVOKED when a browser signs out, {@code /atlas unlink} runs or
-     * {@link #revoke} removed a session. Sessions that simply expire fire nothing. Any thread.
+     * {@link #revoke} removed a session. Sessions that expire fire nothing. Any thread.
      */
     public abstract Runnable onChange(Consumer<SessionEvent> listener);
 
