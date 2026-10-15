@@ -4,42 +4,37 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
-## Unreleased
+## 1.7.0 - 2026-10-15
+
+### For players
+
+- With Coinage installed and `showOwnMoney` on, a linked player sees their own wallet and net worth in the account
+  menu. Nobody else sees them.
+- The public map no longer names hidden feats. Recent unlocks, milestones and firsts of a feat Feats marks hidden
+  say "A hidden feat" to everyone but admins and the player who earned it, and timeline lines do not name it.
+- Each Dominion siege shows once. The live siege layer stays off while the snapshot lists sieges, where before the
+  map drew every siege twice and listed two Sieges layers.
+
+### For admins
+
+- A Dominion that has been missing from the server for a minute takes its territories off the map, and they come
+  back when Dominion does. Before, a removed Dominion left its last territories up for good.
+- `chronicleExport` defaults to `mods/Ryvrook_ChronicleStats/export/stats.json`. An `atlas.json` with the old
+  default reads the new file too, and the old `Ryvrook_Chronicle` file is read only while the new one is missing.
+- With TrackerAPI 1.0.3 or newer, which reloads Atlas itself, Atlas no longer logs a line asking for that reload.
 
 ### Upgrading
 
-- One new setting is added with its default on the first start, `showOwnMoney` (`false`).
-- The manifest lists `Ryvrook:Coinage` as an optional dependency, so Atlas loads after Coinage when both
-  are installed.
+- One setting is added on the first start, `showOwnMoney` (`false`).
+- The manifest lists `Ryvrook:Coinage` as an optional dependency, so Atlas loads after Coinage.
 
-### Added
+### Other changes
 
-- With Coinage installed and `showOwnMoney` on, a linked player sees their own wallet and net worth in
-  the account menu, from the new `/api/money` route. Nobody else sees them.
+- For everyone but admins, the `rarity` map of `/api/leaderboard` holds only the feats the payload names, so ids
+  of hidden feats nobody earned stay off the map.
+- Scripts, stylesheets and icons that index.html links are cached for a year as immutable. Their `?v=` tag is the
+  version plus the start of the file's hash, so a rebuilt jar with the same version still gets new addresses.
 - `AtlasApi.removeHooks` takes back hooks added with `onEnable` and `onDisable`.
-
-### Changed
-
-- The public map no longer shows Dominion's live siege layer while the Dominion snapshot lists sieges.
-  Each siege already had a pin from the snapshot, so the map showed it twice and the layer list had
-  two Sieges entries. The layer still shows when the snapshot lacks sieges.
-- The public map drops a Dominion snapshot at the default path once Dominion has been missing from the
-  server for a minute, and reads it again when Dominion is back. Before, a removed Dominion left its
-  last territories on the map for good.
-- The public map no longer names hidden feats. Recent unlocks, milestones and firsts of a feat that
-  Feats marks hidden say "A hidden feat" to everyone but admins and the player who earned it, its
-  rarity is left out, and timeline lines say a hidden feat was earned without naming it. Feats lists the
-  rarity of every feat, so for everyone but admins the `rarity` map of `/api/leaderboard` now holds only
-  the feats the payload names, and the ids of hidden feats nobody has earned stay off the map.
-- Scripts, stylesheets and icons that index.html links are cached for a year as immutable instead of
-  a day. Their `?v=` tag is the running version plus the start of the file's hash, so a rebuilt jar
-  with the same version still gets new addresses.
-- `chronicleExport` defaults to `mods/Ryvrook_ChronicleStats/export/stats.json`, Chronicle's folder since
-  its 1.1.0. An `atlas.json` that still holds the old default reads the new file too, and either default
-  reads the old `Ryvrook_Chronicle` file only while the new one is missing, so a file an older Chronicle
-  left behind is never shown over the current one.
-- With TrackerAPI 1.0.3 or newer, which reloads Atlas by itself after its own reload, Atlas no longer
-  logs a line asking for that reload.
 
 ## 1.6.0 - 2026-10-14
 
