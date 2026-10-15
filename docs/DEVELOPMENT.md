@@ -264,7 +264,7 @@ The periodic tasks and their intervals.
 | Feats export check | 5 seconds |
 | Chronicle export check | 5 seconds |
 | BetterMap settings check | 15 seconds |
-| TrackerAPI and Coinage reload watch | 5 seconds |
+| TrackerAPI reload watch | 5 seconds |
 | Marker layer drop folder | 5 seconds, with the shared markers |
 | Idle pre render | 5 seconds, after 30 seconds without a tile request |
 | Timeline event log flush | 5 seconds |
@@ -492,8 +492,8 @@ Coinage is optional too and listed under `OptionalDependencies`. `start` asks th
 the primary currency and formats the `wallet` part and the total with `Currency.format`, only for a
 linked player, not an admin viewing as a faction, and only while `showOwnMoney` is on. The account
 menu fetches it each time it opens, so nothing is cached and nothing about money goes over the event
-stream. A Coinage that is reloaded or unloaded leaves the bridge on the old classes, and the 5 second
-watch logs one line asking for a reload of Atlas.
+stream. There is no Coinage watch. Coinage reloads every enabled plugin that lists it after its own
+reload, and its first load on a running server, so Atlas starts again on the new classes.
 
 ## Dominion
 
@@ -512,8 +512,9 @@ disabled or failed for a minute, and reads it again as soon as Dominion is back.
 A `/plugin reload` of Atlas loads the `api` classes again, while Dominion stays linked to the old
 ones until it is reloaded too. Dominion notices and logs one line asking for that. Until then the
 snapshot still draws its sieges and hides its hidden players. `AtlasApi.removeHooks` lets a plugin take
-its hooks back when it stops first. TrackerAPI and Coinage each reload Atlas after their own reload, so
-a reload of TrackerAPI reloads Atlas more than once, which is harmless.
+its hooks back when it stops first. TrackerAPI and Coinage each reload Atlas after their own reload.
+They share the `ryvrook.dependents.lock` lock and check which instance they saw, so a TrackerAPI reload,
+which reloads Coinage before Atlas, starts Atlas once.
 
 ## BetterMap
 

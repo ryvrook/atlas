@@ -28,13 +28,16 @@ new files.
   last territories on the map for good.
 - The public map no longer names hidden feats. Recent unlocks, milestones and firsts of a feat that
   Feats marks hidden say "A hidden feat" to everyone but admins and the player who earned it, its
-  rarity is left out, and timeline lines say a hidden feat was earned without naming it.
-- Scripts, stylesheets and icons asked for with the `?v=` of the running version are cached for a year
-  as immutable instead of a day, so browsers stop asking for them again every day. A new jar changes
-  the address.
+  rarity is left out, and timeline lines say a hidden feat was earned without naming it. Feats lists the
+  rarity of every feat, so for everyone but admins the `rarity` map of `/api/leaderboard` now holds only
+  the feats the payload names, and the ids of hidden feats nobody has earned stay off the map.
+- Scripts, stylesheets and icons that index.html links are cached for a year as immutable instead of
+  a day. Their `?v=` tag is the running version plus the start of the file's hash, so a rebuilt jar
+  with the same version still gets new addresses.
 - `chronicleExport` defaults to `mods/Ryvrook_ChronicleStats/export/stats.json`, Chronicle's folder since
-  its 1.1.0. While the setting is either the new or the old default and that file is missing, Atlas reads
-  the other one, so an existing `atlas.json` keeps working without an edit.
+  its 1.1.0. An `atlas.json` that still holds the old default reads the new file too, and either default
+  reads the old `Ryvrook_Chronicle` file only while the new one is missing, so a file an older Chronicle
+  left behind is never shown over the current one.
 - With TrackerAPI 1.0.3 or newer, which reloads Atlas by itself after its own reload, Atlas no longer
   logs a line asking for that reload.
 
