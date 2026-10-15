@@ -286,10 +286,11 @@ players. `Unlock.rarity` is the same value for that feat or null. `milestones` a
 first. A milestone reached with nobody named has `uuid` and `name` null. Rows are in Feats rank order
 and `rank` starts at 1.
 
-A feat Feats keeps hidden, which its recent list marks with `hidden`, keeps its name only for admins
-and for the viewer who earned it, as far as the recent list and the firsts show. Everyone else gets
-`feat` `"hidden"`, `featName` `"A hidden feat"`, an empty `category`, a null `rarity`, and no entry
-for it in `rarity`. Milestones and firsts of that feat are masked the same way. `totalFeats` is the
+A feat Feats keeps hidden, which its recent list, milestones and firsts mark with `hidden`, keeps its
+name only for admins and for the viewer who earned it, as far as the recent list and the firsts show.
+Everyone else gets `feat` `"hidden"`, `featName` `"A hidden feat"`, an empty `category`, a null
+`rarity`, and no entry for it in `rarity`. Milestones and firsts of that feat are masked the same way.
+For everyone but admins `rarity` only holds feats the payload names, since Feats lists every feat there. `totalFeats` is the
 count the export gives, which grows when other plugins add feats. Masking is not in Atlas 1.6.0 and
 older.
 

@@ -600,8 +600,8 @@ public final class Payloads {
     public static final String HIDDEN_FEAT_NAME = "A hidden feat";
 
     /**
-     * The ids of hidden feats, from the hidden flag Feats writes on its recent unlocks. Milestone and first
-     * records carry no flag of their own, so a hidden feat is only known once it shows up in the recent list.
+     * The ids of hidden feats, from the hidden flag Feats writes on its recent unlocks, milestones and firsts.
+     * Feats 1.5.0 and older write the flag on recent unlocks only.
      */
     public static java.util.Set<String> hiddenFeats(JsonObject root) {
         java.util.Set<String> out = new java.util.HashSet<>();
@@ -613,6 +613,35 @@ public final class Payloads {
                 }
             }
         }
+        for (String key : new String[]{"milestones", "firsts"}) {
+            JsonObject records = object(root, key);
+            if (records == null) {
+                continue;
+            }
+            for (Map.Entry<String, JsonElement> e : records.entrySet()) {
+                if (e.getValue().isJsonObject() && flag(e.getValue().getAsJsonObject(), "hidden")) {
+                    out.add(e.getKey());
+                }
+            }
+        }
+        return out;
+    }
+
+    /** The feat ids named by the recent unlocks, milestones and firsts of the export. */
+    static java.util.Set<String> shownFeats(JsonObject root) {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        for (JsonElement e : array(root, "recent")) {
+            String feat = e.isJsonObject() ? text(e.getAsJsonObject(), "feat") : null;
+            if (feat != null) {
+                out.add(feat);
+            }
+        }
+        for (String key : new String[]{"milestones", "firsts"}) {
+            JsonObject records = object(root, key);
+            if (records != null) {
+                out.addAll(records.keySet());
+            }
+        }
         return out;
     }
 
@@ -620,6 +649,8 @@ public final class Payloads {
      * Same as {@link #leaderboard(JsonObject, long, Predicate)} for one viewer. A hidden feat keeps its name
      * only for admins and for a viewer who earned it, as far as the recent list and the firsts show.
      * Everyone else sees {@link #HIDDEN_FEAT_NAME}, the id {@code hidden}, no category and no rarity.
+     * Feats lists the rarity of every feat, hidden ones included, so for everyone but admins the rarity map
+     * keeps only the feats the payload names. Otherwise the ids of hidden feats nobody earned yet would show.
      */
     public static JsonObject leaderboard(JsonObject root, long updatedAt, Predicate<UUID> hidden, UUID viewer,
                                          boolean admin) {
@@ -654,10 +685,11 @@ public final class Payloads {
         out.addProperty("rarityPlayers", whole(root, "rarityPlayers", 0));
         JsonObject rarity = new JsonObject();
         JsonObject rin = object(root, "rarity");
+        java.util.Set<String> shown = admin ? null : shownFeats(root);
         if (rin != null) {
             for (Map.Entry<String, JsonElement> e : rin.entrySet()) {
                 Double v = number(rin, e.getKey());
-                if (v != null && !masked.test(e.getKey())) {
+                if (v != null && !masked.test(e.getKey()) && (shown == null || shown.contains(e.getKey()))) {
                     rarity.addProperty(e.getKey(), Math.max(0, Math.min(1, v)));
                 }
             }

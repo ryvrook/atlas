@@ -707,7 +707,8 @@ public final class Timeline {
         o.addProperty("totalPoints", (int) Json.num(lb, "totalPoints", 0));
         JsonArray players = Json.arr(lb, "players");
         o.addProperty("players", players.size());
-        JsonObject rarity = Json.obj(lb, "rarity");
+        // From the export itself, since the public payload keeps rarity only for the feats it names.
+        JsonObject rarity = Json.obj(root, "rarity");
         o.addProperty("rarityCount", rarity == null ? 0 : rarity.size());
         o.addProperty("milestones", Json.arr(lb, "milestones").size());
         o.addProperty("firsts", Json.arr(lb, "firsts").size());

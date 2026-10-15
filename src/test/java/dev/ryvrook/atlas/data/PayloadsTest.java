@@ -126,7 +126,10 @@ class PayloadsTest {
         assertFalse(out.toString().contains("extra"));
         assertEquals(42, out.get("rarityPlayers").getAsInt());
         assertEquals(3, out.get("online").getAsInt());
-        assertEquals(Set.of("first_steps", "rock_bottom"), out.getAsJsonObject("rarity").keySet());
+        assertEquals(Set.of("rock_bottom"), out.getAsJsonObject("rarity").keySet(),
+                "rarity keeps only feats the payload names");
+        assertEquals(Set.of("first_steps", "rock_bottom"), Payloads.leaderboard(parse(FEATS), 1L, u -> false, null, true)
+                .getAsJsonObject("rarity").keySet());
 
         JsonObject row = out.getAsJsonArray("players").get(0).getAsJsonObject();
         assertEquals(set("rank", "uuid", "name", "points", "unlocked", "lastUnlockAt"), keys(row));
@@ -331,5 +334,23 @@ class PayloadsTest {
         assertEquals(Payloads.HIDDEN_FEAT_NAME, steve.getAsJsonArray("recent").get(1).getAsJsonObject().get("featName").getAsString());
         JsonObject admin = Payloads.leaderboard(parse(FEATS), 1L, u -> false, null, true);
         assertEquals("Unknown", admin.getAsJsonArray("recent").get(1).getAsJsonObject().get("featName").getAsString());
+    }
+
+    @Test
+    void hiddenMilestonesAndUnearnedHiddenFeatsStayHidden() {
+        JsonObject root = parse("""
+                {"rarity": {"secret_cake": 0.0, "world_gate": 0.5},
+                 "recent": [],
+                 "milestones": {"world_gate": {"at": 1759970000000, "by": null, "byName": null,
+                   "featName": "Gatekeeper", "tier": "Gold", "hidden": true}},
+                 "firsts": {}}
+                """);
+        JsonObject pub = Payloads.leaderboard(root, 1L, u -> false, null, false);
+        assertFalse(pub.toString().contains("Gatekeeper"), "the hidden flag on a milestone masks it");
+        assertFalse(pub.toString().contains("world_gate"));
+        assertFalse(pub.toString().contains("secret_cake"), "a hidden feat nobody earned is not listed in rarity");
+        JsonObject admin = Payloads.leaderboard(root, 1L, u -> false, null, true);
+        assertTrue(admin.toString().contains("Gatekeeper"));
+        assertTrue(admin.toString().contains("secret_cake"));
     }
 }

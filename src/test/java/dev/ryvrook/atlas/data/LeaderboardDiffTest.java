@@ -33,4 +33,15 @@ class LeaderboardDiffTest {
         assertEquals(1, out.stream().filter(e -> e.kind().equals("feats.first")).count());
         assertEquals(0, Leaderboard.diff(next, next).size());
     }
+
+    @Test
+    void aHiddenMilestoneIsMarkedForTheTimeline() {
+        JsonObject before = j("{\"recent\": [], \"milestones\": {}, \"firsts\": {}}");
+        JsonObject next = j("{\"recent\": [], \"milestones\": {\"m9\": {\"at\": 50, \"featName\": \"Gatekeeper\", \"hidden\": true}},"
+                + " \"firsts\": {\"f9\": {\"at\": 60, \"featName\": \"Open\", \"hidden\": false}}}");
+        List<Leaderboard.FeatEvent> out = Leaderboard.diff(before, next);
+        assertEquals(2, out.size());
+        assertEquals(true, out.get(0).hiddenFeat());
+        assertEquals(false, out.get(1).hiddenFeat());
+    }
 }
