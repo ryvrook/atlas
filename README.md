@@ -249,7 +249,7 @@ capture. Live positions from the server win over the file.
 
 - The outermost ring of explored chunks stays blank until the land past it is explored, because the engine builds a
   chunk image from the chunk and its eight neighbours.
-- A resumed event stream can replay up to a minute of frames built before a change, such as a position from just
+- A resumed event stream can replay up to a minute of frames built before a change, such as a position from right
   before a player was hidden.
 - Video export needs a browser that records WebM. Save image works everywhere.
 - When port 8123 is taken at start, Atlas retries every 30 seconds for 10 minutes and then gives up until
