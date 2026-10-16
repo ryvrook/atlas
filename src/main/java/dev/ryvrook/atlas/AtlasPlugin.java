@@ -1101,9 +1101,9 @@ public final class AtlasPlugin extends JavaPlugin {
                 : atlas.chronicle().available() ? "fills the Chronicle tab from its export"
                 : "has written no export yet") + layers("Ryvrook:ChronicleStats"), "no Chronicle tab"));
         out.add(line("Lullaby", null, found -> "runs and has no link with Atlas", "nothing changes"));
-        out.add(line("SocialBridge", null, found -> "reads the map address through AtlasApi" + layers("Ryvrook:SocialBridge"),
+        out.add(line("SocialBridge", null, found -> "reads the map address, hidden players and link codes through AtlasApi" + layers("Ryvrook:SocialBridge"),
                 "nothing changes"));
-        out.add(line("RestAPI", null, found -> "serves the map status through AtlasApi" + layers("Ryvrook:RestAPI"),
+        out.add(line("RestAPI", null, found -> "serves the map status, worlds, layers and markers through AtlasApi" + layers("Ryvrook:RestAPI"),
                 "nothing changes"));
         return out;
     }
