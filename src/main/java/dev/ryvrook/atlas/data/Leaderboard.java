@@ -23,6 +23,7 @@ import java.util.function.Consumer;
  */
 public final class Leaderboard {
     private volatile Path path;
+    private volatile boolean off;
     private volatile JsonObject root;
     private volatile long updatedAt;
     private FileTime lastModified;
@@ -48,6 +49,19 @@ public final class Leaderboard {
 
     public Leaderboard(Path path) {
         this.path = path;
+    }
+
+    /** Turns reading off or on. While off the file counts as missing, for the feats or chronicle key set to never. */
+    public synchronized void setOff(boolean off) {
+        if (this.off != off) {
+            this.off = off;
+            lastModified = null;
+            lastSize = -1;
+        }
+    }
+
+    public boolean off() {
+        return off;
     }
 
     public synchronized void setPath(Path p) {
@@ -77,7 +91,7 @@ public final class Leaderboard {
 
     /** Checks the file and reloads it when it changed. Returns true when the published data changed. */
     public synchronized boolean poll() {
-        Path p = path;
+        Path p = off ? null : path;
         try {
             if (p == null || !Files.isRegularFile(p)) {
                 lastModified = null;

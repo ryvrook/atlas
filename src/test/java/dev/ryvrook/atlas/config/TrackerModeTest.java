@@ -31,4 +31,20 @@ class TrackerModeTest {
         assertThrows(AtlasConfig.InvalidConfigException.class, () -> AtlasConfig.parse("{\"tracker\": \"sometimes\"}"));
         assertThrows(AtlasConfig.InvalidConfigException.class, () -> AtlasConfig.parse("{\"tracker\": 1}"));
     }
+
+    @Test
+    void theSiblingKeysDefaultToAutoAndReadNever() throws Exception {
+        AtlasConfig c = AtlasConfig.parse("{\"adminToken\": \"" + TOKEN + "\"}");
+        for (String key : new String[]{"coinage", "dominion", "feats", "chronicle"}) {
+            assertTrue(c.addedKeys.contains(key), key);
+        }
+        assertEquals(TrackerMode.AUTO, c.coinageMode());
+        AtlasConfig off = AtlasConfig.parse("{\"coinage\": \"never\", \"dominion\": \"NEVER\", \"feats\": \"never\", \"chronicle\": \"always\"}");
+        assertEquals(TrackerMode.NEVER, off.coinageMode());
+        assertEquals(TrackerMode.NEVER, off.dominionMode());
+        assertEquals("never", off.dominion);
+        assertEquals(TrackerMode.NEVER, off.featsMode());
+        assertEquals(TrackerMode.ALWAYS, off.chronicleMode());
+        assertThrows(AtlasConfig.InvalidConfigException.class, () -> AtlasConfig.parse("{\"feats\": \"off\"}"));
+    }
 }

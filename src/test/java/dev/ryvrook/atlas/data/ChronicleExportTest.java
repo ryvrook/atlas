@@ -70,6 +70,20 @@ class ChronicleExportTest {
     }
 
     @Test
+    void neverTreatsTheFileAsMissing(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("stats.json");
+        Files.writeString(file, FIXTURE, StandardCharsets.UTF_8);
+        ChronicleExport export = new ChronicleExport(file);
+        assertTrue(export.poll());
+        export.setOff(true);
+        assertTrue(export.poll(), "turning it off drops the data");
+        assertFalse(export.available());
+        export.setOff(false);
+        assertTrue(export.poll());
+        assertTrue(export.available());
+    }
+
+    @Test
     void payloadListsTotalsAndBoardsInTheirOrder() throws Exception {
         JsonObject root = com.google.gson.JsonParser.parseString(FIXTURE).getAsJsonObject();
         JsonObject out = ChronicleExport.payload(root, 1760301234567L, "https://stats.example.com/", u -> false);

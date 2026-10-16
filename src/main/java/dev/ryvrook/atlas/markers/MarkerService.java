@@ -144,6 +144,18 @@ public final class MarkerService {
         return apiLayers.computeIfAbsent(probe.key(), k -> api.attached(pluginId, layerId));
     }
 
+    /** How many API layers the plugin holds, by its plugin id such as Ryvrook:Dominion. */
+    public int apiLayerCount(String pluginId) {
+        String prefix = pluginId.toLowerCase(java.util.Locale.ROOT) + ":";
+        int n = 0;
+        for (String key : apiLayers.keySet()) {
+            if (key.toLowerCase(java.util.Locale.ROOT).startsWith(prefix)) {
+                n++;
+            }
+        }
+        return n;
+    }
+
     boolean removeApiLayer(String pluginId, String layerId) {
         if (pluginId == null || layerId == null) {
             return false;

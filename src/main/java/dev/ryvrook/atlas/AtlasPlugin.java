@@ -220,7 +220,9 @@ public final class AtlasPlugin extends JavaPlugin {
         atlas.sessionApi().start(ex);
 
         Path snap = atlas.snapshot().path();
-        if (!Files.isRegularFile(snap)) {
+        if (atlas.snapshot().off()) {
+            getLogger().at(Level.INFO).log("Atlas leaves the Dominion snapshot alone because dominion is never");
+        } else if (!Files.isRegularFile(snap)) {
             getLogger().at(Level.INFO).log("Atlas found no Dominion snapshot at %s and runs standalone until the file appears",
                     snap.toAbsolutePath());
         }
@@ -390,9 +392,16 @@ public final class AtlasPlugin extends JavaPlugin {
      * own reload, so no watch is needed here.
      */
     private void bindCoinage() {
+        dev.ryvrook.atlas.config.TrackerMode mode = atlas.config().coinageMode();
+        if (mode == dev.ryvrook.atlas.config.TrackerMode.NEVER) {
+            return;
+        }
         dev.ryvrook.atlas.integration.PluginPresence.Found found = dev.ryvrook.atlas.integration.PluginPresence.find(
                 dev.ryvrook.atlas.integration.CoinageLink.GROUP, dev.ryvrook.atlas.integration.CoinageLink.NAME);
         if (found == null) {
+            if (mode == dev.ryvrook.atlas.config.TrackerMode.ALWAYS) {
+                getLogger().at(Level.WARNING).log("Atlas shows no balances because coinage is always and Coinage is not installed");
+            }
             return;
         }
         if (dev.ryvrook.atlas.integration.VersionCompare.below(found.version(), dev.ryvrook.atlas.integration.CoinageLink.MINIMUM)) {
@@ -423,10 +432,11 @@ public final class AtlasPlugin extends JavaPlugin {
     /**
      * Every 5 seconds. Drops the Dominion snapshot from the map once Dominion has been missing for a minute,
      * so a file left by a removed Dominion does not keep old territories on the map, and reads it again when
-     * Dominion is back. Only the default path is watched.
+     * Dominion is back. Only the default path is watched, and only while dominion is auto.
      */
     private void watchDominion() {
-        boolean watched = Atlas.resolveSnapshot(atlas.config()).equals(
+        boolean watched = atlas.config().dominionMode() == dev.ryvrook.atlas.config.TrackerMode.AUTO
+                && Atlas.resolveSnapshot(atlas.config()).equals(
                 java.nio.file.Path.of(AtlasConfig.DEFAULT_DOMINION_SNAPSHOT).toAbsolutePath().normalize());
         boolean missing = watched && dev.ryvrook.atlas.integration.PluginPresence.missing(
                 dev.ryvrook.atlas.integration.DominionWatch.GROUP, dev.ryvrook.atlas.integration.DominionWatch.NAME);
@@ -1055,6 +1065,67 @@ public final class AtlasPlugin extends JavaPlugin {
                     + "machine. Set publicUrl to the address players should open, for example http://play.example.com:%d/",
                     cfg.port);
         }
+    }
+
+    /**
+     * One line per suite plugin for /atlas integrations, with the version the plugin manager holds, what Atlas
+     * takes from it or what it takes from Atlas, and the key that controls the link. Never touches a class of
+     * another plugin.
+     */
+    public List<String> integrationLines() {
+        AtlasConfig cfg = atlas.config();
+        List<String> out = new ArrayList<>();
+        TrackerLink t = trackerLink;
+        out.add(line("TrackerAPI", "tracker " + cfg.trackerMode().key(), found -> switch (trackerSource) {
+            case TRACKER -> t != null && t.bound() ? "feeds the heat layer and the kill feed"
+                    : "is chosen but not bound, so the heat layer and the kill feed stay empty";
+            case OWN -> "is left alone, Atlas records block activity and kills itself";
+            case NONE -> "is too old, Atlas records no block activity and no kills";
+        }, trackerSource == TrackerPresence.Source.OWN ? "Atlas records block activity and kills itself"
+                : "Atlas records no block activity and no kills"));
+        dev.ryvrook.atlas.integration.CoinageLink money = coinageLink;
+        out.add(line("Coinage", "coinage " + cfg.coinageMode().key(), found ->
+                cfg.coinageMode() == dev.ryvrook.atlas.config.TrackerMode.NEVER ? "is left alone"
+                        : money != null && money.bound()
+                        ? (cfg.showOwnMoney ? "shows a linked player their own money" : "is bound, showOwnMoney is false")
+                        : "is not bound, reload Atlas to bind it", "no balances in the account menu"));
+        DominionSnapshot snap = atlas.snapshot();
+        out.add(line("Dominion", "dominion " + cfg.dominionMode().key(), found -> (snap.off() ? "is left alone"
+                : snap.present() ? "fills the faction layers from a snapshot of " + snap.view().factions().size() + " factions"
+                : "has written no snapshot yet") + layers("Ryvrook:Dominion"),
+                snap.off() || !snap.present() ? "no faction layers" : "faction layers from the snapshot left on disk"));
+        out.add(line("Feats", "feats " + cfg.featsMode().key(), found -> (atlas.leaderboard().off() ? "is left alone"
+                : atlas.leaderboard().root() != null ? "fills the leaderboard panel from its export"
+                : "has written no export yet") + layers("Ryvrook:Feats"), "no leaderboard panel"));
+        out.add(line("ChronicleStats", "chronicle " + cfg.chronicleMode().key(), found -> (atlas.chronicle().off() ? "is left alone"
+                : atlas.chronicle().available() ? "fills the Chronicle tab from its export"
+                : "has written no export yet") + layers("Ryvrook:ChronicleStats"), "no Chronicle tab"));
+        out.add(line("Lullaby", null, found -> "runs and has no link with Atlas", "nothing changes"));
+        out.add(line("SocialBridge", null, found -> "reads the map address through AtlasApi" + layers("Ryvrook:SocialBridge"),
+                "nothing changes"));
+        out.add(line("RestAPI", null, found -> "serves the map status through AtlasApi" + layers("Ryvrook:RestAPI"),
+                "nothing changes"));
+        return out;
+    }
+
+    private String line(String name, String key, java.util.function.Function<dev.ryvrook.atlas.integration.PluginPresence.Found, String> running,
+                        String without) {
+        dev.ryvrook.atlas.integration.PluginPresence.Found found = dev.ryvrook.atlas.integration.PluginPresence.find("Ryvrook", name);
+        String text;
+        if (found == null) {
+            text = name + " is not installed, " + without;
+        } else {
+            String state = found.identity() instanceof com.hypixel.hytale.server.core.plugin.PluginBase b && b.getState() != null
+                    ? b.getState().name() : "ENABLED";
+            text = "ENABLED".equals(state) ? name + " " + found.version() + " " + running.apply(found)
+                    : name + " " + found.version() + " is installed but " + state.toLowerCase(java.util.Locale.ROOT) + ", " + without;
+        }
+        return key == null ? text : text + " (" + key + ")";
+    }
+
+    private String layers(String pluginId) {
+        int n = atlas.markers().apiLayerCount(pluginId);
+        return n == 0 ? "" : ", with " + n + (n == 1 ? " layer" : " layers") + " of its own";
     }
 
     /** The address players should open, or null when the owner has not set publicUrl. */

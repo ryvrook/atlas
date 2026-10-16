@@ -20,7 +20,7 @@ import dev.ryvrook.atlas.tiles.TileService;
 import java.util.Map;
 import java.util.UUID;
 
-/** /atlas with link, hide, show, admin, reload, unlink, tiles, render, marker, snapshot, timeline, iso and key. */
+/** /atlas with link, hide, show, admin, reload, unlink, tiles, render, marker, snapshot, timeline, iso, key and integrations. */
 public final class AtlasCommand extends CommandBase {
     private static final String ACCENT = "#5fb3ff";
     private static final String TEXT = "#c9d4df";
@@ -46,6 +46,7 @@ public final class AtlasCommand extends CommandBase {
         addSubCommand(new StaffCommands.Timeline(plugin));
         addSubCommand(new StaffCommands.Iso(plugin));
         addSubCommand(new StaffCommands.Key(plugin));
+        addSubCommand(new Integrations(plugin));
     }
 
     @Override
@@ -181,6 +182,26 @@ public final class AtlasCommand extends CommandBase {
                 context.sendMessage(Message.raw("Atlas reloaded its settings and the faction snapshot.").color(ACCENT));
             } else {
                 context.sendMessage(Message.raw("Atlas could not reload. " + problem).color(BAD));
+            }
+        }
+    }
+
+    /** /atlas integrations, one line per suite plugin with its version and what links it to Atlas. */
+    static final class Integrations extends CommandBase {
+        private final AtlasPlugin plugin;
+
+        Integrations(AtlasPlugin plugin) {
+            super("integrations", "List the other Ryvrook plugins, their versions and what links them to the map.");
+            this.plugin = plugin;
+            addAliases("status");
+            requirePermission(Atlas.ADMIN_PERMISSION);
+        }
+
+        @Override
+        protected void executeSync(CommandContext context) {
+            good(context, "Atlas " + dev.ryvrook.atlas.http.AtlasVersion.VERSION + " and the other Ryvrook plugins");
+            for (String line : plugin.integrationLines()) {
+                say(context, line);
             }
         }
     }

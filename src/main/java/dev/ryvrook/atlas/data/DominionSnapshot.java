@@ -359,6 +359,8 @@ public final class DominionSnapshot {
     private volatile boolean present;
     /** Set while the plugin that writes the file is known not to run, so a file it left behind is not shown. */
     private volatile boolean ownerGone;
+    /** Set while the dominion key is never. */
+    private volatile boolean off;
     private FileTime lastModified;
     private long lastSize = -1;
     private long lastFeedAt;
@@ -400,6 +402,21 @@ public final class DominionSnapshot {
         }
     }
 
+    /** Turns reading off or on. While off the file counts as missing, for the dominion key set to never. */
+    public void setOff(boolean off) {
+        synchronized (this) {
+            if (this.off != off) {
+                this.off = off;
+                lastModified = null;
+                lastSize = -1;
+            }
+        }
+    }
+
+    public boolean off() {
+        return off;
+    }
+
     public boolean ownerGone() {
         return ownerGone;
     }
@@ -437,7 +454,7 @@ public final class DominionSnapshot {
     public synchronized boolean poll(Consumer<JsonObject> newFeedLine, Consumer<JsonObject> newChatLine) {
         Path p = path;
         try {
-            if (p == null || ownerGone || !Files.isRegularFile(p)) {
+            if (p == null || ownerGone || off || !Files.isRegularFile(p)) {
                 if (present) {
                     present = false;
                     view = EMPTY;

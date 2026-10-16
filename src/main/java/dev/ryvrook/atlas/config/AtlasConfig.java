@@ -100,6 +100,20 @@ public final class AtlasConfig {
      */
     public String tracker = TrackerMode.AUTO.key();
     /**
+     * The Coinage link for the account menu money. auto binds when Coinage is installed, always binds and warns
+     * when it is missing, never leaves Coinage alone. Read at server start.
+     */
+    public String coinage = TrackerMode.AUTO.key();
+    /**
+     * The Dominion snapshot. auto reads it while Dominion runs and drops it a minute after Dominion is gone,
+     * always reads the file whether Dominion runs or not, never reads nothing.
+     */
+    public String dominion = TrackerMode.AUTO.key();
+    /** The Feats export for the leaderboard panel and the feat lines of the timeline. auto and always read it, never does not. */
+    public String feats = TrackerMode.AUTO.key();
+    /** The Chronicle Stats export for the Chronicle tab. auto and always read it, never does not. */
+    public String chronicle = TrackerMode.AUTO.key();
+    /**
      * Show a linked player their own Coinage balance and net worth in the account menu. Off by default, since
      * a shared screen would show it too. Needs Coinage 1.0.0 or newer.
      */
@@ -509,6 +523,39 @@ public final class AtlasConfig {
         return m == null ? TrackerMode.AUTO : m;
     }
 
+    /** The coinage key as a mode. Never null. */
+    public TrackerMode coinageMode() {
+        return modeOf(coinage);
+    }
+
+    /** The dominion key as a mode. Never null. */
+    public TrackerMode dominionMode() {
+        return modeOf(dominion);
+    }
+
+    /** The feats key as a mode. Never null. */
+    public TrackerMode featsMode() {
+        return modeOf(feats);
+    }
+
+    /** The chronicle key as a mode. Never null. */
+    public TrackerMode chronicleMode() {
+        return modeOf(chronicle);
+    }
+
+    private static TrackerMode modeOf(String raw) {
+        TrackerMode m = TrackerMode.parse(raw);
+        return m == null ? TrackerMode.AUTO : m;
+    }
+
+    private static String linkMode(String key, String raw) throws InvalidConfigException {
+        TrackerMode m = TrackerMode.parse(raw);
+        if (m == null) {
+            throw new InvalidConfigException(key + " is \"" + raw + "\" but must be auto, always or never");
+        }
+        return m.key();
+    }
+
     /** Whether idle time renders explored tiles that have no disk tile yet. */
     public boolean preRenderIdle() {
         return preRenderIdle;
@@ -690,6 +737,10 @@ public final class AtlasConfig {
             throw new InvalidConfigException("tracker is \"" + cfg.tracker + "\" but must be auto, always or never");
         }
         cfg.tracker = mode.key();
+        cfg.coinage = linkMode("coinage", cfg.coinage);
+        cfg.dominion = linkMode("dominion", cfg.dominion);
+        cfg.feats = linkMode("feats", cfg.feats);
+        cfg.chronicle = linkMode("chronicle", cfg.chronicle);
         if (cfg.featsExport == null || cfg.featsExport.isBlank()) {
             cfg.featsExport = "mods/Ryvrook_Feats/export/feats.json";
         }

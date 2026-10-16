@@ -94,6 +94,7 @@ public final class ChronicleExport {
     }
 
     private volatile Path path;
+    private volatile boolean off;
     /** Read while the file at path is missing, or null. */
     private volatile Path fallback;
     /** The file the last read came from, so a move between path and fallback is read again. */
@@ -109,6 +110,19 @@ public final class ChronicleExport {
 
     public ChronicleExport(Path path) {
         this.path = path;
+    }
+
+    /** Turns reading off or on. While off the file counts as missing, for the feats or chronicle key set to never. */
+    public synchronized void setOff(boolean off) {
+        if (this.off != off) {
+            this.off = off;
+            lastModified = null;
+            lastSize = -1;
+        }
+    }
+
+    public boolean off() {
+        return off;
     }
 
     public synchronized void setPath(Path p) {
@@ -149,8 +163,8 @@ public final class ChronicleExport {
 
     /** Checks the file and reloads it when it changed. Returns true when the published data changed. */
     public synchronized boolean poll() {
-        Path p = path;
-        Path second = fallback;
+        Path p = off ? null : path;
+        Path second = off ? null : fallback;
         if (second != null && (p == null || !Files.isRegularFile(p)) && Files.isRegularFile(second)) {
             p = second;
         }

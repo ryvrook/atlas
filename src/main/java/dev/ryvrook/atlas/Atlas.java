@@ -107,6 +107,7 @@ public final class Atlas {
         this.leaderboard = new Leaderboard(resolveFeats(config));
         this.chronicle = new ChronicleExport(resolveChronicle(config));
         chronicle.setPath(resolveChronicle(config), chronicleFallback(config));
+        applyLinkModes(config);
         this.mapMod = new MapModSettings(resolveMapMod(config));
         this.markers = new MarkerService(this, dataDir);
         this.markerRoutes = new MarkerRoutes(this, markers);
@@ -186,11 +187,19 @@ public final class Atlas {
         snapshot.setPath(resolveSnapshot(cfg));
         leaderboard.setPath(resolveFeats(cfg));
         chronicle.setPath(resolveChronicle(cfg), chronicleFallback(cfg));
+        applyLinkModes(cfg);
         mapMod.setDir(resolveMapMod(cfg));
         tiles.setCacheMb(cfg.tileCacheMb);
         proxies = TrustedProxies.parse(cfg.trustedProxies);
         live.setHideRules(cfg.hidePlayersCrouching, cfg.hidePlayersInvisible);
         adminCache.clear();
+    }
+
+    /** Turns the Dominion, Feats and Chronicle files off while their key is never. */
+    private void applyLinkModes(AtlasConfig cfg) {
+        snapshot.setOff(cfg.dominionMode() == dev.ryvrook.atlas.config.TrackerMode.NEVER);
+        leaderboard.setOff(cfg.featsMode() == dev.ryvrook.atlas.config.TrackerMode.NEVER);
+        chronicle.setOff(cfg.chronicleMode() == dev.ryvrook.atlas.config.TrackerMode.NEVER);
     }
 
     public TrustedProxies proxies() {
