@@ -101,7 +101,7 @@ public final class TileService {
     /** Pending background tasks at most. Further tasks are dropped and picked up on a later round. */
     private static final int QUEUE_CAPACITY = 8_192;
     private static final int WORKERS = 2;
-    private static final long SHUTDOWN_WAIT_MS = 5_000;
+    private static final long SHUTDOWN_WAIT_MS = dev.ryvrook.atlas.util.Stops.GRACE_MILLIS;
     /** No tile request for this long counts as idle for the pre-render. */
     private static final long IDLE_MS = 30_000;
     /** Tiles checked for a disk copy per idle tick while looking for one to pre-render. */
@@ -301,9 +301,9 @@ public final class TileService {
     // ---- lifecycle ---------------------------------------------------------
 
     /**
-     * Stops the workers, waiting up to five seconds for running renders. Tiles that still wait for
-     * a refresh are removed from disk so the next start renders them again instead of serving a
-     * picture that misses the latest changes.
+     * Stops the workers, waiting up to a second for running renders and half a second more after an
+     * interrupt. Tiles that still wait for a refresh are removed from disk so the next start renders
+     * them again instead of serving a picture that misses the latest changes.
      */
     public void shutdown() {
         control.shutdownNow();

@@ -16,6 +16,9 @@ new files.
   a minute. `coinage` `always` warns at start when Coinage is missing.
 - A `/plugin reload` of TrackerAPI 1.0.3 or newer logs one information line that TrackerAPI reloads Atlas by itself,
   where it used to warn and ask for a reload. The warning comes only when TrackerAPI is still gone after 30 seconds.
+- A server stop or a `/plugin reload` no longer waits on Atlas. The TrackerAPI and Dominion watches, `/atlas status`
+  and the dependents pass only try the plugin manager's lock and use the last answer while it is held, and Atlas
+  gives its scheduler, tile and 3D view threads 1 second plus half a second after an interrupt instead of 5 seconds.
 
 ### Upgrading
 

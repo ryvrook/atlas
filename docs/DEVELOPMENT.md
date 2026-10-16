@@ -248,6 +248,14 @@ waiting for a refresh when the server stops are removed from disk so the next st
 - A reload or stop path never loads a sibling class for the first time. The plugin manager holds its
   write lock during shutdown and the bridge class loader needs the read lock, which showed up as a 5
   second hang. `shutdown` only touches TrackerAPI and Coinage through links that were made at start.
+- The plugin manager answers `getPlugin` under the read side of its lock and holds the write side for a
+  whole server stop and every `/plugin reload`. A scheduler poll that asked then parked until the stop was
+  over, while the stop waited for Atlas's shutdown. So every lookup outside setup and start goes through
+  `PluginPresence`, which only tries the read lock through `GatedLookup` (the private `lock` field read by
+  reflection, ungated when the field is missing) and gives the last answer while it is held. Once
+  `HytaleServer.isShuttingDown()` is true it never asks at all. `Stops` gives the scheduler, the tile workers
+  and the 3D view thread 1 second, interrupts them and waits half a second more, then leaves a stuck thread
+  behind. `StopUnderManagerLockTest` covers this without an engine.
 - After a `/plugin reload` of Atlas, `Dependents` reloads the plugins that list Atlas two seconds after
   start on the short lived `Atlas-dependents` thread.
 - Anything that reads or changes a world hops to that world's thread with `world.execute`. Engine

@@ -132,7 +132,8 @@ public final class RenderQueue {
 
     /**
      * Stops taking tasks, drops what is pending, and waits up to the given time for running tasks
-     * to finish. Workers still busy after that are interrupted.
+     * to finish. Workers still busy after that are interrupted and get {@link dev.ryvrook.atlas.util.Stops#INTERRUPT_MILLIS}
+     * more before they are left behind.
      */
     public void stop(long waitMs) {
         synchronized (this) {
@@ -152,9 +153,25 @@ public final class RenderQueue {
                 }
             }
         }
+        boolean interrupted = false;
         for (Thread t : threads) {
             if (t.isAlive()) {
                 t.interrupt();
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            long after = System.currentTimeMillis() + dev.ryvrook.atlas.util.Stops.INTERRUPT_MILLIS;
+            for (Thread t : threads) {
+                long left = after - System.currentTimeMillis();
+                if (left > 0 && t.isAlive()) {
+                    try {
+                        t.join(left);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
             }
         }
     }

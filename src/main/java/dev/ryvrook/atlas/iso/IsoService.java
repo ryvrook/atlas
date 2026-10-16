@@ -197,15 +197,17 @@ public final class IsoService {
         tasks.add(scheduler.scheduleWithFixedDelay(this::pruneQuietly, 60, 600, TimeUnit.SECONDS));
     }
 
-    /** Stops the upkeep and the render thread, waiting up to five seconds for a running render. */
+    /** Stops the upkeep and the render thread, waiting up to 1.5 seconds for a running render. */
     public synchronized void stop() {
         for (ScheduledFuture<?> f : tasks) {
             f.cancel(false);
         }
         tasks.clear();
+        // Queued views are dropped at once. A running render gets the usual stop grace and is then left behind.
         exec.shutdownNow();
         try {
-            exec.awaitTermination(5, TimeUnit.SECONDS);
+            exec.awaitTermination(dev.ryvrook.atlas.util.Stops.GRACE_MILLIS + dev.ryvrook.atlas.util.Stops.INTERRUPT_MILLIS,
+                    TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }

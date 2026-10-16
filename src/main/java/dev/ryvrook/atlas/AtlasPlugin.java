@@ -338,8 +338,9 @@ public final class AtlasPlugin extends JavaPlugin {
         }
         ScheduledThreadPoolExecutor ex = scheduler;
         scheduler = null;
-        if (ex != null) {
-            ex.shutdownNow();
+        if (ex != null && !dev.ryvrook.atlas.util.Stops.executor(ex)) {
+            getLogger().at(Level.WARNING).log("Atlas scheduler did not stop within %d ms and was left behind",
+                    dev.ryvrook.atlas.util.Stops.GRACE_MILLIS + dev.ryvrook.atlas.util.Stops.INTERRUPT_MILLIS);
         }
         if (timeline != null) {
             timeline.stop();

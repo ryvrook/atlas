@@ -209,6 +209,10 @@ final class Dependents {
         int n = 0;
         for (Dependent d : dependents) {
             PluginIdentifier id = d.id();
+            if (dev.ryvrook.atlas.integration.PluginPresence.serverStopping()) {
+                logger.at(Level.FINE).log("Atlas stops reloading its dependents because the server is stopping");
+                break;
+            }
             try {
                 if (replaced(manager, d)) {
                     logger.at(Level.FINE).log("Atlas leaves %s alone, it was reloaded since Atlas started", id);
@@ -232,7 +236,7 @@ final class Dependents {
     private static boolean settled(PluginManager manager, Dependent d) {
         long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(SETTLE_MILLIS);
         while (!replaced(manager, d)) {
-            if (System.nanoTime() > until) {
+            if (System.nanoTime() > until || dev.ryvrook.atlas.integration.PluginPresence.serverStopping()) {
                 return false;
             }
             try {
@@ -245,9 +249,12 @@ final class Dependents {
         return true;
     }
 
-    /** True when the manager holds a different, enabled instance of the plugin than the one seen at start. */
+    /**
+     * True when the manager holds a different, enabled instance of the plugin than the one seen at start. Asked
+     * through the gated lookup, so a poll during another plugin's reload never parks on the manager's lock.
+     */
     private static boolean replaced(PluginManager manager, Dependent d) {
-        PluginBase now = manager.getPlugin(d.id());
+        PluginBase now = dev.ryvrook.atlas.integration.PluginPresence.plugin(d.id());
         return now != null && now != d.instance() && now.getState() == PluginState.ENABLED;
     }
 }
