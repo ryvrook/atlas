@@ -13,7 +13,7 @@ val trackerApiJar = (project.findProperty("trackerApiJar") as String?)?.trim()
     ?: listOf("1.1.0", "1.0.3", "1.0.0").flatMap {
         listOf("../trackerapi/build/libs/TrackerAPI-$it.jar",
             System.getProperty("user.home") + "/Projects/trackerapi/build/libs/TrackerAPI-$it.jar")
-    }.firstOrNull { file(it).exists() } ?: "../trackerapi/build/libs/TrackerAPI-1.1.0.jar"
+    }.firstOrNull { file(it).exists() } ?: "../trackerapi/build/libs/TrackerAPI-1.1.1.jar"
 val coinageJar = (project.findProperty("coinageJar") as String?)?.trim()
     ?: listOf("1.3.0", "1.1.0").flatMap {
         listOf("../coinage/build/libs/Coinage-api-$it.jar",
