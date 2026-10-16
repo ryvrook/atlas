@@ -6,6 +6,21 @@ new files.
 
 ## 1.9.0 - 2026-10-16
 
+### For admins
+
+- `/atlas integrations`, also `/atlas status`, lists TrackerAPI, Coinage, Dominion, Feats, Chronicle Stats,
+  Lullaby, SocialBridge and RestAPI with the version installed and what each one adds to the map right now.
+- `coinage`, `dominion`, `feats` and `chronicle` join `tracker` in atlas.json, each `auto`, `always` or `never`.
+  `never` leaves that mod alone even when it is installed, so no balances, no faction layers, no Leaderboard tab or
+  no Chronicle tab. `dominion` `always` keeps drawing the snapshot after Dominion is gone, where `auto` drops it after
+  a minute. `coinage` `always` warns at start when Coinage is missing.
+
+### Upgrading
+
+- Four settings are added on the first start, `coinage`, `dominion`, `feats` and `chronicle`, all `auto`, which is
+  how 1.8.0 behaved. A server coming from 1.6.0 also gets `showOwnMoney` from 1.7.0. docs/DEVELOPMENT.md lists what
+  else changes on that jump.
+
 ### For plugin authors
 
 - `AtlasApi.onMarker(listener)` reports the shared markers players place and remove on the in game map and the

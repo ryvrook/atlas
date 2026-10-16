@@ -541,6 +541,54 @@ its hooks back when it stops first. TrackerAPI and Coinage each reload Atlas aft
 They share the `ryvrook.dependents.lock` lock and check which instance they saw, so a TrackerAPI reload,
 which reloads Coinage before Atlas, starts Atlas once.
 
+## The other mods
+
+Each link has a key in atlas.json, `tracker`, `coinage`, `dominion`, `feats` and `chronicle`, with
+`auto`, `always` or `never` and fails closed on any other value. `never` keeps the bridge class
+unloaded for TrackerAPI and Coinage and sets the reader `off` for the three files, which then count as
+missing. `/atlas integrations` (alias `status`) prints one line per suite plugin from the plugin
+manager, never touching a class of another plugin. Lullaby has no link in either direction.
+
+Plugins that list Atlas and the calls they make, so a change here knows what it can break:
+
+| Plugin | Lists Atlas | Calls |
+|---|---|---|
+| Dominion 0.7.x | `>=1.6.0` | `onEnable`, `onDisable`, a marker layer, `setHidden`, `removeHooks` by reflection |
+| Chronicle Stats 1.5.0 | `>=1.1.0` | `SessionApi.get` and session events |
+| Feats 1.7.2+ | `>=1.9.0` | `onEnable`, `onDisable`, `removeHooks`, `version`, `onMarker`, `SessionApi` |
+| SocialBridge 0.2.0 | `>=1.8.0` | `onEnable`, `onDisable`, `removeHooks`, `get`, `publicUrl`, hidden players and link codes |
+| RestAPI 0.2.0 | `>=1.8.0` | `onEnable`, `onDisable`, `removeHooks`, `publicUrl`, `renderStatus`, `worlds`, layers, `SessionApi` |
+
+None of them pins 1.8.0 or 1.9.0 exactly, so a newer Atlas is accepted. A method added later must be
+guarded on their side with `NoSuchMethodError` or `LinkageError`, as Feats does for `onMarker`.
+
+The reload rule for the suite. TrackerAPI and Coinage reload Atlas after their own reload. Atlas
+reloads Dominion, Feats, Chronicle Stats, SocialBridge and RestAPI after its own, in dependency order.
+All three passes take `ryvrook.dependents.lock` and skip a plugin whose instance changed since the pass
+began, so every plugin starts once. A reload of Dominion, Feats, Chronicle Stats, SocialBridge, RestAPI
+or Lullaby does not touch Atlas. Dominion takes its sieges layer down and puts it back, Feats takes its
+marker listener back with `removeHooks`.
+
+## Upgrading a live 1.6.0 server to 1.9.0
+
+What an admin sees when a server on 1.6.0 gets this jar:
+
+- Six keys are added to atlas.json with their defaults on the first start, `showOwnMoney` (`false`)
+  from 1.7.0 and `coinage`, `dominion`, `feats` and `chronicle` (all `auto`) from 1.9.0. Nothing else
+  in the file changes.
+- `chronicleExport` still holding the old `mods/Ryvrook_Chronicle/export/stats.json` default now
+  reads the Ryvrook_ChronicleStats file first and the old one only while the new one is missing.
+- `publicUrl` matters more. `AtlasApi.publicUrl()` hands it to SocialBridge, RestAPI and Feats, and
+  without it they get `http://bind:port/basePath/`. SocialBridge never posts a guessed address, so
+  set `publicUrl` before installing it.
+- The manifest lists Coinage as an optional dependency, so Atlas loads after Coinage.
+- A `/plugin reload` of Atlas now reloads every plugin that lists it two seconds later, so no
+  dependent has to be reloaded by hand. With only Atlas on the server nothing else happens.
+- A removed Dominion takes its territories off the map after a minute, where 1.6.0 kept the last
+  snapshot up for good. Set `dominion` to `always` to keep the old behaviour.
+- The public map stops naming hidden feats.
+- The tile, timeline and player files on disk are read as they are. There is no migration step.
+
 ## BetterMap
 
 Atlas contains no BetterMap code. It only reads BetterMap's files and never writes to its folder.
