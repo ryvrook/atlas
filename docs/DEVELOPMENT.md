@@ -530,8 +530,8 @@ every 5 seconds and, at the default path only, drops the snapshot once Dominion 
 disabled or failed for a minute, and reads it again as soon as Dominion is back. The minute covers a
 `/plugin reload` of Dominion and the boot, since Dominion loads after Atlas.
 
-A `/plugin reload` of Atlas loads the `api` classes again, while Dominion, SocialBridge and RestAPI
-stay linked to the old ones until they are reloaded too. From 1.8.0 Atlas does that itself. At start
+A `/plugin reload` of Atlas loads the `api` classes again, while Dominion, Feats, Chronicle Stats, SocialBridge and RestAPI
+and the other plugins that list Atlas stay linked to the old ones until they are reloaded too. From 1.8.0 Atlas does that itself. At start
 `Dependents` lists the enabled plugins whose manifest names Atlas, which on a fresh boot is nobody since
 they load after it, and two seconds later reloads them in dependency order under the
 `ryvrook.dependents.lock` lock that TrackerAPI and Coinage share, skipping any plugin whose instance
