@@ -309,6 +309,56 @@ public final class Atlas {
         return o;
     }
 
+    /**
+     * The address players open, publicUrl when it is set, else http://bind:port/basePath/ with a wildcard bind
+     * shown as your-server-address, the rule Chronicle Stats uses too. Always ends with a slash.
+     */
+    public String publicAddress() {
+        AtlasConfig cfg = config;
+        if (cfg.hasPublicUrl()) {
+            String url = cfg.publicUrl.trim();
+            return url.endsWith("/") ? url : url + "/";
+        }
+        return addressOf(cfg.bind, cfg.port, cfg.basePath);
+    }
+
+    /** http://host:port/basePath/ with a wildcard or empty bind shown as your-server-address. */
+    public static String addressOf(String bind, int port, String basePath) {
+        String b = bind == null ? "" : bind.trim();
+        String host = b.isEmpty() || "0.0.0.0".equals(b) || "::".equals(b) || "*".equals(b)
+                ? "your-server-address" : b.contains(":") && !b.startsWith("[") ? "[" + b + "]" : b;
+        return "http://" + host + ":" + port + AtlasConfig.normalizeBasePath(basePath) + "/";
+    }
+
+    /** The render queue and the chunk image budget for AtlasApi. */
+    public dev.ryvrook.atlas.api.RenderStatus apiRenderStatus() {
+        TileService.RenderStatus r = tiles.renderStatus();
+        return new dev.ryvrook.atlas.api.RenderStatus(r.queued(), r.running(), r.done(), r.paused(), r.perWorld(),
+                tiles.budgetLeft(), tiles.budgetPerMinute());
+    }
+
+    /**
+     * The worlds Atlas draws for AtlasApi, sorted by name. The loaded ones and those the tile service has
+     * touched since start, minus any world atlas.json disables.
+     */
+    public List<dev.ryvrook.atlas.api.WorldStatus> apiWorlds() {
+        Map<String, LiveState.WorldInfo> live = this.live.worlds();
+        Map<String, Integer> explored = tiles.exploredCounts();
+        Map<String, Integer> queued = tiles.renderStatus().perWorld();
+        java.util.TreeSet<String> names = new java.util.TreeSet<>(explored.keySet());
+        names.addAll(live.keySet());
+        List<dev.ryvrook.atlas.api.WorldStatus> out = new ArrayList<>(names.size());
+        for (String name : names) {
+            if (!config.worldEnabled(name)) {
+                continue;
+            }
+            LiveState.WorldInfo info = live.get(name);
+            out.add(new dev.ryvrook.atlas.api.WorldStatus(name, info != null, info == null ? 0 : info.players(),
+                    explored.getOrDefault(name, 0), queued.getOrDefault(name, 0), !hiddenWorld(Viewer.PUBLIC, name)));
+        }
+        return out;
+    }
+
     /** The hello event body {apiVersion, viewer, server}. */
     public JsonObject helloPayload(Viewer v) {
         JsonObject hello = new JsonObject();

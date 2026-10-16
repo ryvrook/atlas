@@ -24,6 +24,13 @@ import java.util.logging.Logger;
  * <p>Every method is thread safe and never touches a world thread.
  */
 public abstract class AtlasApi {
+    /**
+     * The version of this class. 1 up to Atlas 1.7.0, 2 from 1.8.0 with {@link #publicUrl()},
+     * {@link #renderStatus()} and {@link #worlds()}. The compiler copies the value into the caller, so ask
+     * {@link #version()} on the running instance.
+     */
+    public static final int VERSION = 2;
+
     private static final Logger LOG = Logger.getLogger("Atlas");
     private static volatile AtlasApi current;
     private static final List<Consumer<AtlasApi>> ENABLE = new CopyOnWriteArrayList<>();
@@ -87,6 +94,32 @@ public abstract class AtlasApi {
 
     /** True when the player is hidden on the map for any reason. */
     public abstract boolean isHidden(UUID player);
+
+    /** The version the running Atlas implements. Not in Atlas 1.7.0 and older, where calling it fails. */
+    public int version() {
+        return VERSION;
+    }
+
+    /**
+     * The address players open for the map, always ending in a slash. publicUrl from atlas.json when it is set,
+     * else http://bind:port/basePath/. A server listening on every address cannot know its own name, so the host
+     * is then the placeholder your-server-address, the same rule Chronicle Stats follows for its dashboard.
+     * Check {@link #publicUrlSet()} before posting the link anywhere players click it. Never holds the admin
+     * token. Not in Atlas 1.7.0 and older.
+     */
+    public abstract String publicUrl();
+
+    /** True when the owner set publicUrl in atlas.json, so {@link #publicUrl()} is a real address. */
+    public abstract boolean publicUrlSet();
+
+    /** The render queue now. Not in Atlas 1.7.0 and older. */
+    public abstract RenderStatus renderStatus();
+
+    /**
+     * The worlds Atlas draws, sorted by name. A world shows up once it is loaded or has had tiles drawn since
+     * Atlas started, and a world disabled in atlas.json never does. Not in Atlas 1.7.0 and older.
+     */
+    public abstract List<WorldStatus> worlds();
 
     /** Atlas internal. Publishes the API and runs the enable hooks. */
     protected static void enable(AtlasApi api) {

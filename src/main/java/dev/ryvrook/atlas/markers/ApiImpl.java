@@ -2,6 +2,8 @@ package dev.ryvrook.atlas.markers;
 
 import dev.ryvrook.atlas.api.AtlasApi;
 import dev.ryvrook.atlas.api.MarkerLayer;
+import dev.ryvrook.atlas.api.RenderStatus;
+import dev.ryvrook.atlas.api.WorldStatus;
 
 import java.util.List;
 import java.util.Set;
@@ -69,5 +71,25 @@ final class ApiImpl extends AtlasApi {
     @Override
     public boolean isHidden(UUID player) {
         return service.isHidden(player);
+    }
+
+    @Override
+    public String publicUrl() {
+        return service.atlas().publicAddress();
+    }
+
+    @Override
+    public boolean publicUrlSet() {
+        return service.atlas().config().hasPublicUrl();
+    }
+
+    @Override
+    public RenderStatus renderStatus() {
+        return service.atlas().apiRenderStatus();
+    }
+
+    @Override
+    public List<WorldStatus> worlds() {
+        return service.atlas().apiWorlds();
     }
 }

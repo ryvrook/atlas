@@ -216,7 +216,10 @@ AtlasApi.onDisable(() -> {
 
 `onEnable` runs at once when Atlas is up and again every time it starts. `AtlasApi.removeHooks` takes the hooks
 back. Everything is thread safe and never touches a world thread. `popupHtml` sends your own HTML, never text players
-typed. `api.setHidden(uuid, true, "vanished")` hides a player until the next restart. The browser JSON API, frozen
+typed. `api.setHidden(uuid, true, "vanished")` hides a player until the next restart. From Atlas 1.8.0 `api.publicUrl()` gives the
+map address players open, `publicUrlSet()` says whether that came from `publicUrl` in atlas.json or was built from
+`bind`, `port` and `basePath`, `renderStatus()` gives the render queue and the chunk image budget, and `worlds()` lists
+the worlds Atlas draws with their explored chunks and queued tiles. `AtlasApi.VERSION` is 2 there. The browser JSON API, frozen
 as version 1, and the session API for plugins with their own web page are in [docs/API.md](docs/API.md).
 
 ## Dominion snapshot format

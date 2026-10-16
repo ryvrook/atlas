@@ -83,6 +83,11 @@ public final class MarkerService {
         this.api = new ApiImpl(this);
     }
 
+    /** The Atlas this service belongs to, for the API calls that are not about markers. */
+    Atlas atlas() {
+        return atlas;
+    }
+
     public Path folder() {
         return dir;
     }
