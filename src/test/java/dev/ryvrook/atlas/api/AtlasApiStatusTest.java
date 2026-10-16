@@ -110,7 +110,7 @@ class AtlasApiStatusTest {
 
     @Test
     void theRunningInstanceReportsTheClassVersion() {
-        assertEquals(2, AtlasApi.VERSION);
+        assertEquals(3, AtlasApi.VERSION);
         assertEquals(AtlasApi.VERSION, start(new AtlasConfig()).version());
     }
 }

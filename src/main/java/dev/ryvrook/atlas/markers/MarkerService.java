@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import dev.ryvrook.atlas.Atlas;
 import dev.ryvrook.atlas.api.Marker;
+import dev.ryvrook.atlas.api.MarkerEvent;
 import dev.ryvrook.atlas.api.MarkerLayer;
 import dev.ryvrook.atlas.api.PointMarker;
 import dev.ryvrook.atlas.api.Tier;
@@ -31,6 +32,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.regex.Pattern;
 
@@ -57,6 +59,7 @@ public final class MarkerService {
     private final Atlas atlas;
     private final Path dir;
     private final ApiImpl api;
+    private final MarkerEvents events = new MarkerEvents();
     private final Map<String, MarkerLayer> apiLayers = new ConcurrentHashMap<>();
     /** Drop folder layers by file name without .json. */
     private final Map<String, FileLayer> files = new ConcurrentHashMap<>();
@@ -92,24 +95,47 @@ public final class MarkerService {
         return dir;
     }
 
-    /** Reads the drop folder and publishes the API. Runs the enable hooks of other plugins. */
-    public void start() {
+    /**
+     * Reads the drop folder and publishes the API. Runs the enable hooks of other plugins. Marker listeners
+     * run on the scheduler from now on.
+     */
+    public void start(Executor scheduler) {
         if (running) {
             return;
         }
         running = true;
+        events.start(scheduler);
         poll();
         api.up();
     }
 
-    /** Withdraws the API and runs the disable hooks of other plugins. */
+    /** Withdraws the API, runs the disable hooks of other plugins and drops the marker listeners. */
     public void stop() {
         if (!running) {
             return;
         }
         running = false;
         api.down();
+        events.stop();
     }
+
+    // ---- marker events ----------------------------------------------------------
+
+    /** Registers a listener for {@link dev.ryvrook.atlas.api.AtlasApi#onMarker}. The handle removes it again. */
+    public Runnable onMarker(Consumer<MarkerEvent> listener) {
+        return events.add(listener);
+    }
+
+    /**
+     * Hands a marker change to the listeners of other plugins. Called where the marker.add and marker.remove
+     * timeline events are written. Returns at once and never runs a listener on the caller's thread.
+     */
+    public void fire(MarkerEvent event) {
+        events.fire(event);
+    }
+
+    /** The layer name events carry for the markers players place on the in game map. */
+    public static final String SHARED_LAYER = "shared";
 
     // ---- API layers -----------------------------------------------------------
 
@@ -359,14 +385,38 @@ public final class MarkerService {
         saveAdmin(copy);
     }
 
-    /** Removes a marker from the admin layer. False when it did not exist. */
-    public synchronized boolean adminRemove(String world, String id) throws AdminProblem {
+    /**
+     * Removes a marker from the admin layer. Gives back the x and z it stood at, or the centre of an area, or
+     * null when it did not exist.
+     */
+    public synchronized double[] adminRemove(String world, String id) throws AdminProblem {
         MarkerLayer copy = adminCopy();
-        if (!copy.remove(world, id)) {
-            return false;
+        Marker<?> gone = copy.get(world, id);
+        if (gone == null || !copy.remove(world, id)) {
+            return null;
         }
         saveAdmin(copy);
-        return true;
+        return centre(gone);
+    }
+
+    /** The position of a marker, or the centre of its points. 0, 0 when it has neither. */
+    static double[] centre(Marker<?> m) {
+        if (m instanceof PointMarker p) {
+            return new double[]{p.x(), p.z()};
+        }
+        if (m instanceof dev.ryvrook.atlas.api.CircleMarker c) {
+            return new double[]{c.x(), c.z()};
+        }
+        if (m instanceof dev.ryvrook.atlas.api.PolygonMarker poly && !poly.points().isEmpty()) {
+            double x = 0;
+            double z = 0;
+            for (double[] pt : poly.points()) {
+                x += pt[0];
+                z += pt[1];
+            }
+            return new double[]{x / poly.points().size(), z / poly.points().size()};
+        }
+        return new double[]{0, 0};
     }
 
     /**

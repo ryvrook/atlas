@@ -345,8 +345,12 @@ write `admin.json` atomically, and refuse to write while the file holds an error
 `removeHooks` takes them out. A `/plugin reload` of Atlas starts over with new classes, see Dominion
 below.
 
-`AtlasApi.VERSION` is 2 from 1.8.0. Methods and record components are only ever added, and the version
-goes up each time the class grows. `publicUrl()` follows the rule Chronicle Stats uses for its dashboard,
+`AtlasApi.VERSION` is 2 from 1.8.0 and 3 from 1.9.0. Methods and record components are only ever added, and the version
+goes up each time the class grows. `onMarker` hands listeners to `MarkerEvents` in `markers`, which queues
+each `MarkerEvent` and drains the queue on the scheduler the way `SessionService` does, so a listener never
+runs on the thread that noticed the change. `Atlas.recordSharedChanges` fires for the in game map and the
+`/atlas marker` commands fire for the admin layer, next to the `marker.add` and `marker.remove` timeline
+events. A listener that throws is logged at most once a minute. `publicUrl()` follows the rule Chronicle Stats uses for its dashboard,
 `publicUrl` from atlas.json with a slash added, else `http://bind:port/basePath/` with a wildcard bind
 written as `your-server-address`. `publicUrlSet()` tells the two apart, and nothing in the API ever
 holds the admin token. `renderStatus()` and `worlds()` hand out the `RenderStatus` and `WorldStatus`

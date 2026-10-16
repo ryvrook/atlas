@@ -27,6 +27,7 @@ import dev.ryvrook.atlas.http.AtlasVersion;
 import dev.ryvrook.atlas.http.SseHub;
 import dev.ryvrook.atlas.http.TrustedProxies;
 import dev.ryvrook.atlas.markers.MarkerRoutes;
+import dev.ryvrook.atlas.api.MarkerEvent;
 import dev.ryvrook.atlas.markers.MarkerService;
 import dev.ryvrook.atlas.tiles.ExploredIndex;
 import dev.ryvrook.atlas.tiles.TileService;
@@ -381,7 +382,7 @@ public final class Atlas {
     public void useExecutor(Executor executor) {
         this.background = executor;
         // The plugin hands the scheduler over from start, which is when the marker API goes live.
-        markers.start();
+        markers.start(executor);
     }
 
     /** Runs a task on the Atlas scheduler, or on a fresh virtual thread before the scheduler is known. */
@@ -1892,12 +1893,17 @@ public final class Atlas {
                 EventLog.record(world, at, "marker.add", (double) m.x(), (double) m.z(), who,
                         who == null ? null : m.byUuid(), (who == null ? "A marker was placed" : who + " placed a marker")
                                 + (m.name() == null || m.name().isBlank() ? "." : ", " + m.name() + "."));
+                // Other plugins always get the author. showMarkerAuthors only decides what the timeline shows.
+                markers.fire(new MarkerEvent(MarkerEvent.Kind.ADDED, m.byUuid(), world, MarkerService.SHARED_LAYER,
+                        m.id(), m.x(), m.z(), at));
             }
         }
         for (EngineData.SharedMarker m : before.values()) {
             if (!now.containsKey(m.id())) {
                 EventLog.record(world, at, "marker.remove", (double) m.x(), (double) m.z(), null, null,
                         "A marker was removed" + (m.name() == null || m.name().isBlank() ? "." : ", " + m.name() + "."));
+                markers.fire(new MarkerEvent(MarkerEvent.Kind.REMOVED, m.byUuid(), world, MarkerService.SHARED_LAYER,
+                        m.id(), m.x(), m.z(), at));
             }
         }
     }

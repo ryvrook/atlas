@@ -26,10 +26,10 @@ import java.util.logging.Logger;
 public abstract class AtlasApi {
     /**
      * The version of this class. 1 up to Atlas 1.7.0, 2 from 1.8.0 with {@link #publicUrl()},
-     * {@link #renderStatus()} and {@link #worlds()}. The compiler copies the value into the caller, so ask
-     * {@link #version()} on the running instance.
+     * {@link #renderStatus()} and {@link #worlds()}, 3 from 1.9.0 with {@link #onMarker(Consumer)}. The
+     * compiler copies the value into the caller, so ask {@link #version()} on the running instance.
      */
-    public static final int VERSION = 2;
+    public static final int VERSION = 3;
 
     private static final Logger LOG = Logger.getLogger("Atlas");
     private static volatile AtlasApi current;
@@ -120,6 +120,19 @@ public abstract class AtlasApi {
      * Atlas started, and a world disabled in atlas.json never does. Not in Atlas 1.7.0 and older.
      */
     public abstract List<WorldStatus> worlds();
+
+    /**
+     * Registers a listener for the shared markers players and staff place and remove, and returns a handle
+     * that removes it again. Atlas fires ADDED when a marker shows up on the in game map of a world or
+     * /atlas marker add and /atlas marker area add place a server marker, and REMOVED when such a marker
+     * goes away, through the map or /atlas marker remove. The event names the author when the marker has
+     * one, see {@link MarkerEvent}. Layers of other plugins and the drop folder fire nothing. Listeners run
+     * on an Atlas-scheduler thread, one at a time and in the order of the changes, never on the caller's
+     * thread and never on a world thread. A listener that throws is logged at most once a minute and the
+     * others still run. Listeners are dropped when Atlas stops, so register again from
+     * {@link #onEnable(Consumer)}. Since API version 3.
+     */
+    public abstract Runnable onMarker(Consumer<MarkerEvent> listener);
 
     /** Atlas internal. Publishes the API and runs the enable hooks. */
     protected static void enable(AtlasApi api) {

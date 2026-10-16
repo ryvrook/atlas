@@ -9,6 +9,7 @@ import com.hypixel.hytale.server.core.universe.PlayerRef;
 import com.hypixel.hytale.server.core.universe.Universe;
 import dev.ryvrook.atlas.Atlas;
 import dev.ryvrook.atlas.AtlasPlugin;
+import dev.ryvrook.atlas.api.MarkerEvent;
 import dev.ryvrook.atlas.markers.MarkerService;
 import dev.ryvrook.atlas.timeline.EventLog;
 import dev.ryvrook.atlas.timeline.TimelineCommands;
@@ -181,10 +182,11 @@ final class StaffCommands {
                     plugin.atlas().markers().adminPoint(w, markerId, bx, bz, text);
                     good(context, "Placed the server marker " + markerId + " at " + Math.round(bx) + " " + Math.round(bz)
                             + " in " + w + ".");
+                    long at = System.currentTimeMillis();
                     if (plugin.atlas().markers().adminTimelineVisible()) {
-                        EventLog.record(w, System.currentTimeMillis(), "marker.add", bx, bz, null,
-                                "A server marker was placed, " + text + ".");
+                        EventLog.record(w, at, "marker.add", bx, bz, null, "A server marker was placed, " + text + ".");
                     }
+                    fire(plugin, MarkerEvent.Kind.ADDED, w, markerId, bx, bz, at);
                 } catch (MarkerService.AdminProblem e) {
                     bad(context, e.getMessage());
                 }
@@ -211,12 +213,14 @@ final class StaffCommands {
             String markerId = context.get(id);
             plugin.runAsync(() -> {
                 try {
-                    if (plugin.atlas().markers().adminRemove(w, markerId)) {
+                    double[] where = plugin.atlas().markers().adminRemove(w, markerId);
+                    if (where != null) {
                         good(context, "Removed the server marker " + markerId + " from " + w + ".");
+                        long at = System.currentTimeMillis();
                         if (plugin.atlas().markers().adminTimelineVisible()) {
-                            EventLog.record(w, System.currentTimeMillis(), "marker.remove", null, null, null,
-                                    "A server marker was removed.");
+                            EventLog.record(w, at, "marker.remove", null, null, null, "A server marker was removed.");
                         }
+                        fire(plugin, MarkerEvent.Kind.REMOVED, w, markerId, where[0], where[1], at);
                     } else {
                         bad(context, "There is no server marker " + markerId + " in " + w + ".");
                     }
@@ -310,15 +314,24 @@ final class StaffCommands {
                 try {
                     plugin.atlas().markers().adminArea(w, markerId, ax, az, bx, bz, text);
                     good(context, "Placed the server area " + markerId + " in " + w + ".");
+                    long at = System.currentTimeMillis();
                     if (plugin.atlas().markers().adminTimelineVisible()) {
-                        EventLog.record(w, System.currentTimeMillis(), "marker.add", (ax + bx) / 2, (az + bz) / 2, null,
+                        EventLog.record(w, at, "marker.add", (ax + bx) / 2, (az + bz) / 2, null,
                                 "A server area was marked, " + text + ".");
                     }
+                    fire(plugin, MarkerEvent.Kind.ADDED, w, markerId, (ax + bx) / 2, (az + bz) / 2, at);
                 } catch (MarkerService.AdminProblem e) {
                     bad(context, e.getMessage());
                 }
             });
         }
+    }
+
+    /** Tells the plugins listening through AtlasApi.onMarker about a server marker. Staff markers have no author. */
+    private static void fire(AtlasPlugin plugin, MarkerEvent.Kind kind, String world, String id, double x, double z,
+                             long at) {
+        plugin.atlas().markers().fire(new MarkerEvent(kind, null, world,
+                MarkerService.ADMIN_PLUGIN + ":" + MarkerService.ADMIN_LAYER, id, x, z, at));
     }
 
     /** Refuses a world the engine has not loaded, so a typo does not land in admin.json. */

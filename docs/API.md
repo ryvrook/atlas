@@ -3,8 +3,8 @@
 This is the reference for the JSON API and the event stream that the Atlas web client uses. Scripts,
 bots and other sites may use it too. Every payload is built by Atlas from an explicit field list.
 Nothing from the factions snapshot file, the Feats export or the Chronicle export is passed through as
-a raw object. The Java session API for other plugins is described at the end, under
-[Session API for plugins](#session-api-for-plugins).
+a raw object. The Java APIs for other plugins are described at the end, under
+[Marker events for plugins](#marker-events-for-plugins) and [Session API for plugins](#session-api-for-plugins).
 
 ## Versioning
 
@@ -827,6 +827,52 @@ replayed as they were built during that minute. Any other reconnect starts over 
 
 **Limits.** Each address may hold `sseClientsPerIp` streams (8 by default) and more get 429 with
 `Retry-After: 30`. Past 500 streams in total the answer is 503.
+
+## Marker events for plugins
+
+`dev.ryvrook.atlas.api.AtlasApi.onMarker` tells a plugin about the shared markers players and staff place and
+remove. Feats counts the markers a player placed with it. It is part of `AtlasApi`, so it follows the
+`AtlasApi.VERSION` of the README, `3` from Atlas 1.9.0. A plugin that binds by reflection checks `version()`
+is at least 3 before looking the method up.
+
+| Member | Descriptor | Thread | What it does |
+| --- | --- | --- | --- |
+| `Runnable onMarker(Consumer<MarkerEvent> listener)` | `(Ljava/util/function/Consumer;)Ljava/lang/Runnable;` | Any, listener on `Atlas-scheduler` | Registers a listener and returns the handle that removes it |
+
+```
+record MarkerEvent(MarkerEvent.Kind kind, UUID player, String world, String layer, String markerId,
+                   double x, double z, long at)
+enum MarkerEvent.Kind { ADDED, REMOVED }
+```
+
+- `ADDED` fires when a marker shows up on the shared in game map of a world, or `/atlas marker add` and
+  `/atlas marker area add` place a server marker. `REMOVED` fires when such a marker goes away, through the
+  map or `/atlas marker remove`. Both fire from the places that write the `marker.add` and `marker.remove`
+  timeline events. Layers other plugins keep through the API and the drop folder fire nothing.
+- `player` is the author of the marker, the player who placed it on the in game map, and null for a server
+  marker and for a marker without a known author. A `REMOVED` event carries the author of the marker, not
+  the player who removed it. The author is given even when `showMarkerAuthors` is off, which only decides
+  what the timeline and the map show.
+- `layer` is `shared` for the in game map and `atlas:admin` for the server markers. `markerId` is the id
+  the browser sees in `/api/markers/{world}` or `/api/layers/{world}`. `x` and `z` are the block position,
+  or the centre of an area, and `at` is epoch milliseconds.
+- Listeners run on an `Atlas-scheduler` thread, one at a time and in the order of the changes, never on
+  the thread that noticed the change and never on a world thread. A listener that throws is logged at
+  most once a minute and the others still run.
+- Listeners are dropped when Atlas stops. Register again from `AtlasApi.onEnable`, which runs on every
+  start.
+
+```java
+AtlasApi.onEnable(api -> {
+    if (api.version() >= 3) {
+        Runnable stop = api.onMarker(e -> {
+            if (e.kind() == MarkerEvent.Kind.ADDED && e.player() != null) {
+                countMarker(e.player());
+            }
+        });
+    }
+});
+```
 
 ## Session API for plugins
 

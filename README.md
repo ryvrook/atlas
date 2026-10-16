@@ -219,8 +219,11 @@ back. Everything is thread safe and never touches a world thread. `popupHtml` se
 typed. `api.setHidden(uuid, true, "vanished")` hides a player until the next restart. From Atlas 1.8.0 `api.publicUrl()` gives the
 map address players open, `publicUrlSet()` says whether that came from `publicUrl` in atlas.json or was built from
 `bind`, `port` and `basePath`, `renderStatus()` gives the render queue and the chunk image budget, and `worlds()` lists
-the worlds Atlas draws with their explored chunks and queued tiles. `AtlasApi.VERSION` is 2 there. The browser JSON API, frozen
-as version 1, and the session API for plugins with their own web page are in [docs/API.md](docs/API.md).
+the worlds Atlas draws with their explored chunks and queued tiles. From Atlas 1.9.0 `api.onMarker(listener)` reports the
+shared markers players place and remove on the in game map and the server markers staff place with `/atlas marker`, as
+`MarkerEvent` records with the kind, the author when there is one, the world, the layer, the marker id, the position and
+the time. The handle it returns removes the listener. `AtlasApi.VERSION` is 3 there. The browser JSON API, frozen
+as version 1, the marker events and the session API for plugins with their own web page are in [docs/API.md](docs/API.md).
 
 ## Dominion snapshot format
 

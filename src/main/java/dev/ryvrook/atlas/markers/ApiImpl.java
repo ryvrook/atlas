@@ -1,6 +1,7 @@
 package dev.ryvrook.atlas.markers;
 
 import dev.ryvrook.atlas.api.AtlasApi;
+import dev.ryvrook.atlas.api.MarkerEvent;
 import dev.ryvrook.atlas.api.MarkerLayer;
 import dev.ryvrook.atlas.api.RenderStatus;
 import dev.ryvrook.atlas.api.WorldStatus;
@@ -8,6 +9,7 @@ import dev.ryvrook.atlas.api.WorldStatus;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /** The API object other plugins get from AtlasApi.get(). Everything is handed to the marker service. */
 final class ApiImpl extends AtlasApi {
@@ -91,5 +93,10 @@ final class ApiImpl extends AtlasApi {
     @Override
     public List<WorldStatus> worlds() {
         return service.atlas().apiWorlds();
+    }
+
+    @Override
+    public Runnable onMarker(Consumer<MarkerEvent> listener) {
+        return service.onMarker(listener);
     }
 }

@@ -4,6 +4,18 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
+## 1.9.0 - 2026-10-16
+
+### For plugin authors
+
+- `AtlasApi.onMarker(listener)` reports the shared markers players place and remove on the in game map and the
+  server markers staff place and remove with `/atlas marker`, as `MarkerEvent` records with the kind, `ADDED` or
+  `REMOVED`, the author when there is one, the world, the layer, the marker id, the position and the time. The
+  handle it returns removes the listener. Listeners run on the Atlas scheduler in the order of the changes, a
+  listener that throws is logged at most once a minute and the others still run. Feats 1.7.2 counts placed
+  markers with it.
+- `AtlasApi.VERSION` is 3.
+
 ## 1.8.0 - 2026-10-16
 
 ### For admins
