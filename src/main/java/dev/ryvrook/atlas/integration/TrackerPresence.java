@@ -67,52 +67,93 @@ public final class TrackerPresence {
     /**
      * Watches the TrackerAPI plugin object every few seconds. A reloaded TrackerAPI brings new classes that
      * the running Atlas cannot use, and one that appears or goes away after setup cannot change the systems
-     * Atlas registered. TrackerAPI 1.0.3 and newer reloads Atlas itself two seconds after it starts, so the
-     * watch stays quiet then. For an older TrackerAPI, or one that was unloaded, each change asks for a
-     * reload of Atlas in one log line.
+     * Atlas registered. TrackerAPI 1.0.3 and newer reloads Atlas itself two seconds after it starts, so its
+     * reload gives one information line, and a warning only when it is still gone after 30 seconds. For an
+     * older TrackerAPI each change asks for a reload of Atlas in one warning.
      */
     public static final class Watch {
+        /** How long a TrackerAPI that reloads its dependents may stay away before the line becomes a warning. */
+        public static final long GRACE_MS = 30_000;
+
+        /** One line to log, as a warning or as information. */
+        public record Notice(boolean warn, String text) {
+        }
+
         private final Source source;
         private final TrackerMode mode;
         private Object seen;
-        private boolean gonePending;
+        private String seenVersion;
+        private long goneSince;
+        private boolean goneWarned;
 
         public Watch(TrackerMode mode, Source source, Found atSetup) {
             this.mode = mode == null ? TrackerMode.AUTO : mode;
             this.source = source;
             this.seen = atSetup == null ? null : atSetup.identity();
+            this.seenVersion = atSetup == null ? null : atSetup.version();
         }
 
-        /** The line to log for the plugin object now loaded, or null when nothing changed or TrackerAPI handles it. */
-        public synchronized String check(Found now) {
+        /** {@link #check(Found, long)} at the current time. */
+        public Notice check(Found now) {
+            return check(now, System.currentTimeMillis());
+        }
+
+        /**
+         * The line to log for the plugin object now loaded, or null when nothing changed. A TrackerAPI from
+         * {@link #RELOADS_DEPENDENTS} on that goes away is being reloaded and reloads Atlas itself, so that is
+         * one information line, and a warning follows only when it is still gone after {@link #GRACE_MS}.
+         */
+        public synchronized Notice check(Found now, long at) {
             Object id = now == null ? null : now.identity();
-            if (id == seen || mode == TrackerMode.NEVER) {
-                gonePending = false;
+            if (mode == TrackerMode.NEVER) {
                 return null;
             }
-            if (id == null && !gonePending) {
-                // A reload takes TrackerAPI away for a moment and then reloads Atlas, so the gap is only
-                // reported when the next look still finds no TrackerAPI.
-                gonePending = true;
+            if (id == null && seen == null && goneSince > 0) {
+                if (!goneWarned && at - goneSince >= GRACE_MS) {
+                    goneWarned = true;
+                    return new Notice(true, unloaded(GRACE_MS / 1000));
+                }
                 return null;
             }
-            gonePending = false;
+            if (id == seen) {
+                return null;
+            }
             Object before = seen;
+            String beforeVersion = seenVersion;
             seen = id;
-            if (id != null && !VersionCompare.below(now.version(), RELOADS_DEPENDENTS)) {
+            seenVersion = now == null ? null : now.version();
+            goneSince = 0;
+            goneWarned = false;
+            if (id == null) {
+                if (before != null && beforeVersion != null && !VersionCompare.below(beforeVersion, RELOADS_DEPENDENTS)) {
+                    goneSince = Math.max(1, at);
+                    return new Notice(false, "TrackerAPI was unloaded. A reloaded TrackerAPI reloads Atlas by itself "
+                            + "about two seconds after it starts, so nothing needs doing");
+                }
+                return new Notice(true, unloaded(0));
+            }
+            if (!VersionCompare.below(now.version(), RELOADS_DEPENDENTS)) {
                 return null;
             }
-            String what = id == null ? "TrackerAPI was unloaded"
-                    : before == null ? "TrackerAPI " + now.version() + " was loaded"
+            String what = before == null ? "TrackerAPI " + now.version() + " was loaded"
                     : "TrackerAPI " + now.version() + " was reloaded";
             String effect = switch (source) {
-                case TRACKER -> id == null
-                        ? "Atlas records no block activity and no kills until it is reloaded"
-                        : "Atlas cannot use the new TrackerAPI classes until it is reloaded";
+                case TRACKER -> "Atlas cannot use the new TrackerAPI classes until it is reloaded";
                 case OWN -> "Atlas keeps its own systems until it is reloaded";
                 case NONE -> "Atlas records nothing until it is reloaded";
             };
-            String reason = id == null && mode == TrackerMode.AUTO && source == Source.TRACKER
+            return new Notice(true, what + ". " + effect + ". Run /plugin reload Ryvrook:Atlas");
+        }
+
+        private String unloaded(long seconds) {
+            String what = seconds > 0 ? "TrackerAPI has been unloaded for " + seconds + " seconds"
+                    : "TrackerAPI was unloaded";
+            String effect = switch (source) {
+                case TRACKER -> "Atlas records no block activity and no kills until it is reloaded";
+                case OWN -> "Atlas keeps its own systems until it is reloaded";
+                case NONE -> "Atlas records nothing until it is reloaded";
+            };
+            String reason = mode == TrackerMode.AUTO && source == Source.TRACKER
                     ? ", since its own systems can only be registered at plugin start" : "";
             return what + ". " + effect + reason + ". Run /plugin reload Ryvrook:Atlas";
         }

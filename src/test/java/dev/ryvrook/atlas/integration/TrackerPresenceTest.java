@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -50,16 +51,30 @@ class TrackerPresenceTest {
     void watchAsksForAReloadOncePerChange() {
         TrackerPresence.Watch w = new TrackerPresence.Watch(TrackerMode.AUTO, Source.TRACKER, CURRENT);
         assertNull(w.check(CURRENT));
-        String reloaded = w.check(PATCHED);
-        assertNotNull(reloaded);
-        assertTrue(reloaded.contains("1.0.2 was reloaded"));
-        assertTrue(reloaded.contains("cannot use the new TrackerAPI classes"));
+        TrackerPresence.Watch.Notice reloaded = w.check(PATCHED);
+        assertTrue(reloaded.warn());
+        assertTrue(reloaded.text().contains("1.0.2 was reloaded"));
+        assertTrue(reloaded.text().contains("cannot use the new TrackerAPI classes"));
         assertNull(w.check(PATCHED));
-        assertNull(w.check(null), "the first look without TrackerAPI may be a reload in progress");
-        String gone = w.check(null);
-        assertTrue(gone.contains("was unloaded"));
-        assertTrue(gone.contains("only be registered at plugin start"));
+        TrackerPresence.Watch.Notice gone = w.check(null);
+        assertTrue(gone.warn(), "an old TrackerAPI does not reload Atlas, so its going away is a warning at once");
+        assertTrue(gone.text().contains("was unloaded"));
+        assertTrue(gone.text().contains("only be registered at plugin start"));
         assertNull(w.check(null));
+    }
+
+    @Test
+    void aReloadingTrackerApiIsInformationUntilItStaysAway() {
+        TrackerPresence.Watch w = new TrackerPresence.Watch(TrackerMode.AUTO, Source.TRACKER, NEWER);
+        TrackerPresence.Watch.Notice gone = w.check(null, 1_000);
+        assertFalse(gone.warn());
+        assertTrue(gone.text().contains("reloads Atlas by itself"));
+        assertNull(w.check(null, 20_000));
+        TrackerPresence.Watch.Notice late = w.check(null, 31_000);
+        assertTrue(late.warn());
+        assertTrue(late.text().contains("unloaded for 30 seconds"));
+        assertNull(w.check(null, 60_000), "warned once");
+        assertNull(w.check(new Found(new Object(), "1.1.0"), 61_000), "a TrackerAPI that reloads Atlas needs no line");
     }
 
     @Test
@@ -67,10 +82,8 @@ class TrackerPresenceTest {
         TrackerPresence.Watch w = new TrackerPresence.Watch(TrackerMode.AUTO, Source.TRACKER, CURRENT);
         assertNull(w.check(new Found(new Object(), TrackerPresence.RELOADS_DEPENDENTS)));
         assertNull(w.check(NEWER));
-        assertNull(w.check(null));
-        assertNull(w.check(NEWER), "TrackerAPI came back within one look, as in a reload");
-        assertNull(w.check(null));
-        assertTrue(w.check(null).contains("was unloaded"));
+        assertFalse(w.check(null, 5_000).warn());
+        assertNull(w.check(new Found(new Object(), "1.1.0"), 7_000), "back within the grace, as in a reload");
         TrackerPresence.Watch own = new TrackerPresence.Watch(TrackerMode.AUTO, Source.OWN, null);
         assertNull(own.check(NEWER));
     }
@@ -84,7 +97,7 @@ class TrackerPresenceTest {
     @Test
     void watchReportsATrackerApiLoadedAfterSetup() {
         TrackerPresence.Watch w = new TrackerPresence.Watch(TrackerMode.AUTO, Source.OWN, null);
-        String line = w.check(CURRENT);
+        String line = w.check(CURRENT).text();
         assertTrue(line.contains("was loaded"));
         assertTrue(line.contains("keeps its own systems"));
     }

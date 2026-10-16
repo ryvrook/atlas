@@ -423,9 +423,9 @@ public final class AtlasPlugin extends JavaPlugin {
     /** Every 5 seconds. Asks for a reload of Atlas once when TrackerAPI was loaded, reloaded or unloaded. */
     private void watchTracker() {
         TrackerPresence.Watch w = trackerWatch;
-        String line = w == null ? null : w.check(TrackerPresence.find());
-        if (line != null) {
-            getLogger().at(Level.WARNING).log("%s", line);
+        TrackerPresence.Watch.Notice n = w == null ? null : w.check(TrackerPresence.find());
+        if (n != null) {
+            getLogger().at(n.warn() ? Level.WARNING : Level.INFO).log("%s", n.text());
         }
     }
 

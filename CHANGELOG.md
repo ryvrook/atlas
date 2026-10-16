@@ -14,8 +14,8 @@ new files.
   `never` leaves that mod alone even when it is installed, so no balances, no faction layers, no Leaderboard tab or
   no Chronicle tab. `dominion` `always` keeps drawing the snapshot after Dominion is gone, where `auto` drops it after
   a minute. `coinage` `always` warns at start when Coinage is missing.
-- A `/plugin reload` of TrackerAPI no longer logs a warning that TrackerAPI was unloaded. Atlas now waits for a second
-  look five seconds later, by which time TrackerAPI is back and has reloaded Atlas.
+- A `/plugin reload` of TrackerAPI 1.0.3 or newer logs one information line that TrackerAPI reloads Atlas by itself,
+  where it used to warn and ask for a reload. The warning comes only when TrackerAPI is still gone after 30 seconds.
 
 ### Upgrading
 

@@ -502,8 +502,10 @@ engine's plugin class loader resolves its classes for Atlas when it is installed
 - The chunk save systems, chat, disconnect and the asset reload listener stay registered either way.
 - A reloaded TrackerAPI brings new classes in a new loader. TrackerAPI 1.0.3 and newer reloads every
   enabled plugin that lists it two seconds after its own start, Atlas included. `TrackerPresence.Watch`
-  compares the plugin object every 5 seconds and stays quiet for such a TrackerAPI. For an older one,
-  or one that was unloaded, it logs one line asking for `/plugin reload` of Atlas.
+  compares the plugin object every 5 seconds. When such a TrackerAPI goes away it logs one INFO line
+  saying TrackerAPI reloads Atlas by itself, and a WARNING asking for `/plugin reload` of Atlas only
+  when it is still gone after 30 seconds. For an older TrackerAPI every change is a WARNING at once.
+  Atlas has no such watch for Coinage or Feats, Coinage reloads Atlas and Feats is not linked.
 
 ## Coinage
 
