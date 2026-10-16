@@ -10,15 +10,15 @@ val hytaleVersion = (project.findProperty("hytale_version") as String?) ?: "0.7.
 // TrackerAPI and Coinage are optional at run time. Atlas compiles one bridge class against each jar, and
 // neither jar is bundled. -PtrackerApiJar and -PcoinageJar point elsewhere, else the sibling checkouts are used.
 val trackerApiJar = (project.findProperty("trackerApiJar") as String?)?.trim()
-    ?: listOf("1.0.3", "1.0.0").flatMap {
+    ?: listOf("1.1.0", "1.0.3", "1.0.0").flatMap {
         listOf("../trackerapi/build/libs/TrackerAPI-$it.jar",
             System.getProperty("user.home") + "/Projects/trackerapi/build/libs/TrackerAPI-$it.jar")
-    }.firstOrNull { file(it).exists() } ?: "../trackerapi/build/libs/TrackerAPI-1.0.3.jar"
+    }.firstOrNull { file(it).exists() } ?: "../trackerapi/build/libs/TrackerAPI-1.1.0.jar"
 val coinageJar = (project.findProperty("coinageJar") as String?)?.trim()
-    ?: listOf(
-        "../coinage/build/libs/Coinage-api-1.1.0.jar",
-        System.getProperty("user.home") + "/Projects/coinage/build/libs/Coinage-api-1.1.0.jar"
-    ).firstOrNull { file(it).exists() } ?: "../coinage/build/libs/Coinage-api-1.1.0.jar"
+    ?: listOf("1.3.0", "1.1.0").flatMap {
+        listOf("../coinage/build/libs/Coinage-api-$it.jar",
+            System.getProperty("user.home") + "/Projects/coinage/build/libs/Coinage-api-$it.jar")
+    }.firstOrNull { file(it).exists() } ?: "../coinage/build/libs/Coinage-api-1.3.0.jar"
 
 java {
     toolchain {

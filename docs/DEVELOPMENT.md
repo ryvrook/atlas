@@ -55,10 +55,11 @@ The jar lands in `build/libs/Atlas-<version>.jar`. The Hytale server artifact co
 Maven repository, and `hytale_channel` and `hytale_version` in `gradle.properties` select it.
 
 The TrackerAPI and Coinage jars are compile and test dependencies only and are never bundled. Gradle
-looks for `../trackerapi/build/libs/TrackerAPI-1.0.3.jar`, then 1.0.0, and for
-`../coinage/build/libs/Coinage-api-1.1.0.jar`, then the same jars under `~/Projects`.
-`-PtrackerApiJar=/path/to/TrackerAPI-1.0.3.jar` and `-PcoinageJar=/path/to/Coinage-api-1.1.0.jar` point
-them elsewhere.
+looks for `../trackerapi/build/libs/TrackerAPI-1.1.0.jar`, then 1.0.3 and 1.0.0, and for
+`../coinage/build/libs/Coinage-api-1.3.0.jar` (Coinage API 5), then 1.1.0, then the same jars under
+`~/Projects`. `-PtrackerApiJar=/path/to/TrackerAPI-1.1.0.jar` and
+`-PcoinageJar=/path/to/Coinage-api-1.3.0.jar` point them elsewhere. Atlas only calls what TrackerAPI
+1.0.0 and Coinage 1.0.0 already had, so the manifest minimums stay at 1.0.0.
 
 The version is set once, as `version` in `build.gradle.kts`. `processResources` writes it into
 `manifest.json` in place of `@version@`, and a generated `version.txt` next to `AtlasVersion` carries
