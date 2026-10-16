@@ -55,6 +55,7 @@ class TrackerPresenceTest {
         assertTrue(reloaded.contains("1.0.2 was reloaded"));
         assertTrue(reloaded.contains("cannot use the new TrackerAPI classes"));
         assertNull(w.check(PATCHED));
+        assertNull(w.check(null), "the first look without TrackerAPI may be a reload in progress");
         String gone = w.check(null);
         assertTrue(gone.contains("was unloaded"));
         assertTrue(gone.contains("only be registered at plugin start"));
@@ -66,6 +67,9 @@ class TrackerPresenceTest {
         TrackerPresence.Watch w = new TrackerPresence.Watch(TrackerMode.AUTO, Source.TRACKER, CURRENT);
         assertNull(w.check(new Found(new Object(), TrackerPresence.RELOADS_DEPENDENTS)));
         assertNull(w.check(NEWER));
+        assertNull(w.check(null));
+        assertNull(w.check(NEWER), "TrackerAPI came back within one look, as in a reload");
+        assertNull(w.check(null));
         assertTrue(w.check(null).contains("was unloaded"));
         TrackerPresence.Watch own = new TrackerPresence.Watch(TrackerMode.AUTO, Source.OWN, null);
         assertNull(own.check(NEWER));

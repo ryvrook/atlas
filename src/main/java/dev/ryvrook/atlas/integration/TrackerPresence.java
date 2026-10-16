@@ -75,6 +75,7 @@ public final class TrackerPresence {
         private final Source source;
         private final TrackerMode mode;
         private Object seen;
+        private boolean gonePending;
 
         public Watch(TrackerMode mode, Source source, Found atSetup) {
             this.mode = mode == null ? TrackerMode.AUTO : mode;
@@ -86,8 +87,16 @@ public final class TrackerPresence {
         public synchronized String check(Found now) {
             Object id = now == null ? null : now.identity();
             if (id == seen || mode == TrackerMode.NEVER) {
+                gonePending = false;
                 return null;
             }
+            if (id == null && !gonePending) {
+                // A reload takes TrackerAPI away for a moment and then reloads Atlas, so the gap is only
+                // reported when the next look still finds no TrackerAPI.
+                gonePending = true;
+                return null;
+            }
+            gonePending = false;
             Object before = seen;
             seen = id;
             if (id != null && !VersionCompare.below(now.version(), RELOADS_DEPENDENTS)) {
