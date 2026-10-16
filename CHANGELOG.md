@@ -4,6 +4,25 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
+## 1.8.0 - 2026-10-16
+
+### For admins
+
+- After a `/plugin reload` of Atlas, Atlas reloads the plugins that list it, Dominion, SocialBridge and RestAPI
+  among them, two seconds after it starts, so they link to the new instance. Before, each one had to be reloaded
+  by hand. The pass shares the `ryvrook.dependents.lock` lock with TrackerAPI and Coinage, so a plugin reloaded by
+  one of them in the meantime is left alone.
+
+### For plugin authors
+
+- `AtlasApi.publicUrl()` gives the map address players open, `publicUrl` from atlas.json or else
+  `http://bind:port/basePath/`, the same rule as Chronicle Stats. `publicUrlSet()` says which of the two it is.
+- `AtlasApi.renderStatus()` gives the render queue, the queued tiles per world and the chunk image budget as a
+  `RenderStatus` record.
+- `AtlasApi.worlds()` lists the worlds Atlas draws as `WorldStatus` records with players, explored chunks, queued
+  tiles and whether the public may open them.
+- `AtlasApi.VERSION` is 2 and `version()` gives the version of the running instance.
+
 ## 1.7.0 - 2026-10-15
 
 ### For players
