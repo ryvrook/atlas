@@ -240,7 +240,15 @@ waiting for a refresh when the server stops are removed from disk so the next st
   at once and the rest get 503 with `Retry-After`. Event streams are not counted there because
   they have their own limits of `sseClientsPerIp` per address and 500 in total.
 - A client gets 30 seconds to send its whole request, through the JDK server property
-  `sun.net.httpserver.maxReqTime`. Atlas sets it only when the server owner has not.
+  `sun.net.httpserver.maxReqTime`. It is one value for the whole JVM and the JDK reads it once.
+  Atlas sets it only when nobody has, and Chronicle Stats and RestAPI do the same with the same 30
+  seconds by default, so whichever starts first, the value stays 30 unless the owner sets it with
+  `-Dsun.net.httpserver.maxReqTime` or changes RestAPI's `http.requestSeconds`.
+- A reload or stop path never loads a sibling class for the first time. The plugin manager holds its
+  write lock during shutdown and the bridge class loader needs the read lock, which showed up as a 5
+  second hang. `shutdown` only touches TrackerAPI and Coinage through links that were made at start.
+- After a `/plugin reload` of Atlas, `Dependents` reloads the plugins that list Atlas two seconds after
+  start on the short lived `Atlas-dependents` thread.
 - Anything that reads or changes a world hops to that world's thread with `world.execute`. Engine
   markers, shared markers, personal markers, world events and world info are all read there and
   cached for the other threads.
@@ -336,6 +344,15 @@ write `admin.json` atomically, and refuse to write while the file holds an error
 `onEnable` and `onDisable` live in static lists, so they survive `/atlas reload`, and
 `removeHooks` takes them out. A `/plugin reload` of Atlas starts over with new classes, see Dominion
 below.
+
+`AtlasApi.VERSION` is 2 from 1.8.0. Methods and record components are only ever added, and the version
+goes up each time the class grows. `publicUrl()` follows the rule Chronicle Stats uses for its dashboard,
+`publicUrl` from atlas.json with a slash added, else `http://bind:port/basePath/` with a wildcard bind
+written as `your-server-address`. `publicUrlSet()` tells the two apart, and nothing in the API ever
+holds the admin token. `renderStatus()` and `worlds()` hand out the `RenderStatus` and `WorldStatus`
+records, plain values copied at the call, the same figures `/api/health` gives admins. A world is listed
+once it is loaded or the tile service has touched it since start, and a world disabled in atlas.json is
+left out.
 
 ## Session API
 
@@ -509,9 +526,13 @@ every 5 seconds and, at the default path only, drops the snapshot once Dominion 
 disabled or failed for a minute, and reads it again as soon as Dominion is back. The minute covers a
 `/plugin reload` of Dominion and the boot, since Dominion loads after Atlas.
 
-A `/plugin reload` of Atlas loads the `api` classes again, while Dominion stays linked to the old
-ones until it is reloaded too. Dominion notices and logs one line asking for that. Until then the
-snapshot still draws its sieges and hides its hidden players. `AtlasApi.removeHooks` lets a plugin take
+A `/plugin reload` of Atlas loads the `api` classes again, while Dominion, SocialBridge and RestAPI
+stay linked to the old ones until they are reloaded too. From 1.8.0 Atlas does that itself. At start
+`Dependents` lists the enabled plugins whose manifest names Atlas, which on a fresh boot is nobody since
+they load after it, and two seconds later reloads them in dependency order under the
+`ryvrook.dependents.lock` lock that TrackerAPI and Coinage share, skipping any plugin whose instance
+changed since Atlas started. Until the pass is done the snapshot still draws its sieges and hides its
+hidden players. `AtlasApi.removeHooks` lets a plugin take
 its hooks back when it stops first. TrackerAPI and Coinage each reload Atlas after their own reload.
 They share the `ryvrook.dependents.lock` lock and check which instance they saw, so a TrackerAPI reload,
 which reloads Coinage before Atlas, starts Atlas once.

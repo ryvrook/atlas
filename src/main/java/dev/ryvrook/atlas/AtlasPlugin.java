@@ -70,6 +70,7 @@ public final class AtlasPlugin extends JavaPlugin {
     private IsoService iso;
     private IsoSnapshots isoSnapshots;
     private volatile ScheduledThreadPoolExecutor scheduler;
+    private volatile boolean stopping;
     private final List<ScheduledFuture<?>> tasks = new ArrayList<>();
     private ScheduledFuture<?> playerTask;
     /** Per task failure state for guard, as [time of the last log line]. Absent while the task succeeds. */
@@ -266,10 +267,40 @@ public final class AtlasPlugin extends JavaPlugin {
             server.pruneRateLimits();
         }), 10, 600, TimeUnit.SECONDS));
         schedulePlayers();
+        reloadDependentsAfterReload(ex);
+    }
+
+    /**
+     * Reloads the plugins that list Atlas when they were already enabled at start, which only happens after a
+     * /plugin reload of Atlas. Two seconds later, so Atlas finishes starting first, and on a thread of its own
+     * since the pass may wait for another reloader and for each plugin.
+     */
+    private void reloadDependentsAfterReload(ScheduledThreadPoolExecutor ex) {
+        List<Dependents.Dependent> dependents = Dependents.enabled(getIdentifier(), getLogger());
+        if (dependents.isEmpty()) {
+            return;
+        }
+        getLogger().at(Level.INFO).log("Atlas found %d plugins linked to its previous instance and reloads them in two seconds",
+                dependents.size());
+        tasks.add(ex.schedule(() -> {
+            if (stopping) {
+                return;
+            }
+            Thread pass = new Thread(() -> {
+                try {
+                    Dependents.reload(dependents, getLogger());
+                } catch (RuntimeException | LinkageError e) {
+                    getLogger().at(Level.WARNING).withCause(e).log("Atlas could not reload the plugins linked to it");
+                }
+            }, "Atlas-dependents");
+            pass.setDaemon(true);
+            pass.start();
+        }, 2, TimeUnit.SECONDS));
     }
 
     @Override
     protected void shutdown() {
+        stopping = true;
         if (atlas != null) {
             // Withdrawn first, so no session listener is handed a change while the scheduler goes down.
             atlas.sessionApi().stop();
