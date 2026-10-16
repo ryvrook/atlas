@@ -46,6 +46,10 @@ map down the same way, so a setting you meant to tighten can never stay loose. F
 | `betterMapDir` | `mods/BetterMap` | BetterMap's folder, relative to the server working directory |
 | `tracker` | `auto` | Where the heat layer and the kill feed come from. `auto` uses TrackerAPI when it is installed, `always` only TrackerAPI, `never` only Atlas's own systems. Read at server start |
 | `showOwnMoney` | `false` | Show a linked player their own Coinage wallet and net worth in the account menu. Needs Coinage |
+| `coinage` | `auto` | The Coinage link. `auto` binds when Coinage is installed, `always` also warns at start when it is missing, `never` leaves it alone. Read at server start |
+| `dominion` | `auto` | The Dominion snapshot. `auto` reads it while Dominion runs and drops it a minute after Dominion is gone, `always` reads the file whether Dominion runs or not, `never` reads nothing |
+| `feats` | `auto` | The Feats export. `auto` and `always` read it, `never` turns the Leaderboard tab off |
+| `chronicle` | `auto` | The Chronicle Stats export. `auto` and `always` read it, `never` turns the Chronicle tab off |
 | `trustedProxies` | empty | Reverse proxies whose forwarded headers are believed, as addresses or CIDR ranges such as `10.0.0.0/8` |
 | `visibility` | see below | Who sees each layer |
 | `defaultWorld` | empty | World the map opens on. Empty means the server's default world |

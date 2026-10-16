@@ -15,7 +15,7 @@ portal worlds and world events, so it does not run on 0.6.8. Use Atlas 0.1.0 the
 
 ## Install
 
-1. Put `Atlas-1.8.0.jar` in the server's `mods` folder, or `UserData/Mods` for singleplayer.
+1. Put `Atlas-1.9.0.jar` in the server's `mods` folder, or `UserData/Mods` for singleplayer.
 2. Start the server. Atlas writes `mods/Ryvrook_Atlas/atlas.json` and listens on port 8123.
 3. Set `publicUrl` to the address players open, such as `https://map.example.com/`, and run `/atlas reload`.
    Without it `/atlas` cannot hand players a working link, and Atlas warns at start.
@@ -52,6 +52,7 @@ need `atlas.admin` and work from the console.
 | `/atlas iso status` | The 3D queue, caches and budget |
 | `/atlas key add <world> <x> <z> <label> [radius] [name]` | Add a key place |
 | `/atlas key remove <label>`, `list`, `render <label>` | Manage key places |
+| `/atlas integrations` | My other mods, their versions and what each one adds to the map now |
 
 ## Settings
 
@@ -77,6 +78,7 @@ on reload. A setting you meant to tighten can never stay loose by accident.
 | `chunkImagesPerMinute` | `1200` | Chunk images all renders may ask the engine for per minute |
 | `tracker` | `auto` | Use TrackerAPI for heat and kills when present. Read at start |
 | `showOwnMoney` | `false` | Show a linked player their own Coinage wallet |
+| `coinage`, `dominion`, `feats`, `chronicle` | `auto` | `auto`, `always` or `never` for each of my other mods |
 
 `adminToken` is filled with a random 32 character value on first start and opens every layer, hidden players and
 exact coordinates included. Keep `atlas.json` private.
@@ -153,33 +155,41 @@ Serve Atlas and Chronicle Stats under two paths of one host name, keep the defau
 
 ## With the other mods
 
-**Dominion Factions.** Atlas reads `mods/Ryvrook_Dominion/export/snapshot.json`, checked once a second, for
-territories, factions, nations, sieges, hills, outposts and envoys, and the hidden flag. It never links against
-Dominion for that. Dominion also adds a live sieges layer through `AtlasApi`, left off while the snapshot already
-lists sieges so each siege shows once. A Dominion that has been gone for a minute takes its territories off the map.
-`hidePlayersInOwnTerritory` (on) hides players in their own land from other factions.
+Atlas runs complete with no other mod. Each of my other mods adds something when it is installed, and nothing
+changes for players when it is not. Atlas compiles against TrackerAPI and Coinage and keeps each in one bridge class
+it loads only after the plugin manager reported the mod. Dominion, Feats and Chronicle Stats are read from the files
+they export, so Atlas never links against them. The other way round, Dominion, Feats, Chronicle Stats, SocialBridge
+and RestAPI call `AtlasApi` themselves and switch that off in their own settings. `/atlas integrations` lists each
+mod with its version and what it does on the map right now.
 
-**Feats.** Atlas reads `mods/Ryvrook_Feats/export/feats.json` for a Leaderboard tab with top players, recent unlocks
-with rarity, milestones and server firsts, and writes unlocks into the timeline. A hidden feat is named only to admins
-and the player who earned it.
+| Mod | What appears when it is installed | Setting in atlas.json |
+|---|---|---|
+| TrackerAPI 1.0.0+ | The heat layer and the kill feed come from its events, and Atlas registers no block or death systems of its own | `tracker` |
+| Coinage 1.0.0+ | A linked player sees their own wallet and net worth in the account menu, once `showOwnMoney` is true | `coinage`, `showOwnMoney` |
+| Dominion Factions | Territories, factions, nations, sieges, hills, outposts, envoys and faction chat from its snapshot, plus its live sieges layer | `dominion`, `dominionSnapshot` |
+| Feats | A Leaderboard tab with top players, recent unlocks with rarity, milestones and server firsts, and unlocks on the timeline | `feats`, `featsExport` |
+| Chronicle Stats | A Chronicle tab with server totals and top players linked to `chronicleUrl`, and one login for map and dashboard | `chronicle`, `chronicleExport` |
+| SocialBridge 0.2.0+ | The map link in Discord, `/map` link codes, and players hidden on the map left out of its roster | its own `suite.atlas` |
+| RestAPI 0.2.0+ | `/api/atlas` routes for the render queue, worlds, layers, markers and hidden players | its own `siblings.atlas` |
+| Lullaby | Nothing, it has nothing to put on a map | none |
 
-**Chronicle Stats.** Atlas reads `mods/Ryvrook_ChronicleStats/export/stats.json` for a Chronicle tab with server
-totals and top players, linked to `chronicleUrl`. Chronicle shares the login through Atlas's session API. A
-player hidden by either shows as "A player" in the tab, and players hidden on the map stay hidden on the dashboard.
+Each of `tracker`, `coinage`, `dominion`, `feats` and `chronicle` takes `auto` (the default), `always` or `never`.
+`never` leaves the mod alone even when it is installed. `always` for `tracker` uses TrackerAPI only and records
+nothing without it, for `coinage` warns at start when Coinage is missing, and for `dominion` keeps drawing the
+snapshot after Dominion is gone. Under `auto` a Dominion that has been missing for a minute takes its territories
+off the map. `tracker` and `coinage` are read at start, the other three on `/atlas reload` too.
 
-**TrackerAPI.** On `tracker` `auto`, with TrackerAPI 1.0.0 or newer, Atlas takes block breaks, places and deaths
-from it for the heat layer and the kill feed and registers no systems of its own for them. `heat.json` and
-`kills.json` carry on either way. TrackerAPI 1.0.3 and newer reload Atlas after their own reload. After adding or
-removing TrackerAPI, restart or reload Atlas.
-
-**Coinage.** With `showOwnMoney` on, a linked player sees their own wallet and net worth in the account menu.
-Nobody else does, admins included, and Atlas never moves money.
+Dominion's live sieges layer stays off while the snapshot already lists sieges, so each siege shows once.
+`hidePlayersInOwnTerritory` (on) hides players in their own land from other factions. A hidden feat is named only to
+admins and the player who earned it. A player hidden by Chronicle shows as "A player" in the tab, and players hidden
+on the map stay hidden on the dashboard. `heat.json` and `kills.json` carry on whichever source feeds them.
+TrackerAPI 1.0.3+ and Coinage reload Atlas after their own reload, and Atlas reloads the mods that list it after
+its own. After adding or removing TrackerAPI, restart or reload Atlas. Atlas only reads balances and never moves
+money. Feats 1.7.2 counts the markers players place through `AtlasApi.onMarker`.
 
 **BetterMap.** With `honorBetterMap` on, Atlas follows BetterMap's server wide rules from
 `mods/BetterMap/config.json`, hidden spawn, POIs, warps and deaths, the world border and waypoint heights. It only
 reads that folder.
-
-Lullaby has nothing to put on a map.
 
 ## Marker layers for other plugins
 
@@ -263,7 +273,7 @@ capture. Live positions from the server win over the file.
 
 ## Building
 
-JDK 25, or let the foojay resolver download one. `./gradlew build` puts `Atlas-1.8.0.jar` in `build/libs/` and
+JDK 25, or let the foojay resolver download one. `./gradlew build` puts `Atlas-1.9.0.jar` in `build/libs/` and
 runs the JUnit tests. `./gradlew installMod` copies it to your local `UserData/Mods`, or elsewhere with
 `-PmodsDir=<path>`. The version lives only in `build.gradle.kts`. A change to an API shape must keep version 1
 intact. [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers the packages, tiles, threads, the timeline and the
