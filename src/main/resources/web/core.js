@@ -6,10 +6,14 @@
   const $ = A.$ = (id) => document.getElementById(id);
 
   A.CHUNK = 32;
-  // The version this page was loaded with. The server stamps every script address with ?v=(version).
-  A.clientVersion = (() => {
+  // The version this page was loaded with. The server stamps every script address with ?v=(version)-(hash),
+  // where the hash follows the file's bytes and only serves the cache. The version check in app.js compares
+  // the version part alone with what the API reports, so a page from the same jar never asks for a reload.
+  A.clientTag = (() => {
     try { return new URL(document.currentScript.src).searchParams.get("v") || ""; } catch (e) { return ""; }
   })();
+  A.versionOfTag = (tag) => String(tag || "").split("-")[0];
+  A.clientVersion = A.versionOfTag(A.clientTag);
 
   // ---- text and numbers ---------------------------------------------------
   const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" };

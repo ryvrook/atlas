@@ -15,7 +15,7 @@ portal worlds and world events, so it does not run on 0.6.8. Use Atlas 0.1.0 the
 
 ## Install
 
-1. Put `Atlas-1.9.0.jar` in the server's `mods` folder, or `UserData/Mods` for singleplayer.
+1. Put `Atlas-1.9.1.jar` in the server's `mods` folder, or `UserData/Mods` for singleplayer.
 2. Start the server. Atlas writes `mods/Ryvrook_Atlas/atlas.json` and listens on port 8123.
 3. Set `publicUrl` to the address players open, such as `https://map.example.com/`, and run `/atlas reload`.
    Without it `/atlas` cannot hand players a working link, and Atlas warns at start.
@@ -273,7 +273,7 @@ capture. Live positions from the server win over the file.
 
 ## Building
 
-JDK 25, or let the foojay resolver download one. `./gradlew build` puts `Atlas-1.9.0.jar` in `build/libs/` and
+JDK 25, or let the foojay resolver download one. `./gradlew build` puts `Atlas-1.9.1.jar` in `build/libs/` and
 runs the JUnit tests. `./gradlew installMod` copies it to your local `UserData/Mods`, or elsewhere with
 `-PmodsDir=<path>`. The version lives only in `build.gradle.kts`. A change to an API shape must keep version 1
 intact. [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers the packages, tiles, threads, the timeline and the

@@ -4,6 +4,15 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
+## 1.9.1 - 2026-10-17
+
+### For admins
+
+- The map no longer shows `Atlas was updated, reload to continue` on every visit. Since 1.8.0 the page's script
+  addresses carry the version and a hash of the file, and the page compared that whole tag with the plain version the
+  API reports, so they never matched. The page now compares the version alone. A bar still comes up when the jar
+  really changes version. Updating is a jar swap, no setting changed.
+
 ## 1.9.0 - 2026-10-16
 
 ### For admins
