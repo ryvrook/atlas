@@ -4,6 +4,15 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
+## 1.9.2 - 2026-10-26
+
+### For admins
+
+- With VanishBridge installed, a vanished player is left out of the live map, the online list, the world player
+  counts and the map chat. Vanishing records them in last seen and on the timeline as leaving, and coming back
+  records a join. Leaderboards, kills and stats are not affected. The new `vanish` key in atlas.json takes `auto`
+  (the default), `always` or `never`.
+
 ## 1.9.1 - 2026-10-17
 
 ### For admins

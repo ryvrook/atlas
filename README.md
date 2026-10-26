@@ -78,7 +78,7 @@ on reload. A setting you meant to tighten can never stay loose by accident.
 | `chunkImagesPerMinute` | `1200` | Chunk images all renders may ask the engine for per minute |
 | `tracker` | `auto` | Use TrackerAPI for heat and kills when present. Read at start |
 | `showOwnMoney` | `false` | Show a linked player their own Coinage wallet |
-| `coinage`, `dominion`, `feats`, `chronicle` | `auto` | `auto`, `always` or `never` for each of my other mods |
+| `coinage`, `dominion`, `feats`, `chronicle`, `vanish` | `auto` | `auto`, `always` or `never` for each of my other mods |
 
 `adminToken` is filled with a random 32 character value on first start and opens every layer, hidden players and
 exact coordinates included. Keep `atlas.json` private.
@@ -171,13 +171,14 @@ mod with its version and what it does on the map right now.
 | Chronicle Stats | A Chronicle tab with server totals and top players linked to `chronicleUrl`, and one login for map and dashboard | `chronicle`, `chronicleExport` |
 | SocialBridge 0.2.0+ | The map link in Discord, `/map` link codes, and players hidden on the map left out of its roster | its own `suite.atlas` |
 | RestAPI 0.2.0+ | `/api/atlas` routes for the render queue, worlds, layers, markers and hidden players | its own `siblings.atlas` |
+| VanishBridge | Vanished players drop off the live map, the online list and the player counts, and their chat stays off the map. Vanishing records them as leaving and coming back as joining. Leaderboards and stats keep them | `vanish` |
 | Lullaby | Nothing, it has nothing to put on a map | none |
 
-Each of `tracker`, `coinage`, `dominion`, `feats` and `chronicle` takes `auto` (the default), `always` or `never`.
+Each of `tracker`, `coinage`, `dominion`, `feats`, `chronicle` and `vanish` takes `auto` (the default), `always` or `never`.
 `never` leaves the mod alone even when it is installed. `always` for `tracker` uses TrackerAPI only and records
 nothing without it, for `coinage` warns at start when Coinage is missing, and for `dominion` keeps drawing the
 snapshot after Dominion is gone. Under `auto` a Dominion that has been missing for a minute takes its territories
-off the map. `tracker` and `coinage` are read at start, the other three on `/atlas reload` too.
+off the map. `tracker` and `coinage` are read at start, the others on `/atlas reload` too.
 
 Dominion's live sieges layer stays off while the snapshot already lists sieges, so each siege shows once.
 `hidePlayersInOwnTerritory` (on) hides players in their own land from other factions. A hidden feat is named only to

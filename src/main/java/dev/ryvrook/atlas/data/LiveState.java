@@ -76,6 +76,48 @@ public final class LiveState {
     private volatile boolean hideInvisible;
     private final Map<UUID, String> trailWorld = new ConcurrentHashMap<>();
     private long lastTrailAt;
+    /** Players treated as offline, the vanished players VanishBridge reports. */
+    private volatile java.util.function.Predicate<UUID> offline = u -> false;
+    private volatile java.util.function.Consumer<PlayerSample> vanishListener = p -> { };
+
+    /** Sets who counts as offline though connected. Takes effect on the next sample. */
+    public void setOffline(java.util.function.Predicate<UUID> rule) {
+        offline = rule == null ? u -> false : rule;
+    }
+
+    /** Told about each player who drops out of the sample while still connected, with their last sample. */
+    public void onVanish(java.util.function.Consumer<PlayerSample> listener) {
+        vanishListener = listener == null ? p -> { } : listener;
+    }
+
+    /** The players of a world that are not treated as offline. */
+    public int visibleCount(World world) {
+        java.util.function.Predicate<UUID> rule = offline;
+        int count = 0;
+        for (PlayerRef ref : world.getPlayerRefs()) {
+            try {
+                if (!rule.test(ref.getUuid())) {
+                    count++;
+                }
+            } catch (RuntimeException ignored) {
+                // The player may be leaving while we count.
+            }
+        }
+        return count;
+    }
+
+    /** The players of every world that are not treated as offline. */
+    public int visibleCount() {
+        Universe universe = Universe.get();
+        if (universe == null) {
+            return 0;
+        }
+        int count = 0;
+        for (World world : universe.getWorlds().values()) {
+            count += visibleCount(world);
+        }
+        return count;
+    }
 
     /** Sets the automatic hide rules from atlas.json. Takes effect on the next world thread read. */
     public void setHideRules(boolean crouching, boolean invisible) {
@@ -117,6 +159,8 @@ public final class LiveState {
             players = List.of();
             return players;
         }
+        java.util.function.Predicate<UUID> rule = offline;
+        List<PlayerSample> before = players;
         for (World world : universe.getWorlds().values()) {
             String wname = world.getName();
             WorldInfo info = worldInfo.get(wname);
@@ -127,6 +171,9 @@ public final class LiveState {
             }
             for (PlayerRef ref : world.getPlayerRefs()) {
                 try {
+                    if (rule.test(ref.getUuid())) {
+                        continue;
+                    }
                     Transform t = ref.getTransform();
                     if (t == null || t.getPosition() == null) {
                         continue;
@@ -150,6 +197,15 @@ public final class LiveState {
                     joinListener.accept(p);
                 } catch (RuntimeException ignored) {
                     // The timeline must never break the player sample.
+                }
+            }
+        }
+        for (PlayerSample p : before) {
+            if (!online.contains(p.uuid()) && rule.test(p.uuid()) && universe.getPlayer(p.uuid()) != null) {
+                try {
+                    vanishListener.accept(p);
+                } catch (RuntimeException ignored) {
+                    // The last seen list must never break the player sample.
                 }
             }
         }
@@ -227,7 +283,7 @@ public final class LiveState {
         for (World world : universe.getWorlds().values()) {
             String name = world.getName();
             alive.add(name);
-            int count = world.getPlayerCount();
+            int count = visibleCount(world);
             boolean map = mapEnabled(world);
             long now = System.currentTimeMillis();
             // The kind stays null until the world thread has read it. updatedAt moves only when the world
@@ -302,7 +358,7 @@ public final class LiveState {
             // Time resource missing on this world.
         }
         WorldKind kind = WorldKinds.read(world, store);
-        int count = world.getPlayerCount();
+        int count = visibleCount(world);
         double[] spawnAt = spawn;
         Integer hourNow = hour;
         Float progressNow = progress;

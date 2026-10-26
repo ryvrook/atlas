@@ -114,6 +114,11 @@ public final class AtlasConfig {
     /** The Chronicle Stats export for the Chronicle tab. auto and always read it, never does not. */
     public String chronicle = TrackerMode.AUTO.key();
     /**
+     * VanishBridge. auto and always leave vanished players out of the live map, the online list and the player
+     * counts while they are vanished, never shows them as usual. Leaderboards and stats are not affected.
+     */
+    public String vanish = TrackerMode.AUTO.key();
+    /**
      * Show a linked player their own Coinage balance and net worth in the account menu. Off by default, since
      * a shared screen would show it too. Needs Coinage 1.0.0 or newer.
      */
@@ -533,6 +538,11 @@ public final class AtlasConfig {
         return modeOf(dominion);
     }
 
+    /** The vanish key as a mode. Never null. */
+    public TrackerMode vanishMode() {
+        return modeOf(vanish);
+    }
+
     /** The feats key as a mode. Never null. */
     public TrackerMode featsMode() {
         return modeOf(feats);
@@ -741,6 +751,7 @@ public final class AtlasConfig {
         cfg.dominion = linkMode("dominion", cfg.dominion);
         cfg.feats = linkMode("feats", cfg.feats);
         cfg.chronicle = linkMode("chronicle", cfg.chronicle);
+        cfg.vanish = linkMode("vanish", cfg.vanish);
         if (cfg.featsExport == null || cfg.featsExport.isBlank()) {
             cfg.featsExport = "mods/Ryvrook_Feats/export/feats.json";
         }

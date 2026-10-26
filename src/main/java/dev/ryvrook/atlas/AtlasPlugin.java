@@ -488,6 +488,7 @@ public final class AtlasPlugin extends JavaPlugin {
      * carry the players that left the viewer's view since the previous payload.
      */
     private synchronized void pushPlayers() {
+        atlas.vanish().refresh();
         atlas.live().sample();
         Set<String> moved = movedPlayers();
         if (atlas.sse().size() == 0) {
@@ -779,7 +780,8 @@ public final class AtlasPlugin extends JavaPlugin {
                 // Dominion cancels chat events and routes channels itself, so its snapshot is the only reliable source.
                 return e;
             }
-            if (!e.isCancelled() && e.getSender() != null && isPublic(e)) {
+            if (!e.isCancelled() && e.getSender() != null && !atlas.vanish().isVanished(e.getSender().getUuid())
+                    && isPublic(e)) {
                 atlas.addChat(e.getSender().getUuid(), e.getSender().getUsername(), e.getContent());
             }
         } catch (RuntimeException ex) {
@@ -793,6 +795,10 @@ public final class AtlasPlugin extends JavaPlugin {
         try {
             PlayerRef ref = e.getPlayerRef();
             if (ref == null || ref.getUuid() == null) {
+                return;
+            }
+            if (atlas.vanish().isVanished(ref.getUuid())) {
+                // Their last seen was recorded when they vanished.
                 return;
             }
             String world = null;
@@ -1101,6 +1107,9 @@ public final class AtlasPlugin extends JavaPlugin {
         out.add(line("ChronicleStats", "chronicle " + cfg.chronicleMode().key(), found -> (atlas.chronicle().off() ? "is left alone"
                 : atlas.chronicle().available() ? "fills the Chronicle tab from its export"
                 : "has written no export yet") + layers("Ryvrook:ChronicleStats"), "no Chronicle tab"));
+        out.add(line("VanishBridge", "vanish " + cfg.vanishMode().key(), found -> cfg.vanishMode() == dev.ryvrook.atlas.config.TrackerMode.NEVER
+                ? "is left alone" : atlas.vanish().bound() ? "leaves vanished players out of the live map and the online counts"
+                : "runs but did not answer yet", "every online player shows"));
         out.add(line("Lullaby", null, found -> "runs and has no link with Atlas", "nothing changes"));
         out.add(line("SocialBridge", null, found -> "reads the map address, hidden players and link codes through AtlasApi" + layers("Ryvrook:SocialBridge"),
                 "nothing changes"));

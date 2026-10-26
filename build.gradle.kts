@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "dev.ryvrook"
-version = "1.9.1"
+version = "1.9.2"
 
 val hytaleChannel = (project.findProperty("hytale_channel") as String?) ?: "release"
 val hytaleVersion = (project.findProperty("hytale_version") as String?) ?: "0.7.1"

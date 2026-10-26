@@ -63,6 +63,8 @@ public final class Atlas {
     private final long startedAt = System.currentTimeMillis();
     private final DominionSnapshot snapshot;
     private final LiveState live = new LiveState();
+    private final dev.ryvrook.atlas.integration.VanishLink vanish =
+            new dev.ryvrook.atlas.integration.VanishLink(() -> config.vanishMode());
     private final HeatTracker heat;
     private final LinkService links;
     private final TileService tiles;
@@ -113,6 +115,9 @@ public final class Atlas {
         this.markerRoutes = new MarkerRoutes(this, markers);
         this.sessionApi = new dev.ryvrook.atlas.auth.SessionService(links, this::hiddenPlayers);
         live.setHideRules(config.hidePlayersCrouching, config.hidePlayersInvisible);
+        // A vanished player counts as offline, so vanishing reads as leaving and coming back as joining.
+        live.setOffline(vanish::isVanished);
+        live.onVanish(p -> recordLastSeen(p.uuid(), p.name(), p.world(), p.x(), p.y(), p.z()));
         // Timeline events. Names are recorded as they are, the hidden rule is applied when they are served.
         live.onJoin(p -> {
             Double[] at = eventPlace(p.uuid(), p.world(), p.x(), p.y(), p.z());
@@ -220,6 +225,10 @@ public final class Atlas {
 
     public LiveState live() {
         return live;
+    }
+
+    public dev.ryvrook.atlas.integration.VanishLink vanish() {
+        return vanish;
     }
 
     public HeatTracker heat() {
@@ -937,7 +946,7 @@ public final class Atlas {
                 o.addProperty("displayName", display);
                 o.addProperty("hiddenWorld", hiddenWorld(v, name));
                 o.add("portal", portalJson(kind.portal()));
-                Payloads.put(o, "players", showCounts ? (Number) w.getPlayerCount() : null);
+                Payloads.put(o, "players", showCounts ? (Number) live.visibleCount(w) : null);
                 if (info != null && info.spawn() != null && (rules == null || !rules.spawnHidden())) {
                     JsonObject s = new JsonObject();
                     s.addProperty("x", Math.round(info.spawn()[0]));
@@ -1363,7 +1372,7 @@ public final class Atlas {
         DominionSnapshot.View view = snapshot.view();
         Universe u = Universe.get();
         out.addProperty("at", now);
-        out.addProperty("online", u == null ? 0 : u.getPlayerCount());
+        out.addProperty("online", u == null ? 0 : live.visibleCount());
         out.addProperty("worlds", u == null ? 0 : u.getWorlds().size());
         out.addProperty("uptimeSeconds", (now - startedAt) / 1000);
         JsonObject snap = new JsonObject();
