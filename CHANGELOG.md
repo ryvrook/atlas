@@ -4,6 +4,16 @@ Every release keeps the values an existing `atlas.json` already holds. Keys a re
 filled in with their defaults and written back on the next start. Changed defaults only apply to
 new files.
 
+## 1.9.3 - 2026-10-30
+
+### Fixes
+
+- Timeline snapshots kept old pictures at the two closest zoom levels. Those tiles were deleted whenever the ground
+  under them changed and were only drawn again when someone looked at that spot on the live map, so every snapshot
+  after that carried the last copy it had. They are now drawn again in the background right after the tile above
+  them, while the timeline is on. Snapshots taken before this release keep the old pictures. Run
+  `/atlas tiles rerender <world>` once to bring every close tile up to date for the next snapshot.
+
 ## 1.9.2 - 2026-10-26
 
 ### For admins

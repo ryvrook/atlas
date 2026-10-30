@@ -1229,6 +1229,7 @@ public final class TileService {
                     writeTile(wt.name, 0, tx, tz, png, started);
                     rounds.remove(key);
                     invalidateRelated(wt, tx, tz, true);
+                    renderCloser(world, wt, tx, tz);
                 }
                 return;
             }
@@ -1676,6 +1677,48 @@ public final class TileService {
     }
 
     /** Drops the cached lower and upper levels of a zoom 0 tile and tells listeners which tiles changed. */
+    /**
+     * Draws the zoom -1 and -2 tiles under a zoom 0 tile that was just drawn again, while its chunk
+     * images are still in memory. invalidateRelated deletes them, and they were otherwise drawn again
+     * only when a browser asked, so timeline snapshots, which read the tile folder, kept carrying old
+     * copies of the closer zooms. Only done while the timeline is on. A tile that cannot be finished
+     * from the background budget is left for a browser request as before.
+     */
+    private void renderCloser(World world, WorldTiles wt, int tx, int tz) {
+        AtlasConfig c = cfg();
+        if (c != null && !c.timelineEnabled()) {
+            return;
+        }
+        for (int zoom = -1; zoom >= MIN_ZOOM; zoom--) {
+            int span = 1 << -zoom;
+            int cpt = ExploredIndex.chunksPerTile(zoom);
+            for (int dz = 0; dz < span; dz++) {
+                for (int dx = 0; dx < span; dx++) {
+                    int x = tx * span + dx;
+                    int z = tz * span + dz;
+                    if (!allowed(wt.name, zoom, x, z) || !wt.explored.hasTile(zoom, x, z)) {
+                        continue;
+                    }
+                    if (!awaitBackgroundBudget()) {
+                        return;
+                    }
+                    long started = System.currentTimeMillis();
+                    Budget b = new Budget(cpt * cpt, 20_000, true);
+                    int[] missing = new int[1];
+                    int[] argb = renderBase(world, wt, zoom, x, z, b, missing);
+                    if (missing[0] != 0) {
+                        continue;
+                    }
+                    byte[] png = encodePng(argb);
+                    if (png != null) {
+                        memory.put(key(wt.name, zoom, x, z), entry(png, false, started));
+                        writeTile(wt.name, zoom, x, z, png, started);
+                    }
+                }
+            }
+        }
+    }
+
     private void invalidateRelated(WorldTiles wt, int tx, int tz, boolean notify) {
         List<int[]> changed = new ArrayList<>();
         for (int[] r : related(tx, tz)) {
